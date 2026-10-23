@@ -202,7 +202,7 @@ class FlipSim {
     const B = 8 + F.length; u32[B] = this.lcap; u32[B + 1] = this.tx; u32[B + 2] = this.ty; u32[B + 3] = this.tz; u32[B + 4] = this.scap;
     const sp = o.spr || null, on = !!sp && this.sprayCap > 0;
     f32[B + 5] = o.tear || 0; f32[B + 6] = on ? sp.rate : 0; f32[B + 7] = on ? Math.max(0.05, sp.min) : 1; f32[B + 8] = on ? sp.life : 1; f32[B + 9] = on ? sp.mist : 0;
-    f32[B + 10] = on ? sp.drag : 1; f32[B + 11] = on ? sp.mdrag : 4; f32[B + 12] = o.vs || 1;
+    f32[B + 10] = on ? sp.drag : 1; f32[B + 11] = on ? sp.mdrag : 4; f32[B + 12] = o.vs || 1; if (!this.only) this.vs = o.vs || 1;
     u32[B + 13] = this.sprayCap; u32[B + 14] = this.stride <= 1 ? N : Math.ceil(N / this.stride); u32[B + 15] = this.sprDispMax;
     if (!this.only) this.seed = (this.seed + 1) >>> 0; u32[B + 16] = this.seed;
     this.sprOnStep = on;
@@ -387,7 +387,7 @@ class FlipSim {
     const L = this.packLayout(nW, spr ? this.sprDispMax : 0, deep ? FLIP_DEEPMAX : 0);
     const b = this.b, u = new ArrayBuffer(96), u32 = new Uint32Array(u), f32 = new Float32Array(u);
     u32.set([L.nW, L.nS, L.nD, fromPos ? 1 : 0, nW, deep ? Math.round(this.pf32[62]) : 0, L.oWp, L.oWs, L.oWf, L.oSp, L.oSk, L.oDp, L.oDs, 0, 0, 0]);
-    f32.set([b.x0, b.y0, b.z0, 65535 / (b.x1 - b.x0), 65535 / (b.y1 - b.y0), 65535 / (b.z1 - b.z0), 0, 0], 16);
+    f32.set([b.x0, b.y0, b.z0, 65535 / (b.x1 - b.x0), 65535 / (b.y1 - b.y0), 65535 / (b.z1 - b.z0), this.vs || 1, 0], 16);
     this.dev.queue.writeBuffer(this.bPackU, 0, u);
     const run = (ps, name, items) => { const p = this.pipes[name], g = Math.ceil(items / 256); ps.setPipeline(p.pipeline); ps.setBindGroup(0, p.bg); ps.dispatchWorkgroups(Math.max(1, Math.min(g, 65535)), Math.max(1, Math.ceil(g / 65535))); };
     const ps = enc.beginComputePass();

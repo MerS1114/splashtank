@@ -66,7 +66,7 @@ fn gv0W(f: u32, v: f32) { atomicStore(&accW[f], bitcast<i32>(v)); }
 @group(0) @binding(36) var<storage, read_write> drip: array<vec4<f32>>;
 // the live view packed the way cache frames are stored (see packDisp): 16-bit positions across the box, a speed byte and a white-water byte
 struct PackU { nW: u32, nS: u32, nD: u32, wFromPos: u32, srcS: u32, srcD: u32, oWp: u32, oWs: u32, oWf: u32, oSp: u32, oSk: u32, oDp: u32, oDs: u32, pad0: u32, pad1: u32, pad2: u32,
-  x0: f32, y0: f32, z0: f32, kx: f32, ky: f32, kz: f32, pad3: f32, pad4: f32 };
+  x0: f32, y0: f32, z0: f32, kx: f32, ky: f32, kz: f32, vs: f32, pad4: f32 };   // vs: metres per scene unit (speed bytes in 16ths of m/s)
 @group(0) @binding(37) var<storage, read_write> packOut: array<u32>;
 @group(0) @binding(38) var<uniform> PK: PackU;      // per drip sample: (local position, collider), (local normal, wetness)   // the grid velocity kept from the last step (narrow band)
 ${SDF_WGSL}

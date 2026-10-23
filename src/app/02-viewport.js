@@ -73,9 +73,9 @@
   const TYPE_COL = { water: [0.16, 0.46, 0.96], churn: [0.55, 0.85, 0.97], foam: [0.98, 0.98, 0.98], spray: [1.0, 0.6, 0.16], mist: [0.86, 0.56, 1.0], deep: [0.07, 0.2, 0.52], bubble: [0.25, 0.85, 0.6] };
   const v3 = (c) => 'vec3(' + c.map((x) => x.toFixed(3)).join(',') + ')';
   const U = { uSize: { value: 0.1 }, uScale: { value: 600 }, uMax: { value: S.vmax }, uFoam: { value: S.foam }, uOrtho: { value: 0 }, uMode: { value: 0 },
-    uD: { value: 0.04 }, uCR: { value: 2 }, uKw: { value: 0 }, uKs: { value: 4 }, uStreak: { value: 0.02 } };
+    uD: { value: 0.04 }, uCR: { value: 2 }, uKw: { value: 0 }, uKs: { value: 4 }, uStreak: { value: 0.02 }, uVs: { value: 1 } };
   const tex = () => ({ value: null }), num = (v) => ({ value: v || 0 }), vec = () => ({ value: new THREE.Vector3() });
-  const VHEAD = 'uniform float uSize; uniform float uScale; uniform float uFoam; uniform float uOrtho; uniform float uD; uniform float uCR; uniform float uKw; uniform float uKs; uniform float uStreak; uniform float uK1;' +
+  const VHEAD = 'uniform float uSize; uniform float uScale; uniform float uFoam; uniform float uOrtho; uniform float uD; uniform float uCR; uniform float uKw; uniform float uKs; uniform float uStreak; uniform float uK1; uniform float uVs;' +
     ' varying float vS; varying float vF; varying float vK; varying float vL;' +
     ' uint hsh(uint x) { x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u; return x; }' +
     ' vec3 ball(uint s) { vec3 r = vec3(float(hsh(s) & 65535u), float(hsh(s + 7919u) & 65535u), float(hsh(s + 104729u) & 65535u)) / 32767.5 - 1.0; float l = length(r); return l > 1.0 ? r / l : r; }' +
@@ -93,7 +93,7 @@
     // a slot can be a different particle in the next frame (narrow band reseeding reuses slots): if it is further than it could have moved,
     // it is not blended but switches halfway, so nothing streaks across the water
     '  vec3 pa = va ? vec3(texelFetch(tPA, tc, 0).xyz) * uQA + uB0A : vec3(0.0); vec3 pb = vb ? vec3(texelFetch(tPB, tc, 0).xyz) * uQB + uB0B : vec3(0.0);' +
-    '  if (va && vb && length(pb - pa) > max(float(sa), float(sb)) / 16.0 * 2.0 * uFdt + 3.0 * uD) { if (uBlend < 0.5) vb = false; else va = false; }' +
+    '  float sm = max(float(sa), float(sb)); if (va && vb && sm < 191.0 && length(pb - pa) > sm / 16.0 / uVs * 2.0 * uFdt + 3.0 * uD) { if (uBlend < 0.5) vb = false; else va = false; }' +
     '  if (va && vb) { p = mix(pa, pb, uBlend); spd = mix(float(sa), float(sb), uBlend) / 16.0; lv = floor(mix(la, lb, uBlend) + 0.5); }' +
     '  else if (va && uBlend < 0.5) { p = pa; spd = float(sa) / 16.0; lv = la; }' +
     '  else if (vb) { p = pb; spd = float(sb) / 16.0; lv = lb; }' +

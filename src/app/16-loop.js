@@ -60,7 +60,7 @@
         S.ct += dt * c.fps * S.cspeed;
         if (S.ct >= lastF) { if (S.cloop) S.ct = S.ct % lastF; else { S.ct = lastF; setCPlay(false); } }
       }
-      pmat.uniforms.uMax.value = S.vmax / (c.scale || 1); pmat.uniforms.uSize.value = S.psize * c.d; points.position.set((c.org || S.org).x, (c.org || S.org).y, (c.org || S.org).z);
+      { const vs = c.spdMs ? c.scale || 1 : 1; pmat.uniforms.uVs.value = vs; pmat.uniforms.uMax.value = S.vmax * vs / (c.scale || 1); } pmat.uniforms.uSize.value = S.psize * c.d; points.position.set((c.org || S.org).x, (c.org || S.org).y, (c.org || S.org).z);
       count = showCache(S.ct);
       updatePlayhead();
       uiT += dt;
@@ -79,7 +79,7 @@
       }
       if (S.lcPlay) {
         count = lcShow(); S.tl.t = S.lcT / 60;
-        pmat.uniforms.uMax.value = S.vmax / (LC.scale || 1); pmat.uniforms.uSize.value = S.psize * LC.d; points.position.set(LC.org.x, LC.org.y, LC.org.z);
+        pmat.uniforms.uVs.value = LC.scale || 1; pmat.uniforms.uMax.value = S.vmax; pmat.uniforms.uSize.value = S.psize * LC.d; points.position.set(LC.org.x, LC.org.y, LC.org.z);
         uiT += dt;
         if (uiT > 0.2) { uiT = 0; $('#frame').textContent = String(Math.floor((S.lcT / 60) * 24) + 1).padStart(4, '0'); updatePlayhead(); $('#count').textContent = count; $('#fps').textContent = Math.round(fpsE); $('#ms').textContent = '— (cache)'; }
       }
@@ -103,7 +103,7 @@
         sim.pump();
         if (sim.gen !== lastGen || SLOTS[liveI].key !== 'live') {
           const t0 = performance.now();
-          const fr = S.engine === 'flip' ? sim.outFrame : (sim.outN ? packFrameBuf(rawBuf, sim.outN, sim.b, []) : null);
+          const fr = S.engine === 'flip' ? sim.outFrame : (sim.outN ? packFrameBuf(rawBuf, sim.outN, sim.b, [], S.scale) : null);
           if (sim.gen !== lastGen) lcRecord(fr);
           lastCount = liveLoad(fr, sim.b, 'live').alive; lastGen = sim.gen; fresh = true;
           perf.build = performance.now() - t0 - perf.up;
@@ -112,10 +112,10 @@
         S.ms = sim.lastMs;
       }
       else {
-        count = liveLoad(packCpuFrame(sim.P, sim.S, sim.N, sim.b), sim.b, 'live').alive; fresh = true;
+        count = liveLoad(packCpuFrame(sim.P, sim.S, sim.N, sim.b, S.scale), sim.b, 'live').alive; fresh = true;
       }
       showSlots(liveI, liveI, 0); pmat.uniforms.uD.value = S.liveD; pmat.uniforms.uCR.value = S.cellRatio;
-      pmat.uniforms.uMax.value = S.vmax / (S.scale || 1); pmat.uniforms.uSize.value = S.psize * S.liveD; points.position.set(S.simOrg.x, S.simOrg.y, S.simOrg.z);
+      pmat.uniforms.uVs.value = S.scale || 1; pmat.uniforms.uMax.value = S.vmax; pmat.uniforms.uSize.value = S.psize * S.liveD; points.position.set(S.simOrg.x, S.simOrg.y, S.simOrg.z);
       uiT += dt;
       if (uiT > 0.2) {
         uiT = 0;

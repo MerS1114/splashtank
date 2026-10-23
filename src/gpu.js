@@ -508,8 +508,9 @@ async function initGpu() {
   } catch (e) { return null; }
 }
 
-// narrow band look only: deep water points (x, y, z, 4096 + speed) -> positions across the box and speed in 16ths
-function packDeep(p, n, b) {
+// narrow band look only: deep water points (x, y, z, 4096 + speed) -> positions across the box and speed in 16ths of m/s (vs: metres per unit)
+function packDeep(p, n, b, vs) {
+  const ks = 16 * (vs || 1);
   const pos = new Uint16Array(n * 3), spd = new Uint8Array(n);
   const kx = 65535 / (b.x1 - b.x0), ky = 65535 / (b.y1 - b.y0), kz = 65535 / (b.z1 - b.z0);
   let k = 0;
@@ -517,16 +518,17 @@ function packDeep(p, n, b) {
     const i4 = i * 4; if (p[i4 + 1] <= -1e5) continue;
     pos[k * 3] = Math.max(0, Math.min(65535, Math.round((p[i4] - b.x0) * kx))); pos[k * 3 + 1] = Math.max(0, Math.min(65535, Math.round((p[i4 + 1] - b.y0) * ky)));
     pos[k * 3 + 2] = Math.max(0, Math.min(65535, Math.round((p[i4 + 2] - b.z0) * kz)));
-    const s = (p[i4 + 3] - 4096) * 16; spd[k++] = s > 191 ? 191 : Math.max(0, s);
+    const s = (p[i4 + 3] - 4096) * ks; spd[k++] = s > 191 ? 191 : Math.max(0, s);
   }
   return { n: k, pos: k < n ? pos.slice(0, k * 3) : pos, spd: k < n ? spd.slice(0, k) : spd };
 }
-function packFrameBuf(buf, n, b, states) {
+function packFrameBuf(buf, n, b, states, vs) {
+  const ks = 16 * (vs || 1);
   const U = new Uint32Array(buf.buffer, buf.byteOffset, buf.length);
   // spray points from the live view go to their own list, and so do deep water points (narrow band, look only); the empty slots after the water are dropped
   let ns = 0, last = -1, nd = 0, d0 = -1;
   for (let i = 0; i < n; i++) { if (buf[i * 4 + 1] <= -1e5) continue; if (U[i * 4 + 3] >= 0x80000000) ns++; else if (buf[i * 4 + 3] >= 4096) { nd++; if (d0 < 0) d0 = i; } else last = i; }
-  const dp = nd ? packDeep(buf.subarray(d0 * 4, n * 4), n - d0, b) : null;
+  const dp = nd ? packDeep(buf.subarray(d0 * 4, n * 4), n - d0, b, vs) : null;
   const nAll = n; n = last + 1;
   const pos = new Uint16Array(n * 3), spd = new Uint8Array(n), fm = new Uint8Array(n);
   const sp = ns ? { n: ns, pos: new Uint16Array(ns * 3), pk: new Uint32Array(ns), alive: ns } : null; let si = 0;
@@ -547,7 +549,7 @@ function packFrameBuf(buf, n, b, states) {
     pos[i3 + 2] = Math.max(0, Math.min(65535, Math.round((buf[i4 + 2] - b.z0) * kz)));
     // the solver packs speed (below 64) and a white water level (0 to 15) into one number
     const w = buf[i4 + 3], lv = Math.floor(w / 64), spv = w - lv * 64;
-    const s = spv * 16; spd[i] = s > 191 ? 191 : s;
+    const s = spv * ks; spd[i] = s > 191 ? 191 : s;
     if (lv) { fm[i] = lv * 17; anyFoam = true; }
   }
   const objs = packObjs(states);
@@ -573,7 +575,7 @@ async function runBakeGpu(desc, gpu, onFrame, isCancelled) {
   const t0 = Date.now();
   const sampleAll = (t) => desc.objs.map((o) => sampleObjState(o, t));
   let n = await sim.readbackInto(dst);
-  onFrame(packFrameBuf(dst, n, sim.b, sampleAll(0)), { f: 0, F, n, elapsed: 0, full: false });
+  onFrame(packFrameBuf(dst, n, sim.b, sampleAll(0), desc.scale), { f: 0, F, n, elapsed: 0, full: false });
   let ok = true;
   for (let f = 1; f <= F; f++) {
     for (let s = 0; s < sub; s++) {
@@ -582,7 +584,7 @@ async function runBakeGpu(desc, gpu, onFrame, isCancelled) {
       runner.step(dt, sampleAll(t), { g: desc.g, iters: desc.iters, visc: desc.visc, colMax: desc.colMax, scale: desc.scale || 1 });
     }
     n = await sim.readbackInto(dst);
-    onFrame(packFrameBuf(dst, n, sim.b, sampleAll(f / fps)), { f, F, n, elapsed: (Date.now() - t0) / 1000, full: sim.N >= sim.cap });
+    onFrame(packFrameBuf(dst, n, sim.b, sampleAll(f / fps), desc.scale), { f, F, n, elapsed: (Date.now() - t0) / 1000, full: sim.N >= sim.cap });
     if (isCancelled()) { ok = false; break; }
     await new Promise((r) => setTimeout(r, 0));
   }

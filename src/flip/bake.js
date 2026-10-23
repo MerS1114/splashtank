@@ -101,7 +101,7 @@ async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
   for (const o of sampleAll(0)) if (o.kind === 'emitter') vmax = Math.max(vmax, o.speed || 0);
   if (sim.N > 0) await sim.prime({ g: desc.g, iters: desc.iters, cols: [] });   // size the block pool for the starting water
   let n = await sim.readbackInto(dst);
-  onFrame(packFrameBuf(dst, n, sim.b, sampleAll(0)), { f: 0, F, n, elapsed: 0, full: false, diag: Object.assign(bakeDiag(dst, n, sim.b, desc.vmaxW), { sub: 0, blockPool: sim.scap }) });
+  onFrame(packFrameBuf(dst, n, sim.b, sampleAll(0), desc.scale), { f: 0, F, n, elapsed: 0, full: false, diag: Object.assign(bakeDiag(dst, n, sim.b, desc.vmaxW), { sub: 0, blockPool: sim.scap }) });
   let ok = true;
   for (let f = 1; f <= F; f++) {
     const objV = objSpeed(sampleAll((f - 1) * dtF), sampleAll(f * dtF), dtF, desc.colMax);   // objects' own motion during this frame is known ahead
@@ -120,9 +120,9 @@ async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
     const st = sim.stats || {};
     const diag = Object.assign(bakeDiag(dst, n, sim.b, desc.vmaxW), { sub, objectSpeed: objV, fastestParticle: st.vmax, fluidCells: st.fluid, blocksUsed: st.sc, blockPool: sim.scap,
       blocksNoRoom: (sim.ovfTotal || 0) - ovf0, ms: performance.now() - tf0 });
-    const frame = packFrameBuf(dst, n, sim.b, sampleAll(f * dtF));
+    const frame = packFrameBuf(dst, n, sim.b, sampleAll(f * dtF), desc.scale);
     if (sim.sprayCap) { const sd = await sim.readSpray(); if (sd) { frame.sp = packSprayFrame(sd, sim.b, 200000, (desc.spr && desc.spr.ww && desc.spr.ww.foamLife) || 3); diag.sprayPoints = frame.sp.alive; } }
-    if (desc.nbLook) { const dd = await sim.readDeep(); if (dd && dd.n) { frame.dp = packDeep(dd.p, dd.n, sim.b); diag.deepPoints = dd.n; } }
+    if (desc.nbLook) { const dd = await sim.readDeep(); if (dd && dd.n) { frame.dp = packDeep(dd.p, dd.n, sim.b, desc.scale); diag.deepPoints = dd.n; } }
     onFrame(frame, { f, F, n, elapsed: (Date.now() - t0) / 1000, full: sim.N >= sim.cap, sub, diag });
     if (isCancelled()) { ok = false; break; }
     await new Promise((r) => setTimeout(r, 0));

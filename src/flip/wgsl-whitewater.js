@@ -227,7 +227,7 @@ fn packDisp(@builtin(global_invocation_id) g: vec3<u32>) {
       let i = t * 4u + m; var v = vec4<f32>(0.0, -1.0e6, 0.0, 0.0);
       if (i < PK.nW) { if (PK.wFromPos != 0u) { v = pos[i]; } else { v = disp[i]; } }
       var s = 255u; var f = 0u; q[m] = vec3<u32>(0u);
-      if (v.y > DEADY) { q[m] = q16(v.xyz); let lv = floor(v.w / 64.0); s = u32(clamp((v.w - lv * 64.0) * 16.0, 0.0, 191.0)); f = u32(clamp(lv, 0.0, 15.0)) * 17u; }
+      if (v.y > DEADY) { q[m] = q16(v.xyz); let lv = floor(v.w / 64.0); s = u32(clamp((v.w - lv * 64.0) * 16.0 * PK.vs, 0.0, 191.0)); f = u32(clamp(lv, 0.0, 15.0)) * 17u; }
       b0 = b0 | (s << (8u * m)); b1 = b1 | (f << (8u * m));
     }
     put6(PK.oWp + t * 6u, q); packOut[PK.oWs + t] = b0; packOut[PK.oWf + t] = b1; return;
@@ -245,7 +245,7 @@ fn packDisp(@builtin(global_invocation_id) g: vec3<u32>) {
   if (td < gD) {
     for (var m = 0u; m < 4u; m++) {
       let k = td * 4u + m; var s = 255u; q[m] = vec3<u32>(0u);
-      if (k < nD) { let v = disp[PK.srcD + k]; if (v.y > DEADY) { q[m] = q16(v.xyz); s = u32(clamp((v.w - 4096.0) * 16.0, 0.0, 191.0)); } }
+      if (k < nD) { let v = disp[PK.srcD + k]; if (v.y > DEADY) { q[m] = q16(v.xyz); s = u32(clamp((v.w - 4096.0) * 16.0 * PK.vs, 0.0, 191.0)); } }
       b0 = b0 | (s << (8u * m));
     }
     put6(PK.oDp + td * 6u, q); packOut[PK.oDs + td] = b0;

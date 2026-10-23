@@ -1,6 +1,6 @@
   // ---------- what is drawn ----------
   // Every view (live, live cache, bake) draws a frame in the cache format: water positions as 16 bits across the box (pos), a speed byte in
-  // 16ths (spd, 255 = gone) and a white-water byte (fm); whitewater positions and 32-bit codes (sp, see packSpray in flip.js); deep water
+  // 16ths of m/s (spd, 255 = gone; caches without spdMs hold 16ths of a scene unit per second) and a white-water byte (fm); whitewater positions and 32-bit codes (sp, see packSpray in flip.js); deep water
   // positions and speed bytes (dp, narrow band look only). A frame goes to the GPU as it is, into integer textures one texel per point and
   // 2048 wide: water from row 0, then deep water, then whitewater. The shaders turn the bytes back into points and make the look-only
   // extras (fixed random offsets from a hash of the point's number), so the CPU never goes over the points one by one.
@@ -20,13 +20,14 @@
     }
     return fr._alive + (show && fr.sp ? fr.sp.n : 0);
   }
-  // the CPU solver's particles as a frame
-  function packCpuFrame(P, Sp, n, b) {
+  // the CPU solver's particles as a frame (vs: metres per scene unit, so the speed bytes are in m/s)
+  function packCpuFrame(P, Sp, n, b, vs) {
+    const k = 16 * (vs || 1);
     const pos = new Uint16Array(n * 3), spd = new Uint8Array(n), kx = 65535 / (b.x1 - b.x0), ky = 65535 / (b.y1 - b.y0), kz = 65535 / (b.z1 - b.z0);
     for (let i = 0; i < n; i++) {
       const i3 = i * 3; if (P[i3 + 1] < -1e5) { spd[i] = 255; continue; }
       pos[i3] = clamp(Math.round((P[i3] - b.x0) * kx), 0, 65535); pos[i3 + 1] = clamp(Math.round((P[i3 + 1] - b.y0) * ky), 0, 65535); pos[i3 + 2] = clamp(Math.round((P[i3 + 2] - b.z0) * kz), 0, 65535);
-      spd[i] = Math.min(191, Sp[i] * 16);
+      spd[i] = Math.min(191, Sp[i] * k);
     }
     return { n, pos, spd, b };
   }

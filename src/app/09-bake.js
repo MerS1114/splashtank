@@ -59,7 +59,7 @@
     if (!desc.frames) return;
     if (isGpu() && gridCost(desc.d, S.cellRatio, desc.maxN).biggest > (S.gpu ? S.gpu.maxBuf : 1 << 27)) { $('#bake-status').textContent = 'That bake does not fit in one GPU buffer here. Pick less detail or lower Max points.'; flash('Bake too big for this GPU.'); return; }
     const cache = { b: { x0: -W / 2, x1: W / 2, y0: 0, y1: Hh, z0: -Dd / 2, z1: Dd / 2 }, org: Object.assign({}, S.org), fps: desc.fps, d: desc.d, frames: [], maxN: 0, ids: desc.objs.map((o) => o.id), seconds: 0, startedAt: Date.now(),
-      engine: S.engine, scene: sceneData(), desc: lightDesc(desc), diag: [], stableIds: true, scale: S.scale || 1 };
+      engine: S.engine, scene: sceneData(), desc: lightDesc(desc), diag: [], stableIds: true, scale: S.scale || 1, spdMs: true };
     S.baking = true; setBakeUI(true); S.bakeT = 0;
     // the bake shows in the viewport as it goes: it becomes the cache straight away and the view follows the newest frame
     cache.partial = true; cache.total = desc.frames; cache.prev = S.cache; S.cache = cache; S.tab = 'bake'; S.ct = 0; S.cfollow = true; setCPlay(true);
@@ -120,7 +120,7 @@
     for (let i = 0; i < fr.n; i++) {
       if (fr.spd[i] === 255) continue;
       alive++;
-      const x = fr.pos[i * 3] * qx + b.x0, y = fr.pos[i * 3 + 1] * qy + b.y0, z = fr.pos[i * 3 + 2] * qz + b.z0, sp = fr.spd[i] / 16;
+      const x = fr.pos[i * 3] * qx + b.x0, y = fr.pos[i * 3 + 1] * qy + b.y0, z = fr.pos[i * 3 + 2] * qz + b.z0, sp = fr.spd[i] / 16 / (c.spdMs ? c.scale || 1 : 1);
       sx += x; sy += y; sz += z; ss += sp; if (sp > smax) smax = sp; if (fr.fm) fl += fr.fm[i] / 255;
       if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; if (z < z0) z0 = z; if (z > z1) z1 = z;
       hist[Math.max(0, Math.min(H - 1, Math.floor((y - b.y0) / ((b.y1 - b.y0) / H))))]++;
@@ -133,12 +133,12 @@
     const rnd = (v) => (typeof v === 'number' ? Math.round(v * 1e4) / 1e4 : Array.isArray(v) ? v.map(rnd) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, q]) => [k, rnd(q)])) : v);
     const per = c.diag && c.diag.length ? c.diag : c.frames.map((fr, f) => Object.assign({ f, t: f / c.fps }, frameStats(fr, c)));
     const names = {}; ((c.scene && c.scene.objs) || []).forEach((o) => { names[o.id] = o.name || o.shape; });
-    // a sample of points at about ten frames: x, y, z, speed (16ths of m/s, stored up to about 12 m/s), white water 0..1
+    // a sample of points at about ten frames: x, y, z, speed (m/s, stored up to about 12 m/s), white water 0..1
     const b = c.b || DEFB, qx = (b.x1 - b.x0) / 65535, qy = (b.y1 - b.y0) / 65535, qz = (b.z1 - b.z0) / 65535, F = c.frames.length, picks = new Set();
     for (let k = 0; k < 10; k++) picks.add(Math.round((k / 9) * (F - 1)));
     const snapshots = [...picks].map((f) => {
       const fr = c.frames[f], step = Math.max(1, Math.ceil(fr.n / 3000)), pts = [];
-      for (let i = 0; i < fr.n; i += step) { if (fr.spd[i] === 255) continue; pts.push([fr.pos[i * 3] * qx + b.x0, fr.pos[i * 3 + 1] * qy + b.y0, fr.pos[i * 3 + 2] * qz + b.z0, fr.spd[i] / 16, fr.fm ? fr.fm[i] / 255 : 0]); }
+      for (let i = 0; i < fr.n; i += step) { if (fr.spd[i] === 255) continue; pts.push([fr.pos[i * 3] * qx + b.x0, fr.pos[i * 3 + 1] * qy + b.y0, fr.pos[i * 3 + 2] * qz + b.z0, fr.spd[i] / 16 * (c.spdMs ? 1 : c.scale || 1), fr.fm ? fr.fm[i] / 255 : 0]); }
       return { f, t: f / c.fps, points: fr.n, every: step, sample: pts };
     });
     const rep = {

@@ -636,8 +636,8 @@ function sampleObjState(o, t) {
   return s;
 }
 
-function packFrame(sim, states) {
-  const n = sim.N, b = sim.b, P = sim.P, S = sim.S;
+function packFrame(sim, states, vs) {
+  const k = 16 * (vs || 1), n = sim.N, b = sim.b, P = sim.P, S = sim.S;
   const pos = new Uint16Array(n * 3), spd = new Uint8Array(n);
   const kx = 65535 / (b.x1 - b.x0), ky = 65535 / (b.y1 - b.y0), kz = 65535 / (b.z1 - b.z0);
   for (let i = 0; i < n; i++) {
@@ -647,7 +647,7 @@ function packFrame(sim, states) {
     pos[i3 + 1] = Math.max(0, Math.min(65535, Math.round((P[i3 + 1] - b.y0) * ky)));
     pos[i3 + 2] = Math.max(0, Math.min(65535, Math.round((P[i3 + 2] - b.z0) * kz)));
     if (P[i3 + 1] < FDEAD) { spd[i] = 255; continue; }
-    const s = S[i] * 16; spd[i] = s > 191 ? 191 : s;
+    const s = S[i] * k; spd[i] = s > 191 ? 191 : s;
   }
   return { n, pos, spd, objs: packObjs(states) };
 }
@@ -671,14 +671,14 @@ async function runBake(desc, onFrame, isCancelled) {
   const ev = desc.events.slice().sort((a, b) => a.t - b.t); let ei = 0;
   const t0 = Date.now();
   const sampleAll = (t) => desc.objs.map((o) => sampleObjState(o, t));
-  onFrame(packFrame(sim, sampleAll(0)), { f: 0, F, n: sim.N, elapsed: 0, full: false });
+  onFrame(packFrame(sim, sampleAll(0), desc.scale), { f: 0, F, n: sim.N, elapsed: 0, full: false });
   for (let f = 1; f <= F; f++) {
     for (let s = 0; s < sub; s++) {
       const t = ((f - 1) * sub + s + 1) * dt;
       while (ei < ev.length && ev[ei].t <= t) { const e = ev[ei++]; sim.fillSphere(e.x, e.y, e.z, e.r, 0, -1, 0); }
       runner.step(dt, sampleAll(t), { g: desc.g, iters: desc.iters, visc: desc.visc, colMax: desc.colMax, scale: desc.scale || 1 });
     }
-    onFrame(packFrame(sim, sampleAll(f / fps)), { f, F, n: sim.N, elapsed: (Date.now() - t0) / 1000, full: sim.N >= sim.cap });
+    onFrame(packFrame(sim, sampleAll(f / fps), desc.scale), { f, F, n: sim.N, elapsed: (Date.now() - t0) / 1000, full: sim.N >= sim.cap });
     if (isCancelled()) return false;
     await new Promise((r) => setTimeout(r, 0));
   }
@@ -687,9 +687,9 @@ async function runBake(desc, onFrame, isCancelled) {
 
 // Cache file, version 2: 'SPLC', 2, length of a JSON block (spacing, fps, object ids, box, scene, bake settings and measurements),
 // the JSON, padding to 4 bytes, frame count, then per frame: points, flags (1 = white water levels follow, 2 = spray follows, 4 = deep water points follow), object poses (6 floats each),
-// positions (3 x uint16 across the box), speed (uint8, 16ths of m/s), white water (uint8), padding to 4 bytes.
+// positions (3 x uint16 across the box), speed (uint8, 16ths of m/s; 16ths of a scene unit per second when the JSON has no spdMs), white water (uint8), padding to 4 bytes.
 function writeCacheParts(c) {
-  const meta = { d: c.d, fps: c.fps, ids: c.ids, b: c.b, org: c.org, maxN: c.maxN, seconds: c.seconds, engine: c.engine, scene: c.scene, desc: c.desc, diag: c.diag, stableIds: !!c.stableIds, scale: c.scale || 1 };
+  const meta = { d: c.d, fps: c.fps, ids: c.ids, b: c.b, org: c.org, maxN: c.maxN, seconds: c.seconds, engine: c.engine, scene: c.scene, desc: c.desc, diag: c.diag, stableIds: !!c.stableIds, scale: c.scale || 1, spdMs: !!c.spdMs };
   const mj = new TextEncoder().encode(JSON.stringify(meta)), pad = (k) => (4 - (k % 4)) % 4;
   const parts = [new Uint8Array([83, 80, 76, 67]), new Uint32Array([2, mj.length]), mj, new Uint8Array(pad(mj.length)), new Uint32Array([c.frames.length])];
   for (const fr of c.frames) {
