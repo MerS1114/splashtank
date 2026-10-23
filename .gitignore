@@ -4,3 +4,6 @@ test-output/
 *.splc
 __pycache__/
 scratch/
+.site-main/
+.site-test/
+site/

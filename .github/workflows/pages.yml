@@ -1,10 +1,12 @@
-# On every push to main: build dist/SplashTank.html, publish it to GitHub Pages, and run the smoke test.
+# On every push to main or a claude/* branch: build the site (main at the root, the newest claude/* branch at /testing/, see tools/site.sh),
+# publish it to GitHub Pages from main, and run the smoke test. Pushes to claude/* branches are published by testing-page.yml, which runs
+# after this one in main's context (the github-pages environment only lets main deploy).
 # One-time setup in the repo: Settings > Pages > Build and deployment > Source: GitHub Actions.
 name: Build, test and publish
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'claude/**']
   pull_request:
   workflow_dispatch:
 
@@ -22,17 +24,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run build
-      - name: Site files
-        run: |
-          mkdir -p site
-          cp dist/SplashTank.html site/SplashTank.html
-          cp dist/SplashTank.html site/index.html
+      - name: Site files (main at the root, newest claude/* branch at /testing/)
+        run: bash tools/site.sh
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site

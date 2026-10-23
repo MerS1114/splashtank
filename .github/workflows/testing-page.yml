@@ -1,0 +1,45 @@
+# Republishes the site after a push to a claude/* branch, so the testing page (/testing/) shows that branch.
+# Runs from main (workflow_run always does), which is what the github-pages environment allows to deploy.
+name: Publish testing page
+
+on:
+  workflow_run:
+    workflows: ['Build, test and publish']
+    types: [completed]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-testing
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: startsWith(github.event.workflow_run.head_branch, 'claude/') && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: bash tools/site.sh
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

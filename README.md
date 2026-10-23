@@ -4,6 +4,8 @@ A water simulator that runs in the browser: FLIP fluid on the GPU (WebGPU) with 
 
 **Open it:** https://mers1114.github.io/splashtank/ (Chrome or Edge with WebGPU). The same page works offline: download `SplashTank.html` from there and double-click it.
 
+**Testing version:** https://mers1114.github.io/splashtank/testing/ — the newest work in progress from Claude's branch, for trying out before it goes into the main page. An orange label in the bottom left corner says which branch and commit it is.
+
 ## For development
 
     npm install
