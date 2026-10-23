@@ -70,6 +70,7 @@ Done since (waiting for her rerun of the Smoothness test and the solver benchmar
 - The live view and live cache alternate between slots 0 and 4 (liveLoad, liveI), so an upload never rewrites textures the last draw may still read. Bake slots are 1 to 3 (NBSLOT).
 - perf.frame is timed from the start of frame(), not from the rAF timestamp.
 - Speed colours: speed bytes are now 16ths of m/s instead of 16ths of a scene unit, so big-scale scenes (Meteor lake, 6.7 m per unit) get about 80 colour steps up to 5 m/s instead of 12. Encoders take vs (metres per unit): packDisp (PK.vs), packFrameBuf, packDeep, packCpuFrame, packFrame. New caches carry spdMs.
+- Her rerun with these fixes (sent as a file, Meteor lake 0.03): pipelines ready in 0.8 s, no start stall; page work 0.7 ms a frame; live uploads 0.7 ms for 2.3 MB (was 4.7); 32 frames a second drawn. The sim itself is the bottleneck: solver step about 150 ms (median, slowest 616), 15% of real time. Waiting for her Solver benchmark (stage times) on that scene.
 - Next, once her numbers are in: the real per-step cost of her scene. Her 4 million whitewater pool: once that many slots have been handed out, every whitewater kernel runs over all of them each substep.
 
 ## FLIP solver, in brief
