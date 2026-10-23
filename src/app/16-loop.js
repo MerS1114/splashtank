@@ -44,6 +44,16 @@
 
   let last = performance.now(), acc = 0, fpsE = 60, uiT = 0, recUi = 0;
   const PREP = 'Preparing the GPU solver…';
+  // While the sim plays, the live view is redrawn only when something changed: a new frame from the sim, the camera moving, or any input in the last moments
+  // (and at least twice a second). Drawing shares the GPU with the solver: on Mer's Intel UHD 730 not drawing made a step about 40% faster,
+  // and redrawing the same water 33 times a second while the sim delivered 8 new frames only slowed the sim down.
+  let lastInput = 0, lastDraw = 0; const camWas = new Float32Array(17);
+  ['pointerdown', 'pointermove', 'pointerup', 'wheel', 'keydown', 'keyup', 'input', 'change', 'resize'].forEach((ev) => window.addEventListener(ev, () => { lastInput = performance.now(); }, { capture: true, passive: true }));
+  function camMoved() {
+    const m = camera.matrixWorld.elements, p = camera.projectionMatrix.elements; let moved = camWas[16] !== p[0] + p[5];
+    for (let i = 0; i < 16; i++) if (camWas[i] !== m[i]) { moved = true; camWas[i] = m[i]; }
+    camWas[16] = p[0] + p[5]; return moved;
+  }
   function frame(now) {
     const fs = performance.now();   // page work is timed from here, not from the rAF timestamp (which includes the wait before the callback)
     requestAnimationFrame(frame); stepCam();
@@ -134,7 +144,11 @@
     vpT += dt; if (vpT > 0.25) { vpT = 0; try { vpInfo(); } catch (e) { /* not ready */ } }
     placeHandles();
     oceanUpdate(mode);
-    const tr = performance.now(); if (!noDraw) renderer.render(scene, camera); perf.render = performance.now() - tr; perf.frame = performance.now() - fs;
-    if (frameHook) frameHook(performance.now());
+    camera.updateMatrixWorld();
+    const moved = camMoved(), t1 = performance.now();
+    const draw = !noDraw && (mode !== 'live' || !S.playing || S.lcPlay || !isGpu() || fresh || moved || t1 - lastInput < 400 || t1 - lastDraw > 500 || tf);
+    if (draw) { const tr = performance.now(); renderer.render(scene, camera); lastDraw = performance.now(); perf.render = lastDraw - tr; perf.draws = (perf.draws || 0) + 1; }
+    perf.frame = performance.now() - fs;
+    if (frameHook && draw) frameHook(performance.now());
   }
 

@@ -105,7 +105,7 @@
     });
     const report = (rec) => {
       const g = rec.gaps, slow = g.slice().sort((x, y) => y - x).slice(0, 5).map(f0).join(', ');
-      say('  ' + f1(g.length / rec.secs) + ' frames a second drawn. Typical frame ' + f0(pctl(g, 0.5)) + ' ms, 1 in 20 slower than ' + f0(pctl(g, 0.95)) + ' ms, slowest ' + slow + ' ms. Frames over 50 ms: ' + g.filter((v) => v > 50).length + ', over 100 ms: ' + g.filter((v) => v > 100).length + '.');
+      say('  ' + f1(g.length / rec.secs) + ' frames a second drawn (the live view is only redrawn when something changed, so these are the times between new pictures). Typical frame ' + f0(pctl(g, 0.5)) + ' ms, 1 in 20 slower than ' + f0(pctl(g, 0.95)) + ' ms, slowest ' + slow + ' ms. Frames over 50 ms: ' + g.filter((v) => v > 50).length + ', over 100 ms: ' + g.filter((v) => v > 100).length + '.');
       say('  Page work per frame ' + f1(avg(rec.js)) + ' ms on average (' + f1(pctl(rec.js, 0.95)) + ' ms for 1 in 20), of which handing it to the drawing ' + f1(avg(rec.render)) + ' ms.');
       if (rec.up.length) say('  New points sent to the drawing ' + rec.up.length + ' times, ' + f1(avg(rec.up)) + ' ms each (slowest ' + f1(Math.max(...rec.up)) + ' ms), about ' + f1(avg(rec.upMB)) + ' MB each.');
       if (rec.unpack.length) say('  Copying the GPU\'s points for the view: ' + f1(avg(rec.unpack)) + ' ms each.');
