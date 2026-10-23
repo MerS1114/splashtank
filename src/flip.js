@@ -712,6 +712,9 @@ fn packSpray(v: vec3<f32>, kind: u32, lifeFrac: f32) -> u32 {
   let u = u32(clamp(round((p.x * 0.5 + 0.5) * 1023.0), 0.0, 1023.0)); let w = u32(clamp(round((p.y * 0.5 + 0.5) * 1023.0), 0.0, 1023.0));
   return code | (w << 10u) | u;
 }
+// whitewater slots are handed out in order (a ring), so until the ring wraps only the first sctl[0] can be alive: work over just those
+@compute @workgroup_size(1)
+fn wwArgs() { split((min(atomicLoad(&sctl[0]), P.smax) + 255u) / 256u, 28u); }
 // an even sample of the whitewater slots for the live view, written after the water points
 @compute @workgroup_size(256)
 fn sprayDisp(@builtin(global_invocation_id) g: vec3<u32>) {
@@ -1064,7 +1067,7 @@ class FlipSim {
       tileReset: [12], tileNeedClear: [0, 17], tileMark: [0, 1, 17], tileMarkPhi: [0, 7, 12, 17, 18, 19], tileMarkFill: [0, 10, 11, 17], phiInitAll: [0, 7, 10, 11, 12, 18, 19, 31], tileFree: [0, 12, 16, 17, 20, 21], argsNew: [12, 14], tileAlloc: [0, 12, 16, 19, 20, 21], tileFix: [0, 12],
       initNew: [0, 7, 8, 10, 11, 12, 21, 31], slotListBuild: [0, 12, 16, 18], argsSlots: [12, 14], growFree: [12, 20, 25],
       sortClear: [22], sortHist: [0, 1, 22], sortScan: [22], sortScatter: [0, 1, 2, 22, 23, 24, 26, 27], sortCopy: [0, 1, 2, 23, 24, 26, 27], unsort: [0, 1, 23, 26],
-      clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], sprayStep: [0, 10, 11, 28, 29, 32, 33], sprayDisp: [0, 15, 28, 29], wwSample: [0, 3, 5, 6, 7, 16, 28, 33],
+      clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], sprayStep: [0, 10, 11, 28, 29, 32, 33], sprayDisp: [0, 15, 28, 29], wwSample: [0, 3, 5, 6, 7, 16, 28, 33], wwArgs: [0, 14, 30],
       airClear: [0, 34], airSplatW: [0, 1, 2, 6, 16, 34], airSplatS: [0, 28, 29, 34], airUpdate: [0, 10, 11, 32, 34, 35], airCopy: [0, 32, 35], dripStep: [0, 6, 7, 10, 16, 28, 29, 30, 36],
       normFaces: [0, 3, 5, 7, 10, 12, 16, 18, 19], divergence: [0, 3, 6, 7, 9, 12, 16, 18, 19],
       listClear: [12], buildList: [0, 7, 12, 13, 18, 19], listArgs: [0, 12, 14], rbRed: [0, 7, 8, 9, 12, 13, 16, 19], rbBlack: [0, 7, 8, 9, 12, 13, 16, 19],
@@ -1264,9 +1267,10 @@ class FlipSim {
       ...(this.sprayCap > 0 ? [{ name: 'spray', fn: (ps) => {
         if (this.airOnStep) {   // air field first, so the whitewater moves with this step's air
           const na = this.airDims.n;
-          dispatch(ps, 'airClear', na); dispatch(ps, 'airSplatW', N); dispatch(ps, 'airSplatS', this.sprayCap); dispatch(ps, 'airUpdate', na); dispatch(ps, 'airCopy', na);
+          dispatch(ps, 'wwArgs', 1);
+          dispatch(ps, 'airClear', na); dispatch(ps, 'airSplatW', N); indirect(ps, 'airSplatS', 112); dispatch(ps, 'airUpdate', na); dispatch(ps, 'airCopy', na);
         }
-        dispatch(ps, 'wwSample', this.sprayCap); dispatch(ps, 'sprayStep', this.sprayCap);
+        dispatch(ps, 'wwArgs', 1); indirect(ps, 'wwSample', 112); indirect(ps, 'sprayStep', 112);
         if (this.sprOnStep) dispatch(ps, 'sprayEmit', N);
         if (this.dripOnStep) dispatch(ps, 'dripStep', this.ndrip);
       } }] : []),
@@ -1354,14 +1358,19 @@ class FlipSim {
   }
   // all spray slots, for bakes: positions with life in w, velocities with kind in w
   async readSpray() {
-    const n = this.sprayCap; if (!n) return null;
-    if (!this.sstage) this.sstage = this.dev.createBuffer({ size: n * 32, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    if (!this.sprayCap) return null;
+    // how many slots have been handed out: until the ring wraps, the rest have never been used
+    if (!this.sctlStage) this.sctlStage = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    { const e0 = this.dev.createCommandEncoder(); e0.copyBufferToBuffer(this.bSctl, 0, this.sctlStage, 0, 16); this.dev.queue.submit([e0.finish()]); }
+    await this.sctlStage.mapAsync(GPUMapMode.READ); const used = new Uint32Array(this.sctlStage.getMappedRange().slice(0))[0]; this.sctlStage.unmap();
+    const n = Math.max(1, Math.min(this.sprayCap, used));
+    if (!this.sstage || this.sstage.size < n * 32) { if (this.sstage) this.sstage.destroy(); this.sstage = this.dev.createBuffer({ size: Math.min(this.sprayCap, Math.max(n * 2, 65536)) * 32, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }); }
     const enc = this.dev.createCommandEncoder();
     enc.copyBufferToBuffer(this.bSPos, 0, this.sstage, 0, n * 16); enc.copyBufferToBuffer(this.bSVel, 0, this.sstage, n * 16, n * 16);
     this.dev.queue.submit([enc.finish()]);
-    await this.sstage.mapAsync(GPUMapMode.READ);
-    const a = new Float32Array(this.sstage.getMappedRange().slice(0)); this.sstage.unmap();
-    return { n, p: a.subarray(0, n * 4), v: a.subarray(n * 4) };
+    await this.sstage.mapAsync(GPUMapMode.READ, 0, n * 32);
+    const a = new Float32Array(this.sstage.getMappedRange(0, n * 32).slice(0)); this.sstage.unmap();
+    return { n, p: a.subarray(0, n * 4), v: a.subarray(n * 4, n * 8) };
   }
   // bakes read particles back in their original order, so playback can blend each one between frames
   readbackInto(dst) {
@@ -1384,8 +1393,9 @@ class FlipSim {
   // when there are more particles than the view needs, gather every stride-th one into bDisp and read just those
   dispSource(enc) {
     const spr = this.sprDispMax > 0 && this.lastN, deep = this.deepOn && this.nbOn && this.velGOn && this.lastN;
-    if (!spr && !deep && (this.stride <= 1 || !this.lastN)) return { buf: this.bPos, n: Math.min(this.N, this.ringCap) };
+    if (!spr && !deep && (this.stride <= 1 || !this.lastN)) { this.dispWaterN = Math.min(this.N, this.ringCap); return { buf: this.bPos, n: this.dispWaterN }; }
     const p = this.pipes.subsample, n = Math.ceil(this.lastN / this.stride), groups = Math.ceil(n / 256);
+    this.dispWaterN = n;   // the water sample comes first in the display buffer; the drawing needs to know where it ends
     const ps = enc.beginComputePass(); ps.setPipeline(p.pipeline); ps.setBindGroup(0, p.bg); ps.dispatchWorkgroups(Math.min(groups, 65535), Math.ceil(groups / 65535));
     if (spr) { const q = this.pipes.sprayDisp, g2 = Math.ceil(this.sprDispMax / 256); ps.setPipeline(q.pipeline); ps.setBindGroup(0, q.bg); ps.dispatchWorkgroups(Math.min(g2, 65535), Math.ceil(g2 / 65535)); }
     if (deep) {
@@ -1438,7 +1448,7 @@ class FlipSim {
   }
   destroy() {
     this.dead = true;
-    [this.bPos, this.bVel, this.bPid, this.bTpid, this.bSPos, this.bSVel, this.bSctl, this.sstage, this.bTmap, this.bNeed, this.bNew, this.bCols, this.bSortCnt, this.bTpos, this.bTvel, this.bSdf, this.bParams, this.stage, this.bList, this.bCtl, this.bGro, this.bArgs, this.bDisp, this.bStat, this.dstage, this.bSAux, this.bAir, this.bAir2, this.bAirAcc, this.bDrip]
+    [this.bPos, this.bVel, this.bPid, this.bTpid, this.bSPos, this.bSVel, this.bSctl, this.sstage, this.bTmap, this.bNeed, this.bNew, this.bCols, this.bSortCnt, this.bTpos, this.bTvel, this.bSdf, this.bParams, this.stage, this.bList, this.bCtl, this.bGro, this.bArgs, this.bDisp, this.bStat, this.dstage, this.sctlStage, this.bSAux, this.bAir, this.bAir2, this.bAirAcc, this.bDrip]
       .concat(this.slotBufs().map((k) => this[k])).forEach((x) => { try { x && x.destroy(); } catch (e) { /* ignore */ } });
     (this.rs || []).forEach((q) => q.buf.destroy());
   }
@@ -1449,7 +1459,7 @@ FlipSim.prototype.clear = function () {
   GpuSim.prototype.clear.call(this);
   this.tm = 0;   // time since the start: gusts replay the same after a reset, and the first moments count as settling
   this.nbInit = 1; this.nbFills = []; this.nbFillVols = [];   // narrow band: the depth field starts again from the starting water (or air)
-  if (this.sprayCap) { const enc = this.dev.createCommandEncoder(); enc.clearBuffer(this.bSPos); this.dev.queue.submit([enc.finish()]); }
+  if (this.sprayCap) { const enc = this.dev.createCommandEncoder(); enc.clearBuffer(this.bSPos); enc.clearBuffer(this.bSctl); this.dev.queue.submit([enc.finish()]); }
   if (this.airDims) { const enc = this.dev.createCommandEncoder(); enc.clearBuffer(this.bAir); this.dev.queue.submit([enc.finish()]); }
   this.dripSig = '';   // drip samples come back dry
   if (this.sortedEver) { const M = this.MAXN, ids = new Uint32Array(M); for (let k = 0; k < M; k++) ids[k] = k; this.dev.queue.writeBuffer(this.bPid, 0, ids); this.sortedEver = false; }

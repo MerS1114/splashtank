@@ -39,85 +39,90 @@
     return { on: true, height: o.height * k, length: o.length * k, dir: o.dir, spread: o.spread, seed: o.seed | 0, level: o.level * S.dom.h, layer: o.layer * Math.min(S.dom.w, S.dom.d) };
   }
   const nbActive = () => S.engine === 'flip' && (S.nbOn || S.ocean.on);
-  function nbCfg() { return nbActive() ? { on: true, band: S.nbBand } : null; }
-  const rBuf = new Float32Array(3000000 * 4);   // x, y, z, speed per particle, what is drawn
+  const NB_FULL = 10;   // a band this deep or more means particles all the way down: no grid-only deep water
+  function nbCfg() { return nbActive() ? { on: true, band: S.nbBand >= NB_FULL ? 1e4 : S.nbBand } : null; }
   const rawBuf = new Float32Array(1500000 * 4 + 4);   // the GPU readback lands here first
-  let lastGen = -1, lastK = -1, lastCount = 0;
-  // look-only points: extra points around every simulated one. They move with it and cost nothing in the solver.
-  const LOOK = new Float32Array(4096 * 3);
-  { let sd = 12345; const r = () => { sd = (sd * 16807) % 2147483647; return (sd - 1) / 2147483646; };
-    for (let i = 0; i < 4096; i++) { let x, y, z; do { x = r() * 2 - 1; y = r() * 2 - 1; z = r() * 2 - 1; } while (x * x + y * y + z * z > 1); LOOK[i * 3] = x; LOOK[i * 3 + 1] = y; LOOK[i * 3 + 2] = z; } }
-  function putPts(n, i, x, y, z, w4, K, rad) {
-    const cap = rBuf.length / 4; if (n + K + 1 > cap) return n;
-    let k4 = n * 4; rBuf[k4] = x; rBuf[k4 + 1] = y; rBuf[k4 + 2] = z; rBuf[k4 + 3] = w4; n++;
-    for (let c = 0; c < K; c++) {
-      const t = ((i * 7 + c * 131 + (i >> 3) * 17) & 4095) * 3; k4 = n * 4;
-      rBuf[k4] = x + LOOK[t] * rad; rBuf[k4 + 1] = y + LOOK[t + 1] * rad; rBuf[k4 + 2] = z + LOOK[t + 2] * rad; rBuf[k4 + 3] = w4; n++;
-    }
-    return n;
+  let lastGen = -1, lastK = -1, lastCount = 0, lastAlive = 0;
+  // ---------- what is drawn ----------
+  // The CPU writes one entry per point (x, y, z and a kind code) into a float texture; the drawing then makes each point and its look-only
+  // extras on the GPU: vertex v reads entry v / copies from the texture and pushes copies after the first out by a fixed random amount.
+  // (Instancing would do the same but is slow for tiny instances on integrated GPUs.)
+  // Codes: below 1024 water (speed + 64 x white-water level), 2048 spray, 3072 mist, 4096 + speed deep water (narrow band),
+  // 6144 + life foam, 7168 + life bubbles (life 0 to 63, how much is left). Dead entries have y = DEAD and are not drawn.
+  // Layout in a slot: water [0, nW) in particle order (so cache frames line up for blending), deep water [nW, nW + nD), whitewater after.
+  // Two slots: the live view uses slot 0; cache playback decodes the frames either side of the playhead into the two and the shader
+  // blends between them, so between cache frames nothing is rebuilt.
+  const DEAD = -1e6, TEXW = 2048;
+  const SLOTS = [0, 1].map(() => ({ arr: null, tex: null, rows: 0, key: null, n: 0, nW: 0, nD: 0, nS: 0, alive: 0 }));
+  function slotEnsure(sl, n) {
+    const rows = Math.max(16, Math.ceil(Math.max(n, 1) / TEXW / 16) * 16);
+    if (sl.tex && sl.rows >= rows) return;
+    if (sl.tex) sl.tex.dispose();
+    sl.rows = Math.ceil(rows * 1.25 / 16) * 16; sl.arr = new Float32Array(TEXW * sl.rows * 4);
+    sl.tex = new THREE.DataTexture(sl.arr, TEXW, sl.rows, THREE.RGBAFormat, THREE.FloatType);
+    sl.tex.minFilter = THREE.NearestFilter; sl.tex.magFilter = THREE.NearestFilter; sl.tex.generateMipmaps = false; sl.tex.flipY = false;
+    sl.key = null;
   }
-  // a whitewater point from its packed form (see packSpray in flip.js): spray as short streaks, mist as wide puffs,
-  // foam as flat patches on the surface that thin out as it ages, bubbles as small specks
-  function putSpray(n, x, y, z, pk, i, cell) {
-    const K = S.sprDetail | 0; if (n + 4 + K > rBuf.length / 4) return n;
+  function slotUpload(sl) { sl.tex.needsUpdate = true; }
+  function dead(o, from, to) { for (let i = from; i < to; i++) o[i * 4 + 1] = DEAD; }
+  // a whitewater point from its packed form (see packSpray in flip.js): spray as short streaks along its motion, mist, foam and bubbles as one entry
+  function putSprayBase(o, n, x, y, z, pk) {
     const kc = (pk >>> 29) & 3, spd = ((pk >>> 21) & 255) / 4;
-    if (kc === 1 || kc === 3) {
-      const foam = kc === 1, life = (pk & 1023) / 1023, code = (foam ? 6144 : 7168) + Math.round(life * 63);
-      let k4 = n * 4; rBuf[k4] = x; rBuf[k4 + 1] = y; rBuf[k4 + 2] = z; rBuf[k4 + 3] = code; n++;
-      if (K > 0) {
-        const rad = (cell || 0.08) * (foam ? 0.5 + 0.5 * life : 0.25), flat = foam ? 0.12 : 1, ii = (i | 0) * 3 + 11;
-        for (let c = 0, KK = foam ? Math.ceil(K / 2) : Math.min(K, 2); c < KK; c++) {
-          const tt = ((ii * 7 + c * 131 + (ii >> 3) * 17) & 4095) * 3; k4 = n * 4;
-          rBuf[k4] = x + LOOK[tt] * rad; rBuf[k4 + 1] = y + LOOK[tt + 1] * rad * flat; rBuf[k4 + 2] = z + LOOK[tt + 2] * rad; rBuf[k4 + 3] = code; n++;
-        }
-      }
-      return n;
-    }
-    const mist = kc === 2;
+    if (kc === 1 || kc === 3) { const k4 = n * 4; o[k4] = x; o[k4 + 1] = y; o[k4 + 2] = z; o[k4 + 3] = (kc === 1 ? 6144 : 7168) + Math.round(((pk & 1023) / 1023) * 63); return n + 1; }
+    const mist = kc === 2, code = mist ? 3072 : 2048;
     const u = (pk & 1023) / 1023 * 2 - 1, w = ((pk >>> 10) & 1023) / 1023 * 2 - 1;
     let nx = u, ny = w; const nz = 1 - Math.abs(u) - Math.abs(w);
     if (nz < 0) { nx = (1 - Math.abs(w)) * (u >= 0 ? 1 : -1); ny = (1 - Math.abs(u)) * (w >= 0 ? 1 : -1); }
-    const l = Math.hypot(nx, ny, nz) || 1, code = mist ? 3072 : 2048;
-    const L = mist ? 0 : Math.min(spd * S.streak, 0.6), M = L > 0.004 ? 3 : 1;
-    for (let m = 0; m < M; m++) {
-      const t = M > 1 ? (m / (M - 1)) * L / l : 0, k4 = n * 4;
-      rBuf[k4] = x - nx * t; rBuf[k4 + 1] = y - ny * t; rBuf[k4 + 2] = z - nz * t; rBuf[k4 + 3] = code; n++;
-    }
-    // look-only points for spray: a small cloud around each one (along its streak), a wider puff for mist. Drawing only.
-    if (K > 0) {
-      const rad = (cell || 0.08) * (mist ? 1.6 : 0.55), ii = (i | 0) + (pk & 4095);
-      for (let c = 0; c < K; c++) {
-        const tt = ((ii * 7 + c * 131 + (ii >> 3) * 17) & 4095) * 3, along = ((c * 0.618034 + (ii & 255) / 256) % 1) * L / l, k4 = n * 4;
-        rBuf[k4] = x - nx * along + LOOK[tt] * rad; rBuf[k4 + 1] = y - ny * along + LOOK[tt + 1] * rad; rBuf[k4 + 2] = z - nz * along + LOOK[tt + 2] * rad; rBuf[k4 + 3] = code; n++;
-      }
-    }
+    const l = Math.hypot(nx, ny, nz) || 1, L = mist ? 0 : Math.min(spd * S.streak, 0.6), M = L > 0.004 ? 3 : 1;
+    for (let m = 0; m < M; m++) { const t = M > 1 ? (m / (M - 1)) * L / l : 0, k4 = n * 4; o[k4] = x - nx * t; o[k4 + 1] = y - ny * t; o[k4 + 2] = z - nz * t; o[k4 + 3] = code; n++; }
     return n;
   }
-  function expandLook(src, n, K, rad) {
-    const U = new Uint32Array(src.buffer, src.byteOffset, src.length);
-    let w = 0;
-    for (let i = 0; i < n; i++) {
+  // the live view: the GPU's display buffer as it came back (water sample first, then whitewater, then deep water)
+  function buildLive(src, n) {
+    const sl = SLOTS[0], U = new Uint32Array(src.buffer, src.byteOffset, src.length), show = S.showSpray !== false;
+    const nW = Math.min(n, sim && sim.dispWaterN !== undefined ? sim.dispWaterN : n);
+    let nD = 0, nS = 0;
+    for (let i = nW; i < n; i++) { const k = i * 4; if (src[k + 1] < -1e5) continue; if (U[k + 3] >= 0x80000000) { if (show) nS++; } else nD++; }
+    slotEnsure(sl, nW + nD + nS * 3); const o = sl.arr;
+    let alive = 0;
+    for (let i = 0; i < nW; i++) { const k = i * 4; if (src[k + 1] < -1e5) { o[k + 1] = DEAD; continue; } o[k] = src[k]; o[k + 1] = src[k + 1]; o[k + 2] = src[k + 2]; o[k + 3] = src[k + 3]; alive++; }
+    let d = nW, w = nW + nD;
+    for (let i = nW; i < n; i++) {
       const k = i * 4; if (src[k + 1] < -1e5) continue;
-      if (U[k + 3] >= 0x80000000) { if (S.showSpray !== false) w = putSpray(w, src[k], src[k + 1], src[k + 2], U[k + 3], i, 2 * rad); continue; }
-      if (src[k + 3] >= 4096) { w = putPts(w, i, src[k], src[k + 1], src[k + 2], src[k + 3], DEEP_K, rad * S.cellRatio); continue; }   // deep water point (narrow band, look only): fills its cell
-      w = putPts(w, i, src[k], src[k + 1], src[k + 2], src[k + 3], K, rad);
+      if (U[k + 3] >= 0x80000000) { if (show) { w = putSprayBase(o, w, src[k], src[k + 1], src[k + 2], U[k + 3]); alive++; } continue; }
+      const q = d * 4; o[q] = src[k]; o[q + 1] = src[k + 1]; o[q + 2] = src[k + 2]; o[q + 3] = src[k + 3]; d++; alive++;
     }
+    Object.assign(sl, { nW, nD, nS: w - nW - nD, n: w, key: null, alive }); slotUpload(sl);
     return w;
   }
-  // deep water points (narrow band, look only) are drawn with a few look-only points spread through their cell
-  const DEEP_K = 4;
-  function putDeepSet(dp, b, n, half) {
-    if (!dp || !dp.n) return n;
-    const qx = (b.x1 - b.x0) / 65535, qy = (b.y1 - b.y0) / 65535, qz = (b.z1 - b.z0) / 65535;
-    for (let i = 0; i < dp.n; i++) n = putPts(n, i, dp.pos[i * 3] * qx + b.x0, dp.pos[i * 3 + 1] * qy + b.y0, dp.pos[i * 3 + 2] * qz + b.z0, 4096 + dp.spd[i] / 16, DEEP_K, half);
+  // the CPU solver's particles
+  function buildCpu(P, Sp, n) {
+    const sl = SLOTS[0]; slotEnsure(sl, n); const o = sl.arr; let alive = 0;
+    for (let i = 0; i < n; i++) { const k = i * 4, i3 = i * 3; if (P[i3 + 1] < -1e5) { o[k + 1] = DEAD; continue; } o[k] = P[i3]; o[k + 1] = P[i3 + 1]; o[k + 2] = P[i3 + 2]; o[k + 3] = Sp[i]; alive++; }
+    Object.assign(sl, { nW: n, nD: 0, nS: 0, n, key: null, alive }); slotUpload(sl);
     return n;
   }
-  // spray stored in a cache frame
-  function putSpraySet(sp, b, n, cell) {
-    if (!sp || S.showSpray === false) return n;
-    const qx = (b.x1 - b.x0) / 65535, qy = (b.y1 - b.y0) / 65535, qz = (b.z1 - b.z0) / 65535;
-    for (let i = 0; i < sp.n; i++) n = putSpray(n, sp.pos[i * 3] * qx + b.x0, sp.pos[i * 3 + 1] * qy + b.y0, sp.pos[i * 3 + 2] * qz + b.z0, sp.pk[i], i, cell);
-    return n;
+  // how many entries a cache frame needs in each part
+  function frameLayout(fr) { const show = S.showSpray !== false; return { nW: fr.n, nD: fr.dp ? fr.dp.n : 0, nS: show && fr.sp ? fr.sp.n * (S.streak > 0 ? 3 : 1) : 0 }; }
+  // a cache frame (baked or live cache) into a slot, in layout L (the larger of the two frames being blended), padded with dead entries
+  function decodeFrame(sl, fr, b, L) {
+    const show = S.showSpray !== false, sp = show ? fr.sp : null, dp = fr.dp;
+    slotEnsure(sl, L.nW + L.nD + L.nS);
+    const o = sl.arr, qx = (b.x1 - b.x0) / 65535, qy = (b.y1 - b.y0) / 65535, qz = (b.z1 - b.z0) / 65535, pa = fr.pos, sa = fr.spd, fa = fr.fm;
+    let alive = 0;
+    for (let i = 0; i < L.nW; i++) {
+      const k = i * 4, j = i * 3;
+      if (i >= fr.n || sa[i] === 255) { o[k + 1] = DEAD; continue; }
+      o[k] = pa[j] * qx + b.x0; o[k + 1] = pa[j + 1] * qy + b.y0; o[k + 2] = pa[j + 2] * qz + b.z0; o[k + 3] = sa[i] / 16 + 64 * Math.round((fa ? fa[i] / 255 : 0) * 15); alive++;
+    }
+    let n = L.nW;
+    if (dp) for (let i = 0; i < dp.n && i < L.nD; i++) { const k = n * 4; o[k] = dp.pos[i * 3] * qx + b.x0; o[k + 1] = dp.pos[i * 3 + 1] * qy + b.y0; o[k + 2] = dp.pos[i * 3 + 2] * qz + b.z0; o[k + 3] = 4096 + dp.spd[i] / 16; n++; alive++; }
+    dead(o, n, L.nW + L.nD); n = L.nW + L.nD;
+    const end = n + L.nS;
+    if (sp) for (let i = 0; i < sp.n && n + 3 <= end; i++) { n = putSprayBase(o, n, sp.pos[i * 3] * qx + b.x0, sp.pos[i * 3 + 1] * qy + b.y0, sp.pos[i * 3 + 2] * qz + b.z0, sp.pk[i]); alive++; }
+    dead(o, n, end);
+    Object.assign(sl, { nW: L.nW, nD: L.nD, nS: L.nS, n: end, alive }); slotUpload(sl);
+    return end;
   }
   let sim = null, runner = null;
   function makeSim() {
@@ -180,12 +185,25 @@
   }
   function setOrtho(on) { S.ortho = !!on; camera = S.ortho ? orthoCam : perspCam; updateCam(); }
 
-  const geo = new THREE.BufferGeometry();
-  const ibuf = new THREE.InterleavedBuffer(rBuf, 4); ibuf.setUsage(THREE.DynamicDrawUsage);
-  geo.setAttribute('position', new THREE.InterleavedBufferAttribute(ibuf, 3, 0));
-  geo.setAttribute('speed', new THREE.InterleavedBufferAttribute(ibuf, 1, 3));
-  geo.setDrawRange(0, 0);
-  function uploadParticles(n) { geo.setDrawRange(0, n); ibuf.updateRange.offset = 0; ibuf.updateRange.count = n * 4; ibuf.needsUpdate = true; }
+  const LKMAX = 16;   // the most copies of a point (itself and 15 look-only extras)
+  // two draws: water and deep water, then whitewater (each with its own number of look-only copies). The vertex count is
+  // entries x copies; the only vertex attribute is a dummy that three.js needs to know how many vertices to draw.
+  let dummyPos = new THREE.BufferAttribute(new Uint8Array(1 << 16), 1);
+  const geoA = new THREE.BufferGeometry(), geoB = new THREE.BufferGeometry();
+  geoA.setAttribute('position', dummyPos); geoB.setAttribute('position', dummyPos); geoA.setDrawRange(0, 0); geoB.setDrawRange(0, 0);
+  let shownN = 0;
+  // show slot a (and b to blend towards, by w)
+  function showSlots(a, bslot, w) {
+    const A = SLOTS[a], B = SLOTS[bslot];
+    const kA = 1 + Math.max(S.detail | 0, A.nD > 0 ? 4 : 0), kB = 1 + Math.min(S.sprDetail | 0, LKMAX - 1);
+    const vA = (A.nW + A.nD) * kA, vB = A.nS * kB, need = Math.max(vA, vB);
+    if (dummyPos.count < need) { dummyPos = new THREE.BufferAttribute(new Uint8Array(Math.ceil(need * 1.25)), 1); geoA.setAttribute('position', dummyPos); geoB.setAttribute('position', dummyPos); }
+    const u = pmat.uniforms; u.tA.value = A.tex; u.tB.value = B.tex; u.uBlend.value = w; u.uKw.value = S.detail | 0; u.uKs.value = Math.min(S.sprDetail | 0, LKMAX - 1);
+    u.uK1.value = kA; u.uBase.value = 0; pmatB.uniforms.uK1.value = kB; pmatB.uniforms.uBase.value = A.nW + A.nD;
+    geoA.setDrawRange(0, vA); geoB.setDrawRange(0, vB); shownN = A.n;
+  }
+  function uploadParticles() { showSlots(0, 0, 0); }
+  slotEnsure(SLOTS[0], 1); slotEnsure(SLOTS[1], 1);
   // the points. speed holds the kind: below 1024 water (speed + 64 x white water level), 2048 spray, 3072 mist, 4096 + speed a deep water point (narrow band, look only).
   // Colour by Speed runs blue to cyan to white with speed and draws churned water white; Colour by Type gives each kind its own colour, as in Houdini.
   // kinds by the speed attribute: below 1024 water (speed + 64 x white-water level), 2048 spray, 3072 mist, 4096 + speed deep water (narrow band),
@@ -193,12 +211,31 @@
   const TYPE_COL = { water: [0.16, 0.46, 0.96], churn: [0.55, 0.85, 0.97], foam: [0.98, 0.98, 0.98], spray: [1.0, 0.6, 0.16], mist: [0.86, 0.56, 1.0], deep: [0.07, 0.2, 0.52], bubble: [0.25, 0.85, 0.6] };
   const v3 = (c) => 'vec3(' + c.map((x) => x.toFixed(3)).join(',') + ')';
   const pmat = new THREE.ShaderMaterial({
-    uniforms: { uSize: { value: 0.1 }, uScale: { value: 600 }, uMax: { value: S.vmax }, uFoam: { value: S.foam }, uOrtho: { value: 0 }, uMode: { value: 0 } },
-    vertexShader: 'attribute float speed; uniform float uSize; uniform float uScale; uniform float uFoam; uniform float uOrtho; varying float vS; varying float vF; varying float vK; varying float vL;' +
-      'void main(){ vec4 mv = modelViewMatrix * vec4(position,1.0); gl_Position = projectionMatrix * mv;' +
+    uniforms: { uSize: { value: 0.1 }, uScale: { value: 600 }, uMax: { value: S.vmax }, uFoam: { value: S.foam }, uOrtho: { value: 0 }, uMode: { value: 0 },
+      uBlend: { value: 0 }, uD: { value: 0.04 }, uCR: { value: 2 }, uKw: { value: 0 }, uKs: { value: 4 }, tA: { value: null }, tB: { value: null }, uBase: { value: 0 }, uK1: { value: 1 } },
+    vertexShader: 'uniform highp sampler2D tA; uniform highp sampler2D tB; uniform float uBase; uniform float uK1; uniform float uSize; uniform float uScale; uniform float uFoam; uniform float uOrtho;' +
+      ' uniform float uBlend; uniform float uD; uniform float uCR; uniform float uKw; uniform float uKs; varying float vS; varying float vF; varying float vK; varying float vL;' +
+      ' uint hsh(uint x) { x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u; return x; }' +
+      ' vec3 ball(uint s) { vec3 r = vec3(float(hsh(s) & 65535u), float(hsh(s + 7919u) & 65535u), float(hsh(s + 104729u) & 65535u)) / 32767.5 - 1.0; float l = length(r); return l > 1.0 ? r / l : r; }' +
+      ' void hide() { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; vK = 0.0; vS = 0.0; vF = 0.0; vL = 0.0; }' +
+      'void main(){ int k1 = int(uK1 + 0.5); int bi = gl_VertexID / k1; float lk = float(gl_VertexID - bi * k1); int idx = int(uBase + 0.5) + bi;' +
+      ' ivec2 tc = ivec2(idx % ' + TEXW + ', idx / ' + TEXW + '); vec4 a = texelFetch(tA, tc, 0); vec4 b = texelFetch(tB, tc, 0); vec4 q;' +
+      ' bool wa = a.y > -1.0e5 && a.w < 1024.0; bool wb = b.y > -1.0e5 && b.w < 1024.0;' +
+      ' if (uBlend <= 0.0) q = a;' +
+      ' else if (wa && wb) { float la = floor(a.w / 64.0 + 0.01); float lb = floor(b.w / 64.0 + 0.01); q = vec4(mix(a.xyz, b.xyz, uBlend), mix(a.w - la * 64.0, b.w - lb * 64.0, uBlend) + 64.0 * floor(mix(la, lb, uBlend) + 0.5)); }' +
+      ' else if (wb) q = b; else if (uBlend < 0.5) q = a; else q = b;' +
+      ' if (q.y < -1.0e5) { hide(); return; }' +
+      ' float speed = q.w;' +
       ' vK = speed >= 7168.0 ? 5.0 : (speed >= 6144.0 ? 4.0 : (speed >= 4096.0 ? 3.0 : (speed >= 3072.0 ? 2.0 : (speed >= 2048.0 ? 1.0 : 0.0))));' +
       ' float sp = vK > 4.5 ? speed - 7168.0 : (vK > 3.5 ? speed - 6144.0 : (vK > 2.5 ? speed - 4096.0 : speed)); float lv = vK > 2.5 ? 0.0 : floor(sp / 64.0 + 0.01); vS = sp - lv * 64.0; vL = lv / 15.0; vF = vL * uFoam;' +
       ' float life = clamp(vS / 63.0, 0.0, 1.0);' +
+      // how many look-only copies this kind gets, and how far they spread
+      ' float K = vK > 4.5 ? min(uKs, 2.0) : (vK > 3.5 ? ceil(uKs * 0.5) : (vK > 2.5 ? 4.0 : (vK > 0.5 ? uKs : uKw)));' +
+      ' if (lk > K + 0.5) { hide(); return; }' +
+      ' vec3 pos = q.xyz;' +
+      ' if (lk > 0.5) { float rad = vK > 4.5 ? 0.25 * uD : (vK > 3.5 ? uD * (0.5 + 0.5 * life) : (vK > 2.5 ? 0.5 * uD * uCR : (vK > 1.5 ? 1.6 * uD : (vK > 0.5 ? 0.55 * uD : 0.5 * uD))));' +
+      '   vec3 o = ball(uint(idx) * 16u + uint(lk)); if (vK > 3.5 && vK < 4.5) o.y *= 0.12; pos += o * rad; }' +
+      ' vec4 mv = modelViewMatrix * vec4(pos, 1.0); gl_Position = projectionMatrix * mv;' +
       ' float sz = vK > 4.5 ? 0.3 : (vK > 3.5 ? 0.34 * (0.6 + 0.4 * life) : (vK > 2.5 ? 1.3 : (vK > 1.5 ? 0.6 : (vK > 0.5 ? 0.42 : 1.0 - 0.3 * vF))));' +
       ' gl_PointSize = max((uOrtho > 0.0 ? uSize * uOrtho : uSize * uScale / (-mv.z)) * sz, (vK > 0.5 && vK < 2.5) || vK > 3.5 ? 1.0 : 1.5); }',
     fragmentShader: 'uniform float uMax; uniform float uMode; varying float vS; varying float vF; varying float vK; varying float vL;' +
@@ -213,7 +250,9 @@
       ' if (uMode > 0.5) { vec3 c = vK > 2.5 ? ' + v3(TYPE_COL.deep) + ' : (vL > 0.3 ? ' + v3(TYPE_COL.churn) + ' : ' + v3(TYPE_COL.water) + '); gl_FragColor = vec4(c*sh,1.0); return; }' +
       ' float t = clamp(vS/uMax,0.0,1.0); vec3 col = vK > 2.5 ? ramp(t)*0.82 : mix(ramp(t), vec3(0.97,0.99,1.0), vF); gl_FragColor = vec4(col*sh,1.0); }'
   });
-  const points = new THREE.Points(geo, pmat); points.frustumCulled = false; scene.add(points);
+  const pmatB = new THREE.ShaderMaterial({ uniforms: Object.assign({}, pmat.uniforms, { uBase: { value: 0 }, uK1: { value: 1 } }), vertexShader: pmat.vertexShader, fragmentShader: pmat.fragmentShader });
+  const points = new THREE.Group(), pointsA = new THREE.Points(geoA, pmat), pointsB = new THREE.Points(geoB, pmatB);
+  pointsA.frustumCulled = false; pointsB.frustumCulled = false; points.add(pointsA, pointsB); scene.add(points);
 
   // the ocean around the box: a grid of look-only points on the wave surface, worked out on the GPU from the same waves the solver uses.
   // It covers the boundary at the sides (which holds no particles) and runs out past the box; the inside of the box is the simulated water.
@@ -952,7 +991,7 @@
       const nr = addCheck(nbp, 'c-nb', 'Enabled', S.nbOn || S.ocean.on, 'Keep particles only near the surface. Restarts the particles.', (on) => { S.nbOn = on; lcClear(); resetSim(S.tl.t); buildLiveUI(); }, false);
       if (S.ocean.on) { nr.querySelector('input').disabled = true; nr.querySelector('label').dataset.tip = 'The ocean needs narrow band, so it stays on while the ocean is on.'; }
       addCheck(nbp, 'c-nblook', 'Deep water', S.nbLook, 'Look only: draws the deep water under the band (which has no particles) as points too, so the water does not look hollow from the side. Drawing only, also kept in bakes. Costs some drawing time.', (on) => { S.nbLook = on; lastGen = -1; }, false);
-      addSlider(nbp, { id: 's-nbband', label: 'Band', min: 2, max: 6, step: 1, value: S.nbBand, def: 3, fmt: (v) => v + ' cells', tip: 'How many grid cells deep the particles reach under the surface. More keeps detail in deep, churning water; fewer is faster.', onInput: (v) => { S.nbBand = v; } });
+      addSlider(nbp, { id: 's-nbband', label: 'Band', min: 2, max: NB_FULL, step: 1, value: S.nbBand, def: 3, fmt: (v) => (v >= NB_FULL ? 'Full depth' : v + ' cells'), tip: 'How many grid cells deep the particles reach under the surface. Under the band the water lives only on the grid, which is fast but smooths away swirls and damps waves deep down. More keeps detail in deep, churning water; Full depth (the far right) keeps particles all the way down, so the water behaves like a normally filled volume, at the cost of many more particles. Restarts the particles.', onInput: () => {}, onChange: (v) => { S.nbBand = v; lcClear(); resetSim(S.tl.t); updateEst(); } });
       const op = sub(gs, 'ocean', 'Ocean', S.ocean.on, 'Waves from an ocean spectrum roll in through the sides of the box, like Houdini\'s wave tank. The sides become a boundary that moves with the waves.');
       addCheck(op, 'c-ocean', 'Enabled', S.ocean.on, 'Fills the box with sea up to the water level and drives waves in from the sides. Turns narrow band on. Restarts the particles.', (on) => { S.ocean.on = on; lcClear(); resetSim(S.tl.t); buildLiveUI(); }, false);
       const ocS = (id, label, key, min, max, o) => addSlider(op, Object.assign({ id, label, min, max, value: S.ocean[key], def: OCEAN_DEF[key], onInput: (v) => { S.ocean[key] = v; } }, o));
@@ -960,6 +999,7 @@
       ocS('s-olen', 'Wavelength', 'length', 1, 600, { log: true, round: 0.5, fmt: (v) => (v < 10 ? v.toFixed(1) : Math.round(v)) + ' m', tip: 'Length of the main waves, crest to crest, in metres. Longer waves travel faster and stir the water deeper.' });
       ocS('s-odir', 'Direction', 'dir', -180, 180, { step: 5, fmt: (v) => v + '°', tip: 'Direction the waves travel towards. 0 is along +X.' });
       ocS('s-ospr', 'Spread', 'spread', 0, 90, { step: 5, fmt: (v) => v + '°', tip: 'How far the wave directions fan out. 0 gives long parallel swell; more gives a choppy, crossing sea.' });
+      addCheck(op, 'c-ofull', 'Full depth', S.nbBand >= NB_FULL, 'Particles all the way to the bottom instead of only a narrow band under the surface. The sea then behaves like a normally filled volume: swirls and waves travel through it instead of being damped deep down. Uses many more particles, so it is slower; lower the spacing or raise Max points to fit it. Restarts the particles.', (on) => { S.nbBand = on ? NB_FULL : 3; lcClear(); resetSim(S.tl.t); buildLiveUI(); updateEst(); }, false);
       ocS('s-olvl', 'Water level', 'level', 0.1, 0.9, { step: 0.01, fmt: (v) => Math.round(v * 100) + '%', tip: 'Still water height, as a share of the box height. Restarts the particles.', onInput: () => {}, onChange: (v) => { S.ocean.level = v; lcClear(); resetSim(S.tl.t); } });
       ocS('s-olay', 'Boundary', 'layer', 0.05, 0.4, { step: 0.01, fmt: (v) => Math.round(v * 100) + '%', tip: 'Width of the boundary along the sides, as a share of the box. Its outer half moves with the waves like a wall; its inner half eases the water into the waves, which keeps reflections down.' });
       ocS('s-oseed', 'Seed', 'seed', 1, 99, { step: 1, fmt: (v) => String(v), tip: 'A different pattern of the same kind of sea.' });
@@ -1474,6 +1514,8 @@
   }
   function onBakeFrame(fr, info, cache) {
     cache.frames.push(fr);
+    if (S.cache === cache && S.cfollow) S.ct = cache.frames.length - 1;
+    if (S.cache === cache && (cache.frames.length < 4 || cache.frames.length % 6 === 0)) updateCacheInfo();
     if (info.diag && cache.diag) cache.diag.push(Object.assign({ f: info.f, t: info.f / cache.fps, n: info.n, elapsed: info.elapsed }, info.diag));
     cache.maxN = Math.max(cache.maxN, fr.n);
     const pct = (info.f / info.F) * 100; S.bakeT = info.f / cache.fps; lcUi();
@@ -1484,12 +1526,18 @@
   function finishBake(cache, cancelled) {
     S.baking = false; setBakeUI(false); S.bakeT = 0;
     if (worker) { worker.terminate(); worker = null; }
-    if (cancelled || cache.frames.length < 2) {
-      $('#bake-status').textContent = cancelled ? 'Bake cancelled.' : 'Nothing was baked.'; return;
+    cache.partial = false;
+    if (cache.frames.length < 2) {   // nothing usable: the cache from before comes back
+      S.cache = cache.prev || null; delete cache.prev;
+      $('#bake-status').textContent = cancelled ? 'Bake cancelled before any frames were finished.' : 'Nothing was baked.';
+      if (S.cache) buildTicks(); updateCacheInfo(); applyMode(); lcUi(); return;
     }
-    S.cache = cache; S.ct = 0; setCPlay(true);
+    delete cache.prev;
+    if (cancelled) cache.cancelled = true;
+    S.cache = cache; S.ct = cancelled ? Math.min(S.ct, cache.frames.length - 1) : 0; S.cfollow = false; setCPlay(!cancelled);
     buildTicks(); updateCacheInfo();
-    $('#bake-status').innerHTML = 'Baked <b>' + (cache.frames.length - 1) + '</b> frames in ' + fmtTime(cache.seconds) + '.';
+    $('#bake-status').innerHTML = cancelled ? 'Cancelled. Kept the <b>' + (cache.frames.length - 1) + '</b> frames baked so far (' + (cache.frames.length / cache.fps).toFixed(1) + ' s); they play and save like a full bake.'
+      : 'Baked <b>' + (cache.frames.length - 1) + '</b> frames in ' + fmtTime(cache.seconds) + '.';
     applyMode(); lcUi();
   }
   function startBake() {
@@ -1500,7 +1548,10 @@
     if (isGpu() && gridCost(desc.d, S.cellRatio, desc.maxN).biggest > (S.gpu ? S.gpu.maxBuf : 1 << 27)) { $('#bake-status').textContent = 'That bake does not fit in one GPU buffer here. Pick less detail or lower Max points.'; flash('Bake too big for this GPU.'); return; }
     const cache = { b: { x0: -W / 2, x1: W / 2, y0: 0, y1: Hh, z0: -Dd / 2, z1: Dd / 2 }, org: Object.assign({}, S.org), fps: desc.fps, d: desc.d, frames: [], maxN: 0, ids: desc.objs.map((o) => o.id), seconds: 0, startedAt: Date.now(),
       engine: S.engine, scene: sceneData(), desc: lightDesc(desc), diag: [], stableIds: true, scale: S.scale || 1 };
-    S.baking = true; setBakeUI(true); S.bakeT = 0; lcUi();
+    S.baking = true; setBakeUI(true); S.bakeT = 0;
+    // the bake shows in the viewport as it goes: it becomes the cache straight away and the view follows the newest frame
+    cache.partial = true; cache.total = desc.frames; cache.prev = S.cache; S.cache = cache; S.tab = 'bake'; S.ct = 0; S.cfollow = true; setCPlay(true);
+    buildTicks(); applyMode(); lcUi();
     $('#bake-prog').style.width = '0%'; $('#bake-status').textContent = 'Starting…';
     const done = (cancelled) => { cache.seconds = (Date.now() - cache.startedAt) / 1000; finishBake(cache, cancelled); };
     if (isGpu()) {
@@ -1535,7 +1586,7 @@
   function updateCacheInfo() {
     const c = S.cache, el = $('#cache-info');
     if (!c) { el.textContent = 'No cache yet.'; return; }
-    const last = c.frames[c.frames.length - 1];
+    if (!c.frames.length) { el.textContent = 'Baking…'; return; }
     el.innerHTML = '<b>' + (c.frames.length - 1) + '</b> frames at ' + c.fps + ' fps, up to <b>' + fmtN(c.maxN) + '</b> points, spacing ' + c.d.toFixed(3) + ', <b>' + (cacheBytes(c) / 1048576).toFixed(0) + ' MB</b> in memory.';
   }
   $('#c-loop').addEventListener('change', (e) => { S.cloop = e.target.checked; });
@@ -1590,48 +1641,44 @@
   });
 
   function buildTicks() {
-    const c = S.cache, F = c.frames.length - 1, tk = $('#ticks'); tk.innerHTML = '';
+    const c = S.cache, F = Math.max(1, c.partial ? c.total : c.frames.length - 1), tk = $('#ticks'); tk.innerHTML = '';   // while baking, the bar covers the whole bake
     const sc = $('#scrub'); sc.max = F; sc.value = 0;
     $('#c-total').textContent = String(F + 1).padStart(4, '0');
     for (let k = 0; k <= F; k += c.fps) {
       const s = document.createElement('span'); s.style.left = (k / F) * 100 + '%'; s.textContent = k / c.fps + 's'; tk.appendChild(s);
     }
   }
-  $('#scrub').addEventListener('input', (e) => { S.ct = +e.target.value; });
+  $('#scrub').addEventListener('input', (e) => { S.ct = +e.target.value; if (S.cache && S.cache.partial) S.cfollow = S.ct >= S.cache.frames.length - 1.5; });
 
   const DEFB = { x0: -1.5, x1: 1.5, y0: 0, y1: 2.6, z0: -1.5, z1: 1.5 };
+  // a slot holding frame k of cache c in layout L (decoded on demand into whichever slot is not needed for the other frame)
+  function slotFor(c, k, L, keep) {
+    const key = c.uid + ':' + k + ':' + L.nW + ':' + L.nD + ':' + L.nS + ':' + (S.showSpray !== false) + ':' + S.streak;
+    for (let s2 = 0; s2 < 2; s2++) if (SLOTS[s2].key === key) return s2;
+    const s2 = keep === 0 ? 1 : 0;
+    decodeFrame(SLOTS[s2], c.frames[k], c.b || DEFB, L); SLOTS[s2].key = key;
+    return s2;
+  }
+  let cacheUid = 0;
   function showCache(t) {
     const c = S.cache, fr = c.frames, last = fr.length - 1; lastGen = -1;
+    if (!c.uid) c.uid = ++cacheUid;
+    if (last < 0) { geoA.setDrawRange(0, 0); geoB.setDrawRange(0, 0); return 0; }   // a bake that has not finished its first frame yet
     t = clamp(t, 0, last);
     // blend between frames only when the same slot is the same particle in both (older caches with sorting were not saved that way)
-    const a = Math.floor(t), bi = Math.min(a + 1, last), w = c.stableIds ? t - a : 0, A = fr[a], B = fr[bi];
-    const nA = A.n, nB = B.n, pa = A.pos, pb = B.pos, sa = A.spd, sb = B.spd, fa = A.fm, fb = B.fm, og = c.org || { x: 0, y: 0, z: 0 };
-    const cb = c.b || DEFB, qx = (cb.x1 - cb.x0) / 65535, qy = (cb.y1 - cb.y0) / 65535, qz = (cb.z1 - cb.z0) / 65535;
-    let n = 0;
-    for (let i = 0; i < nB; i++) {
-      if (sb[i] === 255) continue;   // left the box through an open face
-      const j = i * 3;
-      let x = pb[j] * qx + cb.x0, y = pb[j + 1] * qy + cb.y0, z = pb[j + 2] * qz + cb.z0, s = sb[i];
-      if (i < nA && w < 1 && sa[i] !== 255) {
-        const x0 = pa[j] * qx + cb.x0, y0 = pa[j + 1] * qy + cb.y0, z0 = pa[j + 2] * qz + cb.z0;
-        x = x0 + (x - x0) * w; y = y0 + (y - y0) * w; z = z0 + (z - z0) * w; s = sa[i] + (s - sa[i]) * w;
-      }
-      let fo = fb ? fb[i] / 255 : 0;
-      if (i < nA && w < 1 && sa[i] !== 255) fo = (fa ? fa[i] / 255 : 0) + (fo - (fa ? fa[i] / 255 : 0)) * w;
-      n = putPts(n, i, x, y, z, s / 16 + 64 * Math.round(fo * 15), S.detail, 0.5 * c.d);
-    }
-    n = putSpraySet((w < 0.5 ? A : B).sp, cb, n, 2 * c.d);
-    n = putDeepSet((w < 0.5 ? A : B).dp, cb, n, 0.5 * c.d * ((c.desc && c.desc.cellRatio) || 2));
-    uploadParticles(n);
+    const a = Math.floor(t), bi = Math.min(a + 1, last), w = c.stableIds && bi !== a ? t - a : 0, A = fr[a], B = fr[bi], og = c.org || { x: 0, y: 0, z: 0 };
+    const la = frameLayout(A), lb = w > 0 ? frameLayout(B) : la, L = { nW: Math.max(la.nW, lb.nW), nD: Math.max(la.nD, lb.nD), nS: Math.max(la.nS, lb.nS) };
+    const sa = slotFor(c, a, L, -1), sb = w > 0 ? slotFor(c, bi, L, sa) : sa;
+    pmat.uniforms.uD.value = c.d; pmat.uniforms.uCR.value = (c.desc && c.desc.cellRatio) || 2;
+    showSlots(sa, sb, w);
     c.ids.forEach((id, k) => {
       const o = objs.find((q) => q.id === id); if (!o) return;
       const k4 = k * 6, ao = A.objs, bo = B.objs, L = (j) => ao[k4 + j] + (bo[k4 + j] - ao[k4 + j]) * w;
       o.group.position.set(L(0) + og.x, L(1) + og.y, L(2) + og.z);
       if (o.kind === 'mesh') o.group.rotation.set(L(3), L(4), L(5), 'ZYX');
     });
-    return n;
+    return w < 0.5 ? SLOTS[sa].alive : SLOTS[sb].alive;
   }
-
 
   // ---------- load a cache file ----------
   $('#cache-file').addEventListener('change', async (e) => {
@@ -2445,10 +2492,10 @@
       // moving particles to the CPU for drawing
       const tmp = new Float32Array(sim.MAXN * 4 + 4); await sim.readbackInto(tmp);
       let rb = 0; for (let r = 0; r < 6; r++) { const t0 = performance.now(); await sim.readbackInto(tmp); rb += performance.now() - t0; }
-      const dp = (K) => { const t0 = performance.now(); for (let r = 0; r < 5; r++) expandLook(tmp, Math.min(N, sim.ringCap || N), K, 0.5 * S.liveD); return (performance.now() - t0) / 5; };
+      const dp = () => { const t0 = performance.now(); for (let r = 0; r < 5; r++) buildLive(tmp, Math.min(N, sim.ringCap || N)); return (performance.now() - t0) / 5; };
       say('');
       say('Copying all particles to the CPU: ' + f1(rb / 6) + ' ms each (live view now does this in the background, without stalling steps)');
-      say('Building the draw buffer on the CPU: ' + f1(dp(0)) + ' ms with look-only points off, ' + f1(dp(7)) + ' ms at ×8');
+      say('Building the draw buffer on the CPU: ' + f1(dp()) + ' ms (look-only points are made on the GPU)'); lastGen = -1;
       say('');
       say('Done. Press Copy results and paste it back.');
     } catch (e) { say('Benchmark failed: ' + (e && e.message || e)); }
@@ -2610,16 +2657,11 @@
     const fn = LC.fnum; let lo = 0, hi = fn.length - 1;
     while (lo < hi) { const m = (lo + hi + 1) >> 1; if (fn[m] <= S.lcT) lo = m; else hi = m - 1; }
     const A = LC.frames[lo], cb = LC.b, og = LC.org;
-    const qx = (cb.x1 - cb.x0) / 65535, qy = (cb.y1 - cb.y0) / 65535, qz = (cb.z1 - cb.z0) / 65535, pa = A.pos, sa = A.spd, fa = A.fm;
-    let n = 0;
-    for (let i = 0; i < A.n; i++) {
-      if (sa[i] === 255) continue;
-      const j = i * 3, fo = fa ? fa[i] / 255 : 0;
-      n = putPts(n, i, pa[j] * qx + cb.x0, pa[j + 1] * qy + cb.y0, pa[j + 2] * qz + cb.z0, sa[i] / 16 + 64 * Math.round(fo * 15), S.detail, 0.5 * LC.d);
-    }
-    n = putSpraySet(A.sp, cb, n, 2 * LC.d);
-    n = putDeepSet(A.dp, cb, n, 0.5 * LC.d * S.cellRatio);
-    uploadParticles(n); lastGen = -1;
+    const sl = SLOTS[0], key = 'lc:' + lo + ':' + LC.fnum[lo] + ':' + (S.showSpray !== false);
+    if (sl.key !== key) { decodeFrame(sl, A, cb, frameLayout(A)); sl.key = key; }
+    pmat.uniforms.uD.value = LC.d; pmat.uniforms.uCR.value = S.cellRatio;
+    showSlots(0, 0, 0); lastGen = -1;
+    const n = sl.alive;
     LC.ids.forEach((id, k) => {
       const o = objs.find((q) => q.id === id); if (!o) return;
       const ob = A.objs, k6 = k * 6;
@@ -2716,7 +2758,10 @@
     let count = 0, fresh = true;
     if (mode === 'cache') {
       const c = S.cache, lastF = c.frames.length - 1;
-      if (S.cplay) {
+      if (c.partial) {   // still baking: show the newest frame, or play up to it and wait there
+        if (S.cfollow) S.ct = Math.max(0, lastF);
+        else if (S.cplay) { S.ct = Math.min(S.ct + dt * c.fps * S.cspeed, lastF); if (S.ct >= lastF) S.cfollow = true; }
+      } else if (S.cplay && lastF > 0) {
         S.ct += dt * c.fps * S.cspeed;
         if (S.ct >= lastF) { if (S.cloop) S.ct = S.ct % lastF; else { S.ct = lastF; setCPlay(false); } }
       }
@@ -2758,16 +2803,14 @@
       if (isGpu()) {
         if (sim.setDeepLook) sim.setDeepLook(S.nbLook && nbActive());
         sim.pump();
-        if (sim.gen !== lastGen || S.detail !== lastK) { if (sim.gen !== lastGen) lcRecord(); count = expandLook(rawBuf, sim.outN, S.detail, 0.5 * S.liveD); lastGen = sim.gen; lastK = S.detail; lastCount = count; fresh = true; } else { count = lastCount; fresh = false; }
+        if (sim.gen !== lastGen) { lcRecord(); lastCount = buildLive(rawBuf, sim.outN); lastGen = sim.gen; fresh = true; } else fresh = false;
+        count = lastCount;
         S.ms = sim.lastMs;
       }
       else {
-        count = sim.N; const Pp = sim.P, Sp = sim.S;
-        let w = 0;
-        for (let i = 0; i < count; i++) { const i3 = i * 3; if (Pp[i3 + 1] < -1e5) continue; w = putPts(w, i, Pp[i3], Pp[i3 + 1], Pp[i3 + 2], Sp[i], S.detail, 0.5 * S.liveD); }
-        count = w; fresh = true;
+        count = buildCpu(sim.P, sim.S, sim.N); fresh = true;
       }
-      if (fresh) uploadParticles(count); else geo.setDrawRange(0, count);
+      showSlots(0, 0, 0); pmat.uniforms.uD.value = S.liveD; pmat.uniforms.uCR.value = S.cellRatio;
       pmat.uniforms.uMax.value = S.vmax / (S.scale || 1); pmat.uniforms.uSize.value = S.psize * S.liveD; points.position.set(S.simOrg.x, S.simOrg.y, S.simOrg.z);
       uiT += dt;
       if (uiT > 0.2) {
@@ -3082,11 +3125,11 @@
     const sc = $('#scene').value, fr = viewMode() === 'cache' ? Math.round(S.ct) + 1 : Math.round(S.tl.t * FPS_TL) + 1;
     $('#vp-sub').textContent = '(' + fr + ') ' + sc + (selected ? ' | ' + selected.name : '');
     const cl = $('#chip-live-t'), cache = viewMode() === 'cache';
-    if (cl) cl.textContent = cache ? 'Bake playback' : S.lcPlay ? 'Live cache' : S.playing ? 'Live · ' + Math.round(fpsE) + ' fps' : 'Live · stopped';
+    if (cl) cl.textContent = cache ? (S.baking ? 'Baking · ' + S.cache.frames.length + ' frames so far' : 'Bake playback') : S.lcPlay ? 'Live cache' : S.playing ? 'Live · ' + Math.round(fpsE) + ' fps' : 'Live · stopped';
     const ss = $('#ol-sim-sub'); if (ss) ss.textContent = (isGpu() ? fmtN(sim ? sim.N : 0) : fmtN(sim ? sim.N : 0)) + ' particles' + (S.engine === 'flip' && nbActive() ? ' · narrow band' : '');
     const vm = $('#vh-mode'); if (vm && document.activeElement !== vm) vm.value = uiMode;
   }
-  window.__splash = { setTool, setSnap, setOrient, setColorBy, setPtab, renderOutliner, setHidden, layState, bakeRes, buildDesc, LC, filterPanel, drawCount: () => geo.drawRange.count, gizmo, pickGizmo, snapView, setOrtho, tfLines, snapMark, getCam: () => camera, select, get tfState() { return tf; }, lc: () => ({ frames: LC.frames.length, end: lcEnd(), armed: LC.armed, play: S.lcPlay, t: S.lcT, bytes: LC.bytes, full: LC.full }), lcRestart, stepOnce, runBenchmark, expandLook, rawBuf, getSim: () => sim, cam, b, setFaceCoord, commitBox, FACES, sceneData, applySceneData, S, objs, addKey, resetSim, setDomain, selSet, select, startTf, confirmTf, cancelTf, enterEdit, exitEdit, extrudeFaces, ES, undo, redo, addAt, setSelMode, lastM, get tf() { return tf; }, get uiMode() { return uiMode; }, editPick, toScreen, makeObj, selVerts, selectAllEdit, modalKey, evalTf };
+  window.__splash = { setTool, setSnap, setOrient, setColorBy, setPtab, renderOutliner, setHidden, layState, bakeRes, buildDesc, LC, filterPanel, drawCount: () => shownN, slots: SLOTS, rawBuf, geoA, geoB, pmat, renderer, scene, gizmo, pickGizmo, snapView, setOrtho, tfLines, snapMark, getCam: () => camera, select, get tfState() { return tf; }, lc: () => ({ frames: LC.frames.length, end: lcEnd(), armed: LC.armed, play: S.lcPlay, t: S.lcT, bytes: LC.bytes, full: LC.full }), lcRestart, stepOnce, runBenchmark, getSim: () => sim, cam, b, setFaceCoord, commitBox, FACES, sceneData, applySceneData, S, objs, addKey, resetSim, setDomain, selSet, select, startTf, confirmTf, cancelTf, enterEdit, exitEdit, extrudeFaces, ES, undo, redo, addAt, setSelMode, lastM, get tf() { return tf; }, get uiMode() { return uiMode; }, editPick, toScreen, makeObj, selVerts, selectAllEdit, modalKey, evalTf };
   initGpu().then((g) => {
     S.gpu = g; applyPreset(g ? 'flip' : 'cpu');
     buildLiveUI(); buildBakeUI(); makeSim(); $('#capshow').textContent = fmtN(S.cap);

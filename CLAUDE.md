@@ -59,6 +59,10 @@ GitHub Actions (`.github/workflows/pages.yml`) builds and publishes the page to 
 - Edit mode overlay: custom shaders, depth-tested with a small bias: round dots in point mode, thick screen-space edges in edge mode, face dots in face mode.
 - Sliders are `input[type=range]` inside `.num`, styled as Blender number fields; drag sideways to change, click to type. Each row has `row._st` (get, commit, def, fmt) used by reset/copy/paste/search.
 - Live cache: frames the live view showed are kept in memory (default budget 2 GB) and replayed by Reset/Rewind/scrubbing; any change clears it (shown orange as out of date).
+- Drawing the water: the CPU writes one entry per point (x, y, z, kind code) into a float texture slot (SLOTS, 2048 wide): water first in particle order, then deep water, then whitewater. Two Points draws (water + deep, then whitewater) read the texture by gl_VertexID / copies and make the look-only extras on the GPU (fixed random offsets from a hash of the entry index). Do not go back to instancing: tiny instances were about 6x slower (SwiftShader) and integrated GPUs handle them badly too. Cache playback decodes the frames either side of the playhead into the two slots and the shader blends water between them (uBlend), so nothing is rebuilt between cache frames.
+- Bakes show in the viewport while they run (the bake becomes S.cache with partial = true and the view follows the newest frame unless scrubbed); a cancelled bake keeps the frames it finished.
+- Narrow band "Full depth" (band slider at the far right, or Ocean > Full depth): band 1e4, so particles go all the way down and nothing is grid-only. This is what makes an ocean behave like a filled volume; the narrow band's deep water is smooth and damped by design.
+- Measuring speed in tests: kill leftover browsers first (`pkill -x chromium; pkill -x headless_shell`). A browser left over from a timed-out test keeps baking and makes everything look many times slower.
 
 ## Conventions
 
