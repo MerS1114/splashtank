@@ -12,13 +12,13 @@ permissions:
   pages: write
   id-token: write
 
-concurrency:
-  group: pages-testing
-  cancel-in-progress: true
-
 jobs:
   build:
     if: startsWith(github.event.workflow_run.head_branch, 'claude/') && github.event.workflow_run.event == 'push'
+    # on the job, not the workflow: the skipped runs that follow pushes to main must not cancel a real one
+    concurrency:
+      group: pages-testing
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
