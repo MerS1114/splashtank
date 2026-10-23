@@ -167,10 +167,10 @@
   // loaded ahead on a display frame that had nothing else to load, so crossing into a new frame never has to load two at once.
   let useTick = 0;
   function slotKey(c, k) { return c.uid + ':' + k + ':' + (S.showSpray !== false); }
-  function findSlot(key) { for (let i = 1; i < NSLOT; i++) if (SLOTS[i].key === key) { SLOTS[i].used = ++useTick; return i; } return -1; }
+  function findSlot(key) { for (let i = 1; i < NBSLOT; i++) if (SLOTS[i].key === key) { SLOTS[i].used = ++useTick; return i; } return -1; }
   function slotFor(c, k, keep) {
     const key = slotKey(c, k); let i = findSlot(key); if (i > 0) return i;
-    let v = -1; for (let j = 1; j < NSLOT; j++) if (!keep.includes(j) && (v < 0 || SLOTS[j].used < SLOTS[v].used)) v = j;
+    let v = -1; for (let j = 1; j < NBSLOT; j++) if (!keep.includes(j) && (v < 0 || SLOTS[j].used < SLOTS[v].used)) v = j;
     slotLoad(SLOTS[v], c.frames[k], c.b || DEFB); SLOTS[v].key = key; SLOTS[v].used = ++useTick; loadedNow = true;
     return v;
   }

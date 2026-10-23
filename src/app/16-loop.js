@@ -8,6 +8,7 @@
     });
   }
   function stepOnce() {
+    if (sim.ready === false) return;   // the FLIP pipelines are still compiling
     const maxMove = S.dragSpeed / (S.scale || 1) * DT, states = [], tn = (S.frame + 1) * DT;
     for (const o of objs) {
       if (o.keys.length) {
@@ -42,7 +43,9 @@
   }
 
   let last = performance.now(), acc = 0, fpsE = 60, uiT = 0, recUi = 0;
+  const PREP = 'Preparing the GPU solver…';
   function frame(now) {
+    const fs = performance.now();   // page work is timed from here, not from the rAF timestamp (which includes the wait before the callback)
     requestAnimationFrame(frame); stepCam();
     const dt = Math.min((now - last) / 1000, 0.1); last = now;
     fpsE = fpsE * 0.92 + (1 / Math.max(dt, 1e-3)) * 0.08;
@@ -81,7 +84,9 @@
         if (uiT > 0.2) { uiT = 0; $('#frame').textContent = String(Math.floor((S.lcT / 60) * 24) + 1).padStart(4, '0'); updatePlayhead(); $('#count').textContent = count; $('#fps').textContent = Math.round(fpsE); $('#ms').textContent = '— (cache)'; }
       }
     } else {
-      if (S.playing && !S.baking) {
+      const prep = sim.ready === false;
+      if (prep) { if (hudMsg !== PREP) flash(PREP); } else if (hudMsg === PREP) { hudMsg = ''; hud(); }
+      if (S.playing && !S.baking && !prep) {
         if (isGpu()) {
           acc = Math.min(acc + dt, 3 * DT);
           if (acc >= DT && (sim.inflight || 0) < 2 * (S.lastSub || 1)) { acc -= DT; stepOnce(); }
@@ -96,27 +101,27 @@
       if (isGpu()) {
         if (sim.setDeepLook) sim.setDeepLook(S.nbLook && nbActive());
         sim.pump();
-        if (sim.gen !== lastGen || SLOTS[0].key !== 'live') {
+        if (sim.gen !== lastGen || SLOTS[liveI].key !== 'live') {
           const t0 = performance.now();
           const fr = S.engine === 'flip' ? sim.outFrame : (sim.outN ? packFrameBuf(rawBuf, sim.outN, sim.b, []) : null);
           if (sim.gen !== lastGen) lcRecord(fr);
-          slotLoad(SLOTS[0], fr, sim.b); SLOTS[0].key = 'live'; lastCount = SLOTS[0].alive; lastGen = sim.gen; fresh = true;
+          lastCount = liveLoad(fr, sim.b, 'live').alive; lastGen = sim.gen; fresh = true;
           perf.build = performance.now() - t0 - perf.up;
         } else fresh = false;
         count = lastCount;
         S.ms = sim.lastMs;
       }
       else {
-        slotLoad(SLOTS[0], packCpuFrame(sim.P, sim.S, sim.N, sim.b), sim.b); SLOTS[0].key = 'live'; count = SLOTS[0].alive; fresh = true;
+        count = liveLoad(packCpuFrame(sim.P, sim.S, sim.N, sim.b), sim.b, 'live').alive; fresh = true;
       }
-      showSlots(0, 0, 0); pmat.uniforms.uD.value = S.liveD; pmat.uniforms.uCR.value = S.cellRatio;
+      showSlots(liveI, liveI, 0); pmat.uniforms.uD.value = S.liveD; pmat.uniforms.uCR.value = S.cellRatio;
       pmat.uniforms.uMax.value = S.vmax / (S.scale || 1); pmat.uniforms.uSize.value = S.psize * S.liveD; points.position.set(S.simOrg.x, S.simOrg.y, S.simOrg.z);
       uiT += dt;
       if (uiT > 0.2) {
         uiT = 0;
         $('#frame').textContent = String(Math.floor((S.frame / 60) * 24) + 1).padStart(4, '0');
         updatePlayhead();
-        const simN = isGpu() ? sim.N : count; $('#count').textContent = simN; $('#fps').textContent = Math.round(fpsE); $('#ms').textContent = S.ms.toFixed(1) + ((S.lastSub || 1) > 1 ? ' ×' + S.lastSub : '');
+        const simN = isGpu() ? sim.N : count; $('#count').textContent = simN; $('#fps').textContent = Math.round(fpsE); $('#ms').textContent = prep ? 'preparing' : S.ms.toFixed(1) + ((S.lastSub || 1) > 1 ? ' ×' + S.lastSub : '');
         if (LC.frames.length && Math.random() < 0.25) lcUi();
         $('#meter').style.width = Math.min(100, (simN / S.cap) * 100) + '%';
       }
@@ -125,7 +130,7 @@
     vpT += dt; if (vpT > 0.25) { vpT = 0; try { vpInfo(); } catch (e) { /* not ready */ } }
     placeHandles();
     oceanUpdate(mode);
-    const tr = performance.now(); renderer.render(scene, camera); perf.render = performance.now() - tr; perf.frame = performance.now() - now;
+    const tr = performance.now(); renderer.render(scene, camera); perf.render = performance.now() - tr; perf.frame = performance.now() - fs;
     if (frameHook) frameHook(performance.now());
   }
 

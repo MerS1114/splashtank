@@ -15,6 +15,8 @@ async function open(scene, opts) {
   await pg.goto('file://' + (opts.page || PAGE)); await wait(6000);
   if (scene) { await pg.select('#scene', scene); await wait(3000); }
   if (opts.spacing) { await pg.evaluate((d) => document.querySelector('#s-res').closest('.row')._st.commit(d), opts.spacing); await wait(1500); }
+  // the FLIP pipelines compile in the background; nothing steps until they are ready
+  await pg.waitForFunction(() => { const s = window.__splash; return s && s.getSim() && s.getSim().ready !== false; }, { timeout: 180000, polling: 250 }).catch(() => errs.push('solver pipelines never got ready'));
   return { br, pg, errs, ev: (f, ...a) => pg.evaluate(f, ...a), shot: (name) => pg.screenshot({ path: OUT + '/' + name + '.png' }) };
 }
 // wait until fn() (run in the page) returns something truthy, checking every `every` ms, up to `ms`

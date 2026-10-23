@@ -441,13 +441,15 @@ class GpuSim {
       return n;
     });
   }
-  // how many steps are still queued on the GPU, and a running average of the time one step really takes
+  // how many steps are still queued on the GPU, and the median time one step really takes over the last 31 steps
+  // (a median, so one slow step, such as the first after a start, does not spoil the readout for long)
   track() {
     const t = performance.now(); this.inflight = (this.inflight || 0) + 1;
     const start = Math.max(t, this.lastDone || 0);
     this.dev.queue.onSubmittedWorkDone().then(() => {
       const n = performance.now(); this.inflight--; const ms = n - start; this.lastDone = n;
-      this.lastMs = this.lastMs ? this.lastMs * 0.9 + ms * 0.1 : ms;
+      const r = this.stepMs || (this.stepMs = []); r.push(ms); if (r.length > 31) r.shift();
+      const s = r.slice().sort((a, b) => a - b); this.lastMs = s[s.length >> 1]; this.slowMs = Math.max(this.slowMs || 0, ms);
     });
   }
   // live view: up to three readbacks in flight, so stepping never waits for the copy to the CPU. The newest finished copy is shown.

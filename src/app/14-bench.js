@@ -11,7 +11,7 @@
     const settle = () => sim.dev.queue.onSubmittedWorkDone();
     try {
       say('Warming up, this fills the scene with water first...');
-      resetSim(0);
+      await sim.whenReady; resetSim(0);
       for (let i = 0, W = window.__benchW || 150; i < W; i++) { stepOnce(); if (i % 10 === 9) await settle(); }
       await settle();
       const N = sim.N, M = window.__benchM || 24, ST = ['sort', 'blocks', 'clear', 'p2g', 'classify', 'normFaces', 'divergence', 'pressure', 'project', 'g2p', 'spray'];
@@ -111,12 +111,18 @@
       say('Scene: ' + $('#scene').value + ', ' + S.engine.toUpperCase() + ', spacing ' + S.liveD.toFixed(3) + ', max points ' + fmtN(S.cap) + ', whitewater ' + (S.sprOn ? 'on (pool ' + fmtN(S.sprCap) + ')' : 'off') + ', narrow band ' + (nbActive() ? 'on' : 'off') + '. View ' + cv.width + ' × ' + cv.height + ' pixels, look-only copies ' + (1 + (S.detail | 0)) + ' water, ' + (1 + (S.sprDetail | 0)) + ' whitewater.');
       // 1. the live sim from the start
       S.tab = 'live'; applyMode(); setCPlay(false); setPlaying(false); lcClear(); resetSim(0);
+      if (sim.whenReady) {
+        const sh = S.engine === 'flip' ? flipPipes(sim.dev) : null, t0 = performance.now();
+        await sim.whenReady;
+        if (sh) say('GPU solver prepared (' + Object.keys(FLIP_L).length + ' shaders compiled at once, shared by every scene) in ' + f1(sh.ms / 1000) + ' s' + (performance.now() - t0 > 50 ? ', ' + f1((performance.now() - t0) / 1000) + ' s of it during this test' : ' when the page started') + '.');
+      }
       await new Promise((r) => setTimeout(r, 400));
+      if (sim.stepMs) sim.stepMs.length = 0; sim.slowMs = 0;
       setPlaying(true);
       say(''); say('Live sim, ' + (window.__smoothSecs || 10) + ' seconds from the start:');
       const L = await record(window.__smoothSecs || 10); setPlaying(false);
       const simS = (S.frame - L.frame0) / 60;
-      say('  The sim got through ' + f1(simS) + ' s of its time (' + Math.round(100 * simS / L.secs) + '% of real time). ' + fmtN(sim.N) + ' particles now, solver step about ' + f1(sim.lastMs) + ' ms on the GPU' + (S.lastSub > 1 ? ' with ' + S.lastSub + ' substeps a frame' : '') + ', ' + fmtN(shownN) + ' points drawn.');
+      say('  The sim got through ' + f1(simS) + ' s of its time (' + Math.round(100 * simS / L.secs) + '% of real time). ' + fmtN(sim.N) + ' particles now, solver step about ' + f1(sim.lastMs) + ' ms on the GPU (median of the last 31, slowest ' + f0(sim.slowMs) + ' ms)' + (S.lastSub > 1 ? ' with ' + S.lastSub + ' substeps a frame' : '') + ', ' + fmtN(shownN) + ' points drawn.');
       report(L);
       // 2. the bake, if there is one
       if (S.cache && S.cache.frames.length > 2) {

@@ -11,6 +11,38 @@ function flipWGSL() { return FLIP_WGSL_CORE + FLIP_WGSL_BLOCKS + FLIP_WGSL_SOLVE
 const FLIP_SLOT = { cells: 512 };   // one block of the sparse grid: 8 x 8 x 8 cells
 const FLIP_PARAMS_BYTES = 1632;      // the solver's uniform block: settings, whitewater, air and drips (words 68-83), starting-water shapes (84), ocean waves (148)
 const FLIP_DEEPMAX = 200000;          // deep water points drawn at most (narrow band, look only); matches DEEPMAX in the shader
+// The bindings each kernel uses (makeGroups says which buffer each number is). Keep every kernel within 8 storage buffers.
+const FLIP_L = {
+  tileReset: [12], tileNeedClear: [0, 17], tileMark: [0, 1, 17], tileMarkPhi: [0, 7, 12, 17, 18, 19], tileMarkFill: [0, 10, 11, 17], phiInitAll: [0, 7, 10, 11, 12, 18, 19, 31], tileFree: [0, 12, 16, 17, 20, 21], argsNew: [12, 14], tileAlloc: [0, 12, 16, 19, 20, 21], tileFix: [0, 12],
+  initNew: [0, 7, 8, 10, 11, 12, 21, 31], slotListBuild: [0, 12, 16, 18], argsSlots: [12, 14], growFree: [12, 20, 25],
+  sortClear: [22], sortHist: [0, 1, 22], sortScan: [22], sortScatter: [0, 1, 2, 22, 23, 24, 26, 27], sortCopy: [0, 1, 2, 23, 24, 26, 27], unsort: [0, 1, 23, 26],
+  clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], sprayStep: [0, 10, 11, 28, 29, 32, 33], sprayDisp: [0, 15, 28, 29, 30], dispBegin: [30], packDisp: [1, 12, 15, 30, 37, 38], wwSample: [0, 3, 5, 6, 7, 16, 28, 33], wwArgs: [0, 14, 30],
+  airClear: [0, 34], airSplatW: [0, 1, 2, 6, 16, 34], airSplatS: [0, 28, 29, 34], airUpdate: [0, 10, 11, 32, 34, 35], airCopy: [0, 32, 35], dripStep: [0, 6, 7, 10, 16, 28, 29, 30, 36],
+  normFaces: [0, 3, 5, 7, 10, 12, 16, 18, 19], divergence: [0, 3, 6, 7, 9, 12, 16, 18, 19],
+  listClear: [12], buildList: [0, 7, 12, 13, 18, 19], listArgs: [0, 12, 14], rbRed: [0, 7, 8, 9, 12, 13, 16, 19], rbBlack: [0, 7, 8, 9, 12, 13, 16, 19],
+  project: [0, 3, 7, 8, 12, 16, 18, 19], subsample: [0, 1, 15], g2p: [0, 1, 2, 3, 5, 6, 10, 11, 16],
+  nbPhi: [0, 6, 7, 9, 12, 16, 18, 19, 31], nbJacA: [0, 7, 9, 12, 16, 18, 19], nbJacB: [0, 7, 9, 12, 16, 18, 19], nbVel: [0, 3, 5, 7, 12, 16, 18, 19, 31],
+  saveVel: [0, 3, 12, 18, 19, 31], nbKill: [0, 1, 2, 7, 16], nbReset: [12], nbDead: [0, 1, 12, 13], nbDeficit: [0, 6, 7, 12, 13, 16, 18, 19, 31], nbArgs: [0, 12, 14],
+  nbSpawn: [0, 1, 2, 12, 13, 16, 31], deepClear: [0, 15], deepPick: [0, 6, 7, 12, 15, 16, 18, 19, 31], deepFin: [12] };
+// The ~85 compute pipelines, made once per device and shared by every FlipSim (a new one is made on each scene load and spacing change).
+// createComputePipelineAsync lets the driver compile them in parallel; done one after another on first use they stalled the first step
+// for many seconds on some GPUs (D3D shader compiles). pipes is set once all of them are ready.
+const FLIP_PIPES = new WeakMap();
+function flipPipes(device) {
+  let sh = FLIP_PIPES.get(device); if (sh) return sh;
+  sh = { pipes: null, ms: 0 }; FLIP_PIPES.set(device, sh);
+  const t0 = performance.now(), mod = device.createShaderModule({ code: flipWGSL() }), names = Object.keys(FLIP_L);
+  const one = (name) => {
+    const desc = { layout: 'auto', compute: { module: mod, entryPoint: name } };
+    if (!device.createComputePipelineAsync) return Promise.resolve(device.createComputePipeline(desc));
+    return device.createComputePipelineAsync(desc).catch((e) => { console.error('FLIP pipeline ' + name + ': ' + e.message); return device.createComputePipeline(desc); });
+  };
+  sh.promise = Promise.all(names.map(one)).then((list) => {
+    const p = {}; names.forEach((n, k) => { p[n] = list[k]; });
+    sh.pipes = p; sh.ms = performance.now() - t0; return p;
+  });
+  return sh;
+}
 class FlipSim {
   constructor(device, opt) {
     const d = (this.d = opt.d), ratio = (this.ratio = Math.max(1.4, Math.min(4, opt.ratio || 2))), h = (this.h = ratio * d);
@@ -64,22 +96,16 @@ class FlipSim {
     const st = new Uint32Array(this.scap - 1); for (let k = 0; k < st.length; k++) st[k] = this.scap - 1 - k;
     device.queue.writeBuffer(this.bStack, 0, st);
     device.queue.writeBuffer(this.bCtl, 0, new Uint32Array([0, 0, this.scap - 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
-    const mod = device.createShaderModule({ code: flipWGSL() });
-    const L = {
-      tileReset: [12], tileNeedClear: [0, 17], tileMark: [0, 1, 17], tileMarkPhi: [0, 7, 12, 17, 18, 19], tileMarkFill: [0, 10, 11, 17], phiInitAll: [0, 7, 10, 11, 12, 18, 19, 31], tileFree: [0, 12, 16, 17, 20, 21], argsNew: [12, 14], tileAlloc: [0, 12, 16, 19, 20, 21], tileFix: [0, 12],
-      initNew: [0, 7, 8, 10, 11, 12, 21, 31], slotListBuild: [0, 12, 16, 18], argsSlots: [12, 14], growFree: [12, 20, 25],
-      sortClear: [22], sortHist: [0, 1, 22], sortScan: [22], sortScatter: [0, 1, 2, 22, 23, 24, 26, 27], sortCopy: [0, 1, 2, 23, 24, 26, 27], unsort: [0, 1, 23, 26],
-      clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], sprayStep: [0, 10, 11, 28, 29, 32, 33], sprayDisp: [0, 15, 28, 29, 30], dispBegin: [30], packDisp: [1, 12, 15, 30, 37, 38], wwSample: [0, 3, 5, 6, 7, 16, 28, 33], wwArgs: [0, 14, 30],
-      airClear: [0, 34], airSplatW: [0, 1, 2, 6, 16, 34], airSplatS: [0, 28, 29, 34], airUpdate: [0, 10, 11, 32, 34, 35], airCopy: [0, 32, 35], dripStep: [0, 6, 7, 10, 16, 28, 29, 30, 36],
-      normFaces: [0, 3, 5, 7, 10, 12, 16, 18, 19], divergence: [0, 3, 6, 7, 9, 12, 16, 18, 19],
-      listClear: [12], buildList: [0, 7, 12, 13, 18, 19], listArgs: [0, 12, 14], rbRed: [0, 7, 8, 9, 12, 13, 16, 19], rbBlack: [0, 7, 8, 9, 12, 13, 16, 19],
-      project: [0, 3, 7, 8, 12, 16, 18, 19], subsample: [0, 1, 15], g2p: [0, 1, 2, 3, 5, 6, 10, 11, 16],
-      nbPhi: [0, 6, 7, 9, 12, 16, 18, 19, 31], nbJacA: [0, 7, 9, 12, 16, 18, 19], nbJacB: [0, 7, 9, 12, 16, 18, 19], nbVel: [0, 3, 5, 7, 12, 16, 18, 19, 31],
-      saveVel: [0, 3, 12, 18, 19, 31], nbKill: [0, 1, 2, 7, 16], nbReset: [12], nbDead: [0, 1, 12, 13], nbDeficit: [0, 6, 7, 12, 13, 16, 18, 19, 31], nbArgs: [0, 12, 14],
-      nbSpawn: [0, 1, 2, 12, 13, 16, 31], deepClear: [0, 15], deepPick: [0, 6, 7, 12, 15, 16, 18, 19, 31], deepFin: [12] };
-    this.L = L; this.pipes = {};
-    for (const name in L) this.pipes[name] = { pipeline: device.createComputePipeline({ layout: 'auto', compute: { module: mod, entryPoint: name } }) };
-    this.dispAlloc();   // also makes the bind groups
+    // the pipelines are shared by every FlipSim on this device and compiled once, in parallel; until they are ready the sim does not step
+    this.L = FLIP_L; this.pipes = {}; this.ready = false;
+    const sh = flipPipes(device);
+    this.dispAlloc();   // makes the bind groups once the pipelines are there
+    if (sh.pipes) this.usePipes(sh.pipes);
+    this.whenReady = sh.promise.then((p) => { if (!this.dead && !this.ready) this.usePipes(p); return this; });
+  }
+  usePipes(p) {
+    for (const name in this.L) this.pipes[name] = { pipeline: p[name] };
+    this.ready = true; this.makeGroups();
   }
   // per-block storage: cell count, type, pressure, rhs (4 bytes each per cell), two numbers for each of the three faces, plus slot bookkeeping
   makeSlotBuffers(n) {
@@ -100,6 +126,7 @@ class FlipSim {
   }
   slotBufs() { return ['bCnt', 'bType', 'bPres', 'bRhs', 'bAcc', 'bAccW', 'bVelG', 'bSlotList', 'bSlotTile', 'bStack']; }
   makeGroups() {
+    if (!this.ready) return;
     const bufs = { 0: this.bParams, 1: this.bPos, 2: this.bVel, 3: this.bAcc, 5: this.bAccW, 6: this.bCnt, 7: this.bType, 8: this.bPres, 9: this.bRhs, 10: this.bCols, 11: this.bSdf,
       12: this.bCtl, 13: this.bList, 14: this.bArgs, 15: this.bDisp, 16: this.bTmap, 17: this.bNeed, 18: this.bSlotList, 19: this.bSlotTile, 20: this.bStack, 21: this.bNew,
       22: this.bSortCnt, 23: this.bTpos, 24: this.bTvel, 25: this.bGro, 26: this.bPid, 27: this.bTpid, 28: this.bSPos, 29: this.bSVel, 30: this.bSctl, 31: this.bVelG,
@@ -151,7 +178,7 @@ class FlipSim {
   }
   step(dt, o) {
     this.flushRun();
-    const N = this.N; if (N === 0) return;
+    const N = this.N; if (N === 0 || !this.ready) return;
     if (!this.only) this.maybeGrow();
     const u32 = this.pu32, f32 = this.pf32, h = this.h, b = this.b;
     this.stride = Math.max(1, Math.ceil(N / this.dispMax)); this.lastN = N;
@@ -283,6 +310,7 @@ class FlipSim {
   }
   // benchmark helper: run one real step, but submit every stage separately and wait for it, returning milliseconds per stage
   async stepTimed(dt, o) {
+    await this.whenReady;
     const N = this.N; if (N === 0) return null;
     this.maybeGrow();
     const iters = Math.max(1, (this.opt.iters || o.iters) | 0);
@@ -476,7 +504,7 @@ class FlipSim {
 // The live view: packed on the GPU (dispPack) and read back with up to three copies in flight, so stepping never waits for them.
 // The newest finished copy becomes this.outFrame, a frame in the cache format that the drawing uploads as it is and the live cache keeps.
 FlipSim.prototype.pump = function () {
-  if (!this.needRead) return;
+  if (!this.needRead || !this.ready) return;
   if (!this.rs) this.rs = [0, 1, 2].map(() => ({ buf: this.dev.createBuffer({ size: Math.max(this.packWords * 4, 16), usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), busy: false }));
   const s = this.rs.find((q) => !q.busy); if (!s) return;
   this.flushRun();

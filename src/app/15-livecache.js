@@ -40,10 +40,10 @@
     const fn = LC.fnum; let lo = 0, hi = fn.length - 1;
     while (lo < hi) { const m = (lo + hi + 1) >> 1; if (fn[m] <= S.lcT) lo = m; else hi = m - 1; }
     const A = LC.frames[lo], cb = LC.b, og = LC.org;
-    const sl = SLOTS[0], key = 'lc:' + lo + ':' + LC.fnum[lo] + ':' + (S.showSpray !== false);
-    if (sl.key !== key) { slotLoad(sl, A, cb); sl.key = key; }
+    const key = 'lc:' + lo + ':' + LC.fnum[lo] + ':' + (S.showSpray !== false);
+    const sl = SLOTS[liveI].key === key ? SLOTS[liveI] : liveLoad(A, cb, key);
     pmat.uniforms.uD.value = LC.d; pmat.uniforms.uCR.value = S.cellRatio;
-    showSlots(0, 0, 0); lastGen = -1;
+    showSlots(liveI, liveI, 0); lastGen = -1;
     const n = sl.alive;
     LC.ids.forEach((id, k) => {
       const o = objs.find((q) => q.id === id); if (!o) return;
