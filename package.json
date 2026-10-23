@@ -5,7 +5,9 @@
   "description": "SplashTank: a standalone WebGPU FLIP water simulator in one HTML page",
   "scripts": {
     "build": "python3 tools/build.py",
-    "test": "python3 tools/build.py && node tests/smoke.js"
+    "check": "node tools/check.js",
+    "test": "python3 tools/build.py && node tests/smoke.js",
+    "t": "python3 tools/build.py && node"
   },
   "devDependencies": {
     "@sparticuz/chromium": "^153.0.0",

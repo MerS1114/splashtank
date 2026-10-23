@@ -2,6 +2,7 @@
 
 All tests open `dist/SplashTank.html` in headless Chromium with a software GPU, so build first (`npm run build`). Screenshots and downloads go to `test-output/`. Run them one at a time.
 
+- `lib.js`: shared start-up for new tests (open a scene, run code in the page, wait for a condition, screenshot). Not a test itself.
 - `smoke.js`: the quick pass/fail check (`npm test`).
 - `ui2.js`, `ui3.js`: interface basics: typing values, tooltips, right-click menu, search, add menu, live cache lanes, bake panel, gizmo, view snapping.
 - `ui5b.js`: click selects without moving, gizmo size, snapping (Ctrl, magnet, while playing), Global/Local scaling, edit mode looks, double-click a key, splitters, slider drag, menus.

@@ -11,28 +11,64 @@ SplashTank is a water simulator in one HTML page: a WebGPU FLIP solver (Houdini 
 
 ## Layout of the repo
 
+Files are split by area so a change means reading one small file. Find things with grep (function names are unique), then read only that file or range.
+
 - `src/head.html`: CSS, the page layout and every element with an id. The app finds elements by id, so keep ids when restyling.
-- `src/shared.js`: code shared by the page and the CPU bake worker: CPU PBF solver (FluidSim), SceneRunner, collider SDFs, keyframe sampling, cache file format (writeCacheParts / parseCache), ocean wave spectrum (oceanWaves, oceanEtaJS, oceanVelJS), narrow band seeding (nbSeed).
-- `src/gpu.js`: GPU PBF solver (GpuSim), WebGPU setup (initGpu), the live readback ring (pump), packFrameBuf / packDeep for cache frames, runBakeGpu.
-- `src/flip.js`: the FLIP solver (FlipSim): WGSL in flipWGSL(), pipelines, step(), dispPack() and pump for the live view, readbackInto / readSpray / readDeep for bakes, runBakeFlipGpu.
-- `src/presets.js`: the Meteor lake and Waterfall presets, as scene files Mer saved from the app (SCENE_FILES); loadScene loads them like a scene file. The other presets are built in code (SCENES in app.js).
-- `src/app.js`: everything else (one IIFE): UI, scene objects, transforms, edit mode, timeline and keys, live cache, bakes, panels, menus, layout.
-- `tools/build.py`: concatenates the above with three.min.js (from node_modules) into `dist/SplashTank.html`.
-- `tests/`: puppeteer scripts. `smoke.js` asserts and exits non-zero on failure; the others print measurements and save screenshots to `test-output/` for a person (or Claude) to look at.
+- `src/shared.js`: code shared by the page and the workers (CPU bake, collision shapes): CPU PBF solver (FluidSim), SceneRunner, collision shapes (buildSDF), keyframe sampling, cache file format (writeCacheParts / parseCache), ocean waves (oceanWaves, oceanEtaJS, oceanVelJS), narrow band seeding (nbSeed).
+- `src/gpu.js`: GPU PBF solver (GpuSim), WebGPU setup (initGpu), SDF_WGSL, packFrameBuf / packDeep for cache frames, runBakeGpu.
+- `src/flip/`: the FLIP solver. The shader is five parts joined by flipWGSL() (WGSL does not care about declaration order):
+  - `wgsl-core.js` parameter block (Params), every binding, shared helpers (cells, blocks, colliders, sampling, narrow band and ocean helpers);
+  - `wgsl-blocks.js` sparse block allocation and the particle sort;
+  - `wgsl-solver.js` one step: clear, p2g, classify, divergence, pressure, project, collideP, g2p;
+  - `wgsl-whitewater.js` whitewater, air field, drips, live view gather and packing (sprayDisp, packDisp), deep water points;
+  - `wgsl-narrowband.js` narrow band kernels;
+  - `sim.js` the FlipSim class (buffers, binding table L, step(), stages(), dispPack(), pump(), unpackLive, readbacks);
+  - `bake.js` CPU-side helpers (packSprayJS, dripSamples, packSprayFrame, bakeDiag) and runBakeFlipGpu.
+  Adding a kernel: write it in the right wgsl part, add its bindings to `L` in sim.js (max 8 storage buffers), dispatch it in stages() or where it belongs.
+- `src/presets.js`: Meteor lake and Waterfall, as scene files Mer saved from the app (SCENE_FILES); loadScene loads them like a scene file. Other presets are built in code (SCENES in app/04-scenes.js).
+- `src/app/`: the app, one function split into numbered parts that share its variables (build.py joins them in name order inside `(function () { ... })();`). A part can use anything from any part at run time, but code that runs at start-up may only use what earlier parts defined.
+  - `00-state.js` S (settings and state), solver presets, ocean and narrow band config;
+  - `01-draw.js` the frame format notes, SLOTS, frameAlive, packCpuFrame, makeSim, simPar;
+  - `02-viewport.js` three.js, cameras, integer-texture slots (slotAlloc, slotLoad), the three point shaders and showSlots, ocean view, tank box, face handles;
+  - `03-objects.js` scene objects, meshes, collision shapes (rebuildSDF, rebuildSDFLater worker);
+  - `04-scenes.js` built-in scenes, loadScene, resetSim, undo;
+  - `05-panels.js` slider/check/segment helpers and the property panels (box, live solver, whitewater, narrow band, ocean, bake, display);
+  - `06-outliner.js` object list, object parameters, outliner;
+  - `07-timeline.js` keys and the one timeline (tlSpan, tlNow, scrubTo, stepFrame), recording;
+  - `08-modes.js` play buttons, Live/Bake (viewMode, applyMode);
+  - `09-bake.js` baking, progressive display, cache info, saving, report, cache slots (slotFor, showCache), loading a cache;
+  - `10-edit.js` viewport helpers and edit mode; `11-transform.js` G/R/S, snapping, orientation; `12-input.js` add menu, keyboard, pointer;
+  - `13-files.js` scene files (sceneData, applySceneData); `14-bench.js` solver benchmark and smoothness test (runSmooth);
+  - `15-livecache.js` live cache (lcRecord, lcShow, lcUi); `16-loop.js` stepOnce and the frame loop;
+  - `17-panelui.js` group folding, tooltips, right-click menu, search, status bar; `18-layout.js` tabs, menus, tool shelf, viewport header, splitters, window.__splash, start-up.
+- `tools/build.py`: joins the above with three.min.js (from node_modules) into `dist/SplashTank.html`, then runs `tools/check.js`, which reports syntax errors by source file and line.
+- `tests/`: puppeteer scripts (see tests/README.md). `tests/lib.js` has the shared start-up (open a scene, run code in the page, wait, screenshot); use it for new tests. `smoke.js` asserts and exits non-zero on failure; the others print measurements and save screenshots to `test-output/`.
 - `native/splash.cpp`: an older native multithreaded baker; the page can still read its cache format. Not part of the build.
 
 ## Build and test
 
-    npm install          # once: three.js and the test browser
-    npm run build        # dist/SplashTank.html
-    npm test             # build + smoke test (about a minute)
-    node tests/ui5b.js   # any other test, after building
+    npm install                  # once: three.js and the test browser
+    npm run build                # dist/SplashTank.html + syntax check (a second or two)
+    npm test                     # build + smoke test (about a minute)
+    npm run t -- tests/ui5b.js   # build, then run one test
 
-Tests are slow on SwiftShader (a few frames a second). Run them one at a time; in parallel they get flaky. Kill stray browsers with `pkill -x chromium` style exact matches, never `pkill -f` (it matches the shell running it).
+Fast loop: edit, `npm run build` (catches syntax errors by file and line), then the one test that covers the area (tests/README.md says which), then `npm test` before committing. Do not run long tests just to check a small change.
 
-`window.__splash` exposes app internals for tests (S, objs, getSim, select, startTf, setTool, setPtab and many more). Add to it rather than reaching into the DOM when a test needs state.
+Tests are slow on SwiftShader (a few frames a second; bakes take minutes). Run them one at a time; in parallel they get flaky. Kill stray browsers with `pkill -x chromium; pkill -x headless_shell` (exact matches, never `pkill -f`, which matches the shell running it), and always before timing anything. Do not start a test that writes to the same output file as one still running.
 
-GitHub Actions (`.github/workflows/pages.yml`) builds and publishes the page to GitHub Pages on every push to main and runs the smoke test.
+`window.__splash` exposes app internals for tests (S, objs, getSim, select, startTf, setTool, setPtab, slotLoad, perf, runSmooth and many more). Add to it (in 18-layout.js) rather than reaching into the DOM when a test needs state.
+
+GitHub Actions (`.github/workflows/pages.yml`) builds and publishes the page to GitHub Pages on every push to main and runs the smoke test. Check with `gh run list -R MerS1114/splashtank -L 1`.
+
+## Current work (update this when it changes)
+
+Mer's smoothness test on her Intel UHD 730 (Meteor lake preset, spacing 0.03, 219k particles live, bake up to 491k water points), after the integer-texture drawing:
+- Bake playback is fine: 44 frames a second, typical frame 23 ms, slowest 55 ms, uploads 1.6 ms (4.3 MB) per bake frame.
+- Live: one frame of 23 seconds right after pressing Start, then 28 ms frames. Almost certainly the first use of the ~85 compute pipelines (D3D shader compiles on her machine, done one after another). Planned fix: create the pipelines once per device and share them between FlipSim instances (a new FlipSim is made on every scene load and spacing change), with createComputePipelineAsync so they compile in parallel; do not step the sim until they are ready (show "Preparing the GPU solver").
+- The reported solver step (375 ms) is sim.lastMs, a running average spoiled by that 23 s step; make it a median of recent steps so the readout and the test are honest.
+- Live uploads took 4.7 ms for 1.8 MB (bake uploads 1.6 ms for 4.3 MB): slot 0 is rewritten while the last draw may still use it. Planned fix: alternate between two slots for the live view.
+- perf.frame is measured from the rAF timestamp, so "page work per frame" includes the wait before the callback; measure from the start of frame() instead.
+- Her live sim got through only 0.3 s of sim time in 10 s; once the stall is fixed, rerun the test (and the solver benchmark) to see the real per-step cost. Her scene has a 4 million whitewater pool; once that many slots have been handed out, every whitewater kernel runs over all of them each substep.
 
 ## FLIP solver, in brief
 
