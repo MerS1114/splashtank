@@ -16,4 +16,5 @@ All tests open `dist/SplashTank.html` in headless Chromium with a software GPU, 
 - `bake_live.js`: the bake shows while it runs; cancelling keeps the finished frames.
 - `ww.js`: whitewater, air field and dripping: counts points by kind while a scene runs, screenshots in speed and type colours. `node tests/ww.js "Meteor lake" 90 0.08`.
 - `timeline.js`: the one timeline with a bake shown (frame stepping by buttons and arrow keys, ruler clicks, Shift+Left), stepping in the live view, and a short run of the in-page smoothness test.
+- `redraw.js`: while the sim plays the live view redraws only for new sim frames; stopped, every frame (asserts, exits non-zero).
 - `snap.js`, `gz.js`: older snapping and gizmo checks.

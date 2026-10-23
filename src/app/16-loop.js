@@ -47,7 +47,7 @@
   // While the sim plays, the live view is redrawn only when something changed: a new frame from the sim, the camera moving, or any input in the last moments
   // (and at least twice a second). Drawing shares the GPU with the solver: on Mer's Intel UHD 730 not drawing made a step about 40% faster,
   // and redrawing the same water 33 times a second while the sim delivered 8 new frames only slowed the sim down.
-  let lastInput = 0, lastDraw = 0; const camWas = new Float32Array(17);
+  let lastInput = 0, lastDraw = 0; const camWas = new Float64Array(17);   // 64-bit: a 32-bit copy never equals the matrix, so every frame looked like a camera move
   ['pointerdown', 'pointermove', 'pointerup', 'wheel', 'keydown', 'keyup', 'input', 'change', 'resize'].forEach((ev) => window.addEventListener(ev, () => { lastInput = performance.now(); }, { capture: true, passive: true }));
   function camMoved() {
     const m = camera.matrixWorld.elements, p = camera.projectionMatrix.elements; let moved = camWas[16] !== p[0] + p[5];
