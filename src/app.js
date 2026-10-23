@@ -7,7 +7,7 @@
     cpu: { liveD: 0.12, cap: 6000, iters: 2, capMax: 14000, dMin: 0.07, bk: { d: 0.06, sub: 3, iters: 3, maxN: 80000 }, bkMax: 200000, bkDMin: 0.03 }
   };
   const S = {
-    playing: false, fastAir: false, sortP: true, colMax: 100, dragSpeed: 20, vmaxW: 50, subMin: 1, subMax: 16, scale: 1, tear: 0.5, sprOn: true, sprAmt: 2, sprMin: 2.5, sprLife: 1.2, sprMist: 0.3, sprDrag: 1, mistDrag: 5, sprCap: 600000, streak: 0.02, sprDetail: 4, gizmo: false, snapV: false, snapOn: false, snapTo: 'vertex', orient: 'global', colorBy: 'speed', nbLook: false, ortho: false, lcOn: true, lcBudget: 2048, lcPlay: false, lcT: 0, g: 9.8, iters: 2, visc: 0.04, cap: 6000, liveD: 0.12, psize: 0.85, vmax: 5,
+    playing: false, fastAir: false, sortP: true, colMax: 100, dragSpeed: 20, vmaxW: 50, subMin: 1, subMax: 16, scale: 1, tear: 0.5, sprOn: true, sprAmt: 2, sprMin: 2.5, sprLife: 1.2, sprMist: 0.3, sprDrag: 1, mistDrag: 5, sprCap: 600000, streak: 0.02, wwFoamLife: 3, wwRise: 0.4, wwCrest: 1, wwImpact: 0.25, airOn: true, airCouple: 3, airDecay: 0.6, dripOn: true, dripRate: 2, dripDry: 3, sprDetail: 4, gizmo: false, snapV: false, snapOn: false, snapTo: 'vertex', orient: 'global', colorBy: 'speed', nbLook: false, ortho: false, lcOn: true, lcBudget: 2048, lcPlay: false, lcT: 0, g: 9.8, iters: 2, visc: 0.04, cap: 6000, liveD: 0.12, psize: 0.85, vmax: 5,
     frame: 0, drag: 'floor', bg: 'grey', shift: false, rec: false, ms: 0,
     tab: 'live', fills: [], events: [], engine: 'cpu', gpu: null, flip: 0.95,
     dom: { w: 3, h: 2.6, d: 3 }, min: { x: -1.5, y: 0, z: -1.5 }, org: { x: 0, y: 0, z: 0 }, simOrg: { x: 0, y: 0, z: 0 },
@@ -56,9 +56,24 @@
     }
     return n;
   }
+  // a whitewater point from its packed form (see packSpray in flip.js): spray as short streaks, mist as wide puffs,
+  // foam as flat patches on the surface that thin out as it ages, bubbles as small specks
   function putSpray(n, x, y, z, pk, i, cell) {
     const K = S.sprDetail | 0; if (n + 4 + K > rBuf.length / 4) return n;
-    const mist = (pk & 0x40000000) !== 0, spd = ((pk >>> 21) & 511) / 4;
+    const kc = (pk >>> 29) & 3, spd = ((pk >>> 21) & 255) / 4;
+    if (kc === 1 || kc === 3) {
+      const foam = kc === 1, life = (pk & 1023) / 1023, code = (foam ? 6144 : 7168) + Math.round(life * 63);
+      let k4 = n * 4; rBuf[k4] = x; rBuf[k4 + 1] = y; rBuf[k4 + 2] = z; rBuf[k4 + 3] = code; n++;
+      if (K > 0) {
+        const rad = (cell || 0.08) * (foam ? 0.5 + 0.5 * life : 0.25), flat = foam ? 0.12 : 1, ii = (i | 0) * 3 + 11;
+        for (let c = 0, KK = foam ? Math.ceil(K / 2) : Math.min(K, 2); c < KK; c++) {
+          const tt = ((ii * 7 + c * 131 + (ii >> 3) * 17) & 4095) * 3; k4 = n * 4;
+          rBuf[k4] = x + LOOK[tt] * rad; rBuf[k4 + 1] = y + LOOK[tt + 1] * rad * flat; rBuf[k4 + 2] = z + LOOK[tt + 2] * rad; rBuf[k4 + 3] = code; n++;
+        }
+      }
+      return n;
+    }
+    const mist = kc === 2;
     const u = (pk & 1023) / 1023 * 2 - 1, w = ((pk >>> 10) & 1023) / 1023 * 2 - 1;
     let nx = u, ny = w; const nz = 1 - Math.abs(u) - Math.abs(w);
     if (nz < 0) { nx = (1 - Math.abs(w)) * (u >= 0 ? 1 : -1); ny = (1 - Math.abs(u)) * (w >= 0 ? 1 : -1); }
@@ -129,7 +144,9 @@
     const k = 1 / (S.scale || 1);
     return { g: S.g * k, iters: S.iters, visc: S.visc, flip: S.flip, comp: 6, wind: windVec().map((v) => v * k), drag: S.airDrag * k, gust: S.gust * k, foamSens: S.foamSens * k, foamTau: S.foamTau,
       colMax: S.colMax * k, vmax: S.vmaxW * k, scale: S.scale || 1, vs: S.scale || 1, tear: S.tear * 0.5 * Math.pow(S.cellRatio, 3),
-      spr: S.sprOn ? { rate: 12 * S.sprAmt, min: S.sprMin, life: S.sprLife, mist: S.sprMist, drag: S.sprDrag, mdrag: S.mistDrag } : null,
+      spr: S.sprOn ? { rate: 12 * S.sprAmt, min: S.sprMin, life: S.sprLife, mist: S.sprMist, drag: S.sprDrag, mdrag: S.mistDrag, ww: { foamLife: S.wwFoamLife, rise: S.wwRise * k, crest: S.wwCrest, impact: S.wwImpact } } : null,
+      air: S.sprOn && S.airOn ? { on: true, couple: S.airCouple, decay: S.airDecay } : null,
+      drip: S.sprOn && S.dripOn ? { on: true, rate: S.dripRate, dry: S.dripDry } : null,
       nb: nbCfg(), ocean: oceanCfg(), time: S.frame * DT };
   }
   const windVec = () => [S.wind.speed * Math.cos(S.wind.az * Math.PI / 180), S.wind.up, S.wind.speed * Math.sin(S.wind.az * Math.PI / 180)];
@@ -171,22 +188,29 @@
   function uploadParticles(n) { geo.setDrawRange(0, n); ibuf.updateRange.offset = 0; ibuf.updateRange.count = n * 4; ibuf.needsUpdate = true; }
   // the points. speed holds the kind: below 1024 water (speed + 64 x white water level), 2048 spray, 3072 mist, 4096 + speed a deep water point (narrow band, look only).
   // Colour by Speed runs blue to cyan to white with speed and draws churned water white; Colour by Type gives each kind its own colour, as in Houdini.
-  const TYPE_COL = { water: [0.16, 0.46, 0.96], foam: [0.97, 0.97, 0.97], spray: [1.0, 0.6, 0.16], mist: [0.86, 0.56, 1.0], deep: [0.07, 0.2, 0.52] };
+  // kinds by the speed attribute: below 1024 water (speed + 64 x white-water level), 2048 spray, 3072 mist, 4096 + speed deep water (narrow band),
+  // 6144 + life foam, 7168 + life bubbles (life 0 to 63, how much is left)
+  const TYPE_COL = { water: [0.16, 0.46, 0.96], churn: [0.55, 0.85, 0.97], foam: [0.98, 0.98, 0.98], spray: [1.0, 0.6, 0.16], mist: [0.86, 0.56, 1.0], deep: [0.07, 0.2, 0.52], bubble: [0.25, 0.85, 0.6] };
   const v3 = (c) => 'vec3(' + c.map((x) => x.toFixed(3)).join(',') + ')';
   const pmat = new THREE.ShaderMaterial({
     uniforms: { uSize: { value: 0.1 }, uScale: { value: 600 }, uMax: { value: S.vmax }, uFoam: { value: S.foam }, uOrtho: { value: 0 }, uMode: { value: 0 } },
     vertexShader: 'attribute float speed; uniform float uSize; uniform float uScale; uniform float uFoam; uniform float uOrtho; varying float vS; varying float vF; varying float vK; varying float vL;' +
-      'void main(){ vec4 mv = modelViewMatrix * vec4(position,1.0); gl_Position = projectionMatrix * mv; vK = speed >= 4096.0 ? 3.0 : (speed >= 3072.0 ? 2.0 : (speed >= 2048.0 ? 1.0 : 0.0));' +
-      ' float sp = vK > 2.5 ? speed - 4096.0 : speed; float lv = vK > 2.5 ? 0.0 : floor(sp / 64.0 + 0.01); vS = sp - lv * 64.0; vL = lv / 15.0; vF = vL * uFoam;' +
-      ' float sz = vK > 2.5 ? 1.3 : (vK > 1.5 ? 0.6 : (vK > 0.5 ? 0.42 : 1.0 - 0.3 * vF));' +
-      ' gl_PointSize = max((uOrtho > 0.0 ? uSize * uOrtho : uSize * uScale / (-mv.z)) * sz, vK > 0.5 && vK < 2.5 ? 1.0 : 1.5); }',
+      'void main(){ vec4 mv = modelViewMatrix * vec4(position,1.0); gl_Position = projectionMatrix * mv;' +
+      ' vK = speed >= 7168.0 ? 5.0 : (speed >= 6144.0 ? 4.0 : (speed >= 4096.0 ? 3.0 : (speed >= 3072.0 ? 2.0 : (speed >= 2048.0 ? 1.0 : 0.0))));' +
+      ' float sp = vK > 4.5 ? speed - 7168.0 : (vK > 3.5 ? speed - 6144.0 : (vK > 2.5 ? speed - 4096.0 : speed)); float lv = vK > 2.5 ? 0.0 : floor(sp / 64.0 + 0.01); vS = sp - lv * 64.0; vL = lv / 15.0; vF = vL * uFoam;' +
+      ' float life = clamp(vS / 63.0, 0.0, 1.0);' +
+      ' float sz = vK > 4.5 ? 0.3 : (vK > 3.5 ? 0.34 * (0.6 + 0.4 * life) : (vK > 2.5 ? 1.3 : (vK > 1.5 ? 0.6 : (vK > 0.5 ? 0.42 : 1.0 - 0.3 * vF))));' +
+      ' gl_PointSize = max((uOrtho > 0.0 ? uSize * uOrtho : uSize * uScale / (-mv.z)) * sz, (vK > 0.5 && vK < 2.5) || vK > 3.5 ? 1.0 : 1.5); }',
     fragmentShader: 'uniform float uMax; uniform float uMode; varying float vS; varying float vF; varying float vK; varying float vL;' +
       'vec3 ramp(float t){ vec3 a = vec3(0.03,0.12,0.95); vec3 b = vec3(0.0,0.82,0.98); vec3 c = vec3(1.0); return t < 0.5 ? mix(a,b,t*2.0) : mix(b,c,(t-0.5)*2.0); }' +
       'void main(){ vec2 p = gl_PointCoord*2.0-1.0; float r2 = dot(p,p); if(r2 > 1.0) discard; float sh = 0.78+0.22*(1.0-r2);' +
+      ' if (vK > 4.5) { gl_FragColor = vec4((uMode > 0.5 ? ' + v3(TYPE_COL.bubble) + ' : vec3(0.72,0.88,0.96))*sh,1.0); return; }' +
+      ' if (vK > 3.5) { float h = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898,78.233))) * 43758.5453); if (h > 0.3 + 0.6 * clamp(vS / 63.0, 0.0, 1.0)) discard;' +
+      '   gl_FragColor = vec4((uMode > 0.5 ? ' + v3(TYPE_COL.foam) + ' : vec3(0.9,0.94,0.97))*(0.84+0.16*(1.0-r2)),1.0); return; }' +
       ' if (vK > 1.5 && vK < 2.5) { float h = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898,78.233))) * 43758.5453); if (h > 0.28) discard;' +
       '   gl_FragColor = vec4((uMode > 0.5 ? ' + v3(TYPE_COL.mist) + ' : vec3(0.84,0.89,0.94))*(0.9+0.1*(1.0-r2)),1.0); return; }' +
       ' if (vK > 0.5 && vK < 1.5) { gl_FragColor = vec4((uMode > 0.5 ? ' + v3(TYPE_COL.spray) + ' : vec3(0.95,0.98,1.0))*(0.86+0.14*(1.0-r2)),1.0); return; }' +
-      ' if (uMode > 0.5) { vec3 c = vK > 2.5 ? ' + v3(TYPE_COL.deep) + ' : (vL > 0.3 ? ' + v3(TYPE_COL.foam) + ' : ' + v3(TYPE_COL.water) + '); gl_FragColor = vec4(c*sh,1.0); return; }' +
+      ' if (uMode > 0.5) { vec3 c = vK > 2.5 ? ' + v3(TYPE_COL.deep) + ' : (vL > 0.3 ? ' + v3(TYPE_COL.churn) + ' : ' + v3(TYPE_COL.water) + '); gl_FragColor = vec4(c*sh,1.0); return; }' +
       ' float t = clamp(vS/uMax,0.0,1.0); vec3 col = vK > 2.5 ? ramp(t)*0.82 : mix(ramp(t), vec3(0.97,0.99,1.0), vF); gl_FragColor = vec4(col*sh,1.0); }'
   });
   const points = new THREE.Points(geo, pmat); points.frustumCulled = false; scene.add(points);
@@ -900,15 +924,27 @@
       addSlider(ww, { id: 's-foamtau', label: 'White water fade', min: 0.3, max: 4, step: 0.1, value: S.foamTau, def: dv('foamTau'), fmt: (v) => v.toFixed(1) + ' s', tip: 'How long white water takes to fade back to blue.', onInput: (v) => { S.foamTau = v; } });
       addSlider(ww, { id: 's-tear', label: 'Sheet tearing', min: 0, max: 1, step: 0.05, value: S.tear, def: dv('tear'), fmt: (v) => (v === 0 ? 'off' : v.toFixed(2)), tip: 'Lets thin sheets and drops fly apart instead of being held together as a membrane (the lace look). Too high and thin water starts to look lost.', onInput: (v) => { S.tear = v; } });
 
-      const sp = sub(gs, 'spray', 'Spray and mist', true, 'Extra points thrown off fast water near the surface. They fly with gravity, air drag and air turbulence, and never push the water.');
-      addCheck(sp, 'c-spray', 'Enabled', S.sprOn, 'Turns the spray and mist particles on or off.', (on) => { S.sprOn = on; if (sim && sim.setSprayCap) sim.setSprayCap(S.sprOn ? S.sprCap : 0); lastGen = -1; }, dv('sprOn'));
+      const sp = sub(gs, 'spray', 'Whitewater', true, 'Spray, mist, foam and bubbles, as in Houdini: points thrown off the water that never push it. Each is sorted every step by how deep in water it is: spray that lands turns to foam, foam rides the surface and fades, foam pushed under turns to bubbles, and bubbles rise back up as foam.');
+      addCheck(sp, 'c-spray', 'Enabled', S.sprOn, 'Turns whitewater (spray, mist, foam and bubbles), the air field and dripping on or off.', (on) => { S.sprOn = on; if (sim && sim.setSprayCap) sim.setSprayCap(S.sprOn ? S.sprCap : 0); lastGen = -1; }, dv('sprOn'));
       addSlider(sp, { id: 's-spramt', label: 'Spray amount', min: 0.1, max: 6, log: true, round: 0.05, value: S.sprAmt, def: dv('sprAmt'), fmt: (v) => v.toFixed(2) + '×', tip: 'How many spray points fast water throws off.', onInput: (v) => { S.sprAmt = v; } });
       addSlider(sp, { id: 's-sprmin', label: 'Spray from', min: 0.5, max: 30, log: true, round: 0.1, value: S.sprMin, def: dv('sprMin'), fmt: (v) => v.toFixed(1) + ' m/s', tip: 'Water faster than this, near the surface, throws off spray. Lower makes more spray from calmer water.', onInput: (v) => { S.sprMin = v; } });
       addSlider(sp, { id: 's-sprlife', label: 'Spray lifetime', min: 0.2, max: 6, step: 0.1, value: S.sprLife, def: dv('sprLife'), fmt: (v) => v.toFixed(1) + ' s', tip: 'How long a spray point lives before it fades.', onInput: (v) => { S.sprLife = v; } });
+      addSlider(sp, { id: 's-wwcrest', label: 'From crests', min: 0, max: 3, step: 0.05, value: S.wwCrest, def: dv('wwCrest'), fmt: (v) => (v === 0 ? 'off' : v.toFixed(2) + '×'), tip: 'Whitewater from fast, exposed water: wave crests, thin sheets and splashes (Houdini sources this from curvature and speed).', onInput: (v) => { S.wwCrest = v; } });
+      addSlider(sp, { id: 's-wwimpact', label: 'From churn', min: 0, max: 3, step: 0.05, value: S.wwImpact, def: dv('wwImpact'), fmt: (v) => (v === 0 ? 'off' : v.toFixed(2) + '×'), tip: 'Whitewater from churning white water: impacts, breaking waves, hard turns (Houdini sources this from acceleration). Made under the surface it starts as bubbles.', onInput: (v) => { S.wwImpact = v; } });
+      addSlider(sp, { id: 's-wwfoam', label: 'Foam lifetime', min: 0.3, max: 20, log: true, round: 0.1, value: S.wwFoamLife, def: dv('wwFoamLife'), fmt: (v) => v.toFixed(1) + ' s', tip: 'How long foam lasts on the surface before it breaks up. Long foam leaves the trails and patches that make big water read as big.', onInput: (v) => { S.wwFoamLife = v; } });
+      addSlider(sp, { id: 's-wwrise', label: 'Bubble rise', min: 0.05, max: 2, log: true, round: 0.01, value: S.wwRise, def: dv('wwRise'), fmt: (v) => v.toFixed(2) + ' m/s', tip: 'How fast bubbles rise through the water before they surface as foam.', onInput: (v) => { S.wwRise = v; } });
       addSlider(sp, { id: 's-sprmist', label: 'Mist share', min: 0, max: 1, step: 0.05, value: S.sprMist, def: dv('sprMist'), fmt: f2, tip: 'Fraction of the spray that is fine mist: lighter, slowed hard by the air, drawn as soft puffs.', onInput: (v) => { S.sprMist = v; } });
       addSlider(sp, { id: 's-sprdrag', label: 'Spray drag', min: 0, max: 6, step: 0.1, value: S.sprDrag, def: dv('sprDrag'), fmt: (v) => v.toFixed(1) + ' /s', tip: 'How quickly spray droplets slow down in the air.', onInput: (v) => { S.sprDrag = v; } });
       addSlider(sp, { id: 's-mistdrag', label: 'Mist drag', min: 0.5, max: 30, log: true, round: 0.1, value: S.mistDrag, def: dv('mistDrag'), fmt: (v) => v.toFixed(1) + ' /s', tip: 'How quickly mist slows down in the air. High values make it hang and drift.', onInput: (v) => { S.mistDrag = v; } });
-      addSlider(sp, { id: 's-sprcap', label: 'Max spray points', min: 50000, max: 4000000, log: true, round: 10000, value: S.sprCap, def: dv('sprCap'), fmt: fmtN, tip: 'The most spray and mist points alive at once. They use GPU memory but never slow the water solve.', onInput: () => {}, onChange: (v) => { S.sprCap = v; if (sim && sim.setSprayCap && S.sprOn) sim.setSprayCap(v); } });
+      const ap = sub(gs, 'airfield', 'Air field', false, 'A coarse grid of moving air. Water near the surface, flying spray and moving objects drag it along; it spreads out and settles back to the wind. Spray and mist drift with it, so mist billows and trails behind a splash. It never pushes the water itself.');
+      addCheck(ap, 'c-air', 'Enabled', S.airOn, 'Spray and mist move with the air the water and objects drag along, instead of only the wind.', (on) => { S.airOn = on; }, dv('airOn'));
+      addSlider(ap, { id: 's-aircouple', label: 'Drag along', min: 0.2, max: 20, log: true, round: 0.1, value: S.airCouple, def: dv('airCouple'), fmt: (v) => v.toFixed(1), tip: 'How strongly moving water, spray and objects pull the air with them.', onInput: (v) => { S.airCouple = v; } });
+      addSlider(ap, { id: 's-airdecay', label: 'Settle', min: 0.05, max: 5, log: true, round: 0.05, value: S.airDecay, def: dv('airDecay'), fmt: (v) => v.toFixed(2) + ' /s', tip: 'How quickly stirred-up air settles back to the wind. Low values leave long trailing gusts.', onInput: (v) => { S.airDecay = v; } });
+      const dp = sub(gs, 'drip', 'Dripping', false, 'Objects coming out of the water stay wet and drip for a while: points over their surface remember being in water, dry out, and let go of drops as they do (more from surfaces facing down).');
+      addCheck(dp, 'c-drip', 'Enabled', S.dripOn, 'Wet objects drip after they leave the water.', (on) => { S.dripOn = on; }, dv('dripOn'));
+      addSlider(dp, { id: 's-driprate', label: 'Drip amount', min: 0.1, max: 20, log: true, round: 0.1, value: S.dripRate, def: dv('dripRate'), fmt: (v) => v.toFixed(1), tip: 'Drops a second from each wet spot on the surface (about one spot per grid cell of surface), while it is fully wet.', onInput: (v) => { S.dripRate = v; } });
+      addSlider(dp, { id: 's-dripdry', label: 'Dries in', min: 0.3, max: 20, log: true, round: 0.1, value: S.dripDry, def: dv('dripDry'), fmt: (v) => v.toFixed(1) + ' s', tip: 'How long an object keeps dripping after it leaves the water.', onInput: (v) => { S.dripDry = v; } });
+      addSlider(sp, { id: 's-sprcap', label: 'Max whitewater', min: 50000, max: 4000000, log: true, round: 10000, value: S.sprCap, def: dv('sprCap'), fmt: fmtN, tip: 'The most whitewater (spray, mist, foam and bubble) points alive at once. They use GPU memory but never slow the water solve.', onInput: () => {}, onChange: (v) => { S.sprCap = v; if (sim && sim.setSprayCap && S.sprOn) sim.setSprayCap(v); } });
     }
 
     if (flip) {   // narrow band and ocean
@@ -955,7 +991,7 @@
   }
 
   const gd = $('#g-disp');
-  addSelect(gd, 'd-colby', 'Colour by', [['speed', 'Speed'], ['type', 'Type']], S.colorBy, 'Speed: blue to cyan to white as the water speeds up, churned water white. Type: one colour per kind of point, water blue, white water white, spray orange, mist lilac, deep water (narrow band) dark blue.', (v) => setColorBy(v));
+  addSelect(gd, 'd-colby', 'Colour by', [['speed', 'Speed'], ['type', 'Type']], S.colorBy, 'Speed: blue to cyan to white as the water speeds up, churned water white. Type: one colour per kind of point: water blue, churned water pale blue, foam white, spray orange, mist lilac, bubbles green, deep water (narrow band) dark blue.', (v) => setColorBy(v));
   addSlider(gd, { id: 'd-size', label: 'Point size', min: 0.3, max: 1.6, step: 0.05, value: S.psize, def: dv('psize'), fmt: (v) => v.toFixed(2) + '×', tip: 'How big each point is drawn, compared with the particle spacing.', onInput: (v) => { S.psize = v; } });
   addSlider(gd, { id: 'd-vmax', label: 'White at', min: 1, max: 12, step: 0.5, value: S.vmax, def: dv('vmax'), fmt: (v) => v.toFixed(1) + ' m/s', tip: 'The speed that is coloured white. Slower water runs from blue to cyan.', onInput: (v) => { S.vmax = v; pmat.uniforms.uMax.value = v; } });
   addSlider(gd, { id: 'd-foam', label: 'White water', min: 0, max: 1, step: 0.05, value: S.foam, def: dv('foam'), fmt: (v) => v === 0 ? 'off' : v.toFixed(2), tip: 'How strongly churned water is drawn white.', onInput: (v) => { S.foam = v; pmat.uniforms.uFoam.value = v; } });
@@ -1417,7 +1453,7 @@
     const bk = Object.assign({}, S.bk, bakeRes());
     return {
       d: bk.d, maxN: bk.maxN, fps: bk.fps, substeps: bk.sub, frames: Math.round(bk.dur * bk.fps), g: S.g / (S.scale || 1), iters: bk.iters, visc: S.visc, flip: S.flip, comp: 6, cellRatio: S.cellRatio, fastAir: S.fastAir, sortP: S.sortP, maxSub: bk.maxSub, detail: S.bkDetail || 1, colMax: simPar().colMax, vmaxW: simPar().vmax, wind: simPar().wind, drag: simPar().drag, gust: simPar().gust, foamSens: simPar().foamSens, foamTau: S.foamTau,
-      scale: S.scale || 1, tear: simPar().tear, spr: simPar().spr, nb: nbCfg(), ocean: oceanCfg(), sprayCap: S.sprOn && S.engine === 'flip' ? S.sprCap : 0, nbLook: !!(S.nbLook && nbActive()), size: [S.dom.w, S.dom.h, S.dom.d], open: openMask(),
+      scale: S.scale || 1, tear: simPar().tear, spr: simPar().spr, air: simPar().air, drip: simPar().drip, nb: nbCfg(), ocean: oceanCfg(), sprayCap: S.sprOn && S.engine === 'flip' ? S.sprCap : 0, nbLook: !!(S.nbLook && nbActive()), size: [S.dom.w, S.dom.h, S.dom.d], open: openMask(),
       fills: resolveFills().map((f) => Object.assign({}, f)), events: S.events.map((e) => Object.assign({}, e)),
       objs: objs.map((o) => Object.assign(snap(o), { rec: o.rec && o.rec.arr.length >= 4 ? { start: o.rec.start, arr: Float32Array.from(o.rec.arr, (v, i) => v - (i % 4 === 0 ? S.org.x : i % 4 === 1 ? S.org.y : i % 4 === 2 ? S.org.z : 0)) } : null, keys: o.keys.length ? o.keys.map((k) => Object.assign({}, k, { x: k.x - S.org.x, y: k.y - S.org.y, z: k.z - S.org.z })) : null, smooth: S.tl.smooth }))
     };
@@ -2297,7 +2333,7 @@
     return {
       app: 'SplashTank', version: 2, saved: new Date().toISOString(),
       box: { min: S.min, size: S.dom, open: S.open },
-      solver: { engine: S.engine, g: S.g, visc: S.visc, iters: S.iters, flip: S.flip, cap: S.cap, wind: S.wind, airDrag: S.airDrag, cellRatio: S.cellRatio, detail: S.detail, gust: S.gust, foamSens: S.foamSens, foam: S.foam, foamTau: S.foamTau, colMax: S.colMax, dragSpeed: S.dragSpeed, vmaxW: S.vmaxW, subMin: S.subMin, subMax: S.subMax, scale: S.scale, tear: S.tear, sprOn: S.sprOn, sprAmt: S.sprAmt, sprMin: S.sprMin, sprLife: S.sprLife, sprMist: S.sprMist, sprDrag: S.sprDrag, mistDrag: S.mistDrag, sprCap: S.sprCap, streak: S.streak, nbOn: S.nbOn, nbBand: S.nbBand, nbLook: S.nbLook, oceanView: S.oceanView }, ocean: S.ocean,
+      solver: { engine: S.engine, g: S.g, visc: S.visc, iters: S.iters, flip: S.flip, cap: S.cap, wind: S.wind, airDrag: S.airDrag, cellRatio: S.cellRatio, detail: S.detail, gust: S.gust, foamSens: S.foamSens, foam: S.foam, foamTau: S.foamTau, colMax: S.colMax, dragSpeed: S.dragSpeed, vmaxW: S.vmaxW, subMin: S.subMin, subMax: S.subMax, scale: S.scale, tear: S.tear, sprOn: S.sprOn, sprAmt: S.sprAmt, sprMin: S.sprMin, sprLife: S.sprLife, sprMist: S.sprMist, sprDrag: S.sprDrag, mistDrag: S.mistDrag, sprCap: S.sprCap, streak: S.streak, wwFoamLife: S.wwFoamLife, wwRise: S.wwRise, wwCrest: S.wwCrest, wwImpact: S.wwImpact, airOn: S.airOn, airCouple: S.airCouple, airDecay: S.airDecay, dripOn: S.dripOn, dripRate: S.dripRate, dripDry: S.dripDry, nbOn: S.nbOn, nbBand: S.nbBand, nbLook: S.nbLook, oceanView: S.oceanView }, ocean: S.ocean,
       timeline: S.tl, bake: { dur: S.bk.dur, fps: S.bk.fps, detail: S.bkDetail }, fills: S.fills, events: S.events.map((e) => Object.assign({}, e, { done: false })),
       objs: sn.objs.map((d) => Object.assign({}, d, { sdf: null, rec: d.rec ? { start: d.rec.start, arr: Array.from(d.rec.arr) } : null }))
     };
@@ -2306,7 +2342,8 @@
     if (!d || d.app !== 'SplashTank' || !Array.isArray(d.objs)) throw new Error('This is not a SplashTank scene file.');
     const bx = d.box || {}, sv = d.solver || {};
     S.dom = Object.assign({ w: 3, h: 2.6, d: 3 }, bx.size); S.min = Object.assign({ x: -S.dom.w / 2, y: 0, z: -S.dom.d / 2 }, bx.min); S.open = Object.assign(ALLC(false), bx.open);
-    for (const k of ['g', 'visc', 'iters', 'flip', 'cap', 'airDrag', 'cellRatio', 'detail', 'gust', 'foamSens', 'foam', 'foamTau', 'colMax', 'dragSpeed', 'vmaxW', 'subMin', 'subMax', 'scale', 'tear', 'sprAmt', 'sprMin', 'sprLife', 'sprMist', 'sprDrag', 'mistDrag', 'sprCap', 'streak']) if (typeof sv[k] === 'number') S[k] = sv[k];
+    for (const k of ['g', 'visc', 'iters', 'flip', 'cap', 'airDrag', 'cellRatio', 'detail', 'gust', 'foamSens', 'foam', 'foamTau', 'colMax', 'dragSpeed', 'vmaxW', 'subMin', 'subMax', 'scale', 'tear', 'sprAmt', 'sprMin', 'sprLife', 'sprMist', 'sprDrag', 'mistDrag', 'sprCap', 'streak', 'wwFoamLife', 'wwRise', 'wwCrest', 'wwImpact', 'airCouple', 'airDecay', 'dripRate', 'dripDry']) if (typeof sv[k] === 'number') S[k] = sv[k];
+    for (const k of ['airOn', 'dripOn']) if (typeof sv[k] === 'boolean') S[k] = sv[k];
     if (typeof sv.sprOn === 'boolean') S.sprOn = sv.sprOn;
     if (typeof sv.nbOn === 'boolean') S.nbOn = sv.nbOn; if (typeof sv.nbBand === 'number') S.nbBand = sv.nbBand; if (typeof sv.oceanView === 'boolean') S.oceanView = sv.oceanView; if (typeof sv.nbLook === 'boolean') S.nbLook = sv.nbLook;
     S.ocean = Object.assign({}, OCEAN_DEF, d.ocean || {});

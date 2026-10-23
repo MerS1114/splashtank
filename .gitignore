@@ -3,3 +3,4 @@ dist/
 test-output/
 *.splc
 __pycache__/
+scratch/

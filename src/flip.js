@@ -18,6 +18,10 @@ struct Params {
   smax: u32, sdOff: u32, sdStride: u32, seed: u32,
   nb: u32, band: f32, ocean: u32, nwave: u32, otime: f32, olevel: f32, olayer: f32, opad: f32,
   oy0: f32, nbInit: u32, nfill: u32, odepth: f32, nfv: u32,
+  wwFoamLife: f32, wwRise: f32, wwCrest: f32, wwImpact: f32,
+  airOn: u32, airCouple: f32, airDecay: f32, airH: f32,
+  aNx: u32, aNy: u32, aNz: u32, ndrip: u32,
+  dripRate: f32, dripDry: f32, airBlur: f32, wwPad: f32,
   fills: array<vec4<f32>, 16>,
   waves: array<vec4<f32>, 64>,
 };
@@ -58,9 +62,15 @@ fn gv0W(f: u32, v: f32) { atomicStore(&accW[f], bitcast<i32>(v)); }
 @group(0) @binding(27) var<storage, read_write> tpid: array<u32>;
 // spray and mist: their own points, thrown off fast water near the surface; they fly with gravity and air drag and never push the water
 @group(0) @binding(28) var<storage, read_write> sPos: array<vec4<f32>>;   // xyz, seconds of life left
-@group(0) @binding(29) var<storage, read_write> sVel: array<vec4<f32>>;   // velocity, kind (0 spray, 1 mist)
+@group(0) @binding(29) var<storage, read_write> sVel: array<vec4<f32>>;   // velocity, kind (0 spray, 1 mist, 2 foam, 3 bubble)
 @group(0) @binding(30) var<storage, read_write> sctl: array<atomic<u32>>;
-@group(0) @binding(31) var<storage, read_write> velG: array<f32>;   // the grid velocity kept from the last step (narrow band)
+@group(0) @binding(31) var<storage, read_write> velG: array<f32>;
+// air field: a coarse grid of air velocity that the water, the spray and moving objects drag along; spray and mist drift with it
+@group(0) @binding(32) var<storage, read_write> air: array<vec4<f32>>;
+@group(0) @binding(33) var<storage, read_write> sAux: array<vec4<f32>>;      // per whitewater point: water velocity there (xyz), how wet (w)
+@group(0) @binding(34) var<storage, read_write> airAcc: array<atomic<i32>>;  // per air cell: momentum and weight pushed in this step (fixed point)
+@group(0) @binding(35) var<storage, read_write> air2: array<vec4<f32>>;
+@group(0) @binding(36) var<storage, read_write> drip: array<vec4<f32>>;      // per drip sample: (local position, collider), (local normal, wetness)   // the grid velocity kept from the last step (narrow band)
 ${SDF_WGSL}
 
 const DEADY: f32 = -1.0e5;
@@ -517,75 +527,222 @@ fn hash1(n0: u32) -> f32 {
   var x = n0; x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u;
   return f32(x) * 2.3283064e-10;
 }
-// every water particle that is fast and near the surface (or airborne) throws off a few spray points, more when it is churning white
+// ---- whitewater (Houdini style): spray, mist, foam and bubbles in one pool of points that never push the water ----
+// kind 0 spray, 1 mist, 2 foam, 3 bubble. Each step a point is classified by how deep in water it sits: spray that lands turns to foam,
+// foam rides the surface and fades, foam pushed under turns to bubbles, bubbles rise and turn to foam at the surface.
+// how much water is at a cell, 0 to 1: particles over the rest count; deep narrow-band water (it has no particles) counts as full
+fn wetCell(c: vec3<i32>) -> f32 {
+  if (!inDom(c) || !hasStorage(c)) { return 0.0; }
+  let ci = cellIdx(c.x, c.y, c.z);
+  if (P.nb != 0u && (ctype[ci] & 0xffu) == 1u && phiOf(ci) < -1.0) { return 1.0; }
+  return min(f32(atomicLoad(&cnt[ci])) / P.rest, 1.0);
+}
+fn wetAt(p: vec3<f32>) -> f32 {
+  let g = (p - vec3<f32>(P.x0, P.y0, P.z0)) * P.ih - vec3<f32>(0.5);
+  let f0 = floor(g); let fr = g - f0; let i0 = vec3<i32>(f0);
+  var s = 0.0;
+  for (var c = 0u; c < 8u; c++) {
+    let dx = i32(c & 1u); let dy = i32((c >> 1u) & 1u); let dz = i32((c >> 2u) & 1u);
+    let w = select(1.0 - fr.x, fr.x, dx == 1) * select(1.0 - fr.y, fr.y, dy == 1) * select(1.0 - fr.z, fr.z, dz == 1);
+    if (w > 0.0) { s += w * wetCell(i0 + vec3<i32>(dx, dy, dz)); }
+  }
+  return s;
+}
+// air grid: cells of P.airH from the box's low corner, values at the cell centres
+fn airIdx(c: vec3<i32>) -> u32 {
+  let q = clamp(c, vec3<i32>(0), vec3<i32>(i32(P.aNx) - 1, i32(P.aNy) - 1, i32(P.aNz) - 1));
+  return u32(q.x) + P.aNx * (u32(q.y) + P.aNy * u32(q.z));
+}
+fn airCell(p: vec3<f32>) -> vec3<i32> { return vec3<i32>(floor((p - vec3<f32>(P.x0, P.y0, P.z0)) / P.airH)); }
+fn airAt(p: vec3<f32>) -> vec3<f32> {
+  let g = (p - vec3<f32>(P.x0, P.y0, P.z0)) / P.airH - vec3<f32>(0.5);
+  let f0 = floor(g); let fr = g - f0; let i0 = vec3<i32>(f0);
+  var s = vec3<f32>(0.0);
+  for (var c = 0u; c < 8u; c++) {
+    let dx = i32(c & 1u); let dy = i32((c >> 1u) & 1u); let dz = i32((c >> 2u) & 1u);
+    let w = select(1.0 - fr.x, fr.x, dx == 1) * select(1.0 - fr.y, fr.y, dy == 1) * select(1.0 - fr.z, fr.z, dz == 1);
+    s += w * air[airIdx(i0 + vec3<i32>(dx, dy, dz))].xyz;
+  }
+  return s;
+}
+fn airPush(p: vec3<f32>, v: vec3<f32>, w: f32) {
+  let c = airIdx(airCell(p)) * 4u;
+  atomicAdd(&airAcc[c], i32(v.x * w * 256.0)); atomicAdd(&airAcc[c + 1u], i32(v.y * w * 256.0)); atomicAdd(&airAcc[c + 2u], i32(v.z * w * 256.0));
+  atomicAdd(&airAcc[c + 3u], i32(w * 256.0));
+}
+@compute @workgroup_size(256)
+fn airClear(@builtin(global_invocation_id) g: vec3<u32>) {
+  let c = gid1(g); if (c >= P.aNx * P.aNy * P.aNz) { return; }
+  for (var k = 0u; k < 4u; k++) { atomicStore(&airAcc[c * 4u + k], 0); }
+}
+// water near the surface drags the air (water deep inside a body never touches it)
+@compute @workgroup_size(256)
+fn airSplatW(@builtin(global_invocation_id) g: vec3<u32>) {
+  let i = gid1(g); if (i >= P.n) { return; }
+  let p = pos[i].xyz; if (pos[i].y < DEADY) { return; }
+  let c = particleCell(p);
+  if (hasStorage(c) && f32(atomicLoad(&cnt[cellIdx(c.x, c.y, c.z)])) > 0.85 * P.rest) { return; }
+  airPush(p, vel[i].xyz, 1.0);
+}
+// flying spray drags it too, so mist trails behind a splash
+@compute @workgroup_size(256)
+fn airSplatS(@builtin(global_invocation_id) g: vec3<u32>) {
+  let j = gid1(g); if (j >= P.smax) { return; }
+  let sp = sPos[j]; if (sp.w <= 0.0 || sVel[j].w > 1.5) { return; }
+  airPush(sp.xyz, sVel[j].xyz, 0.25);
+}
+// each air cell: spreads a little to its neighbours, is pulled towards what pushed it, moves with an object it is inside, and settles back to the wind
+@compute @workgroup_size(256)
+fn airUpdate(@builtin(global_invocation_id) g: vec3<u32>) {
+  let c = gid1(g); if (c >= P.aNx * P.aNy * P.aNz) { return; }
+  let ci = vec3<i32>(i32(c % P.aNx), i32((c / P.aNx) % P.aNy), i32(c / (P.aNx * P.aNy)));
+  var a = air[c].xyz;
+  let nb = (air[airIdx(ci + vec3<i32>(1, 0, 0))].xyz + air[airIdx(ci - vec3<i32>(1, 0, 0))].xyz + air[airIdx(ci + vec3<i32>(0, 1, 0))].xyz +
+            air[airIdx(ci - vec3<i32>(0, 1, 0))].xyz + air[airIdx(ci + vec3<i32>(0, 0, 1))].xyz + air[airIdx(ci - vec3<i32>(0, 0, 1))].xyz) / 6.0;
+  a = mix(a, nb, P.airBlur);
+  let w = f32(atomicLoad(&airAcc[c * 4u + 3u])) / 256.0;
+  if (w > 0.0) {
+    let vt = vec3<f32>(f32(atomicLoad(&airAcc[c * 4u])), f32(atomicLoad(&airAcc[c * 4u + 1u])), f32(atomicLoad(&airAcc[c * 4u + 2u]))) / (w * 256.0);
+    a = mix(a, vt, 1.0 - exp(-P.airCouple * min(w, 8.0) * P.dt));
+  }
+  let x = vec3<f32>(P.x0, P.y0, P.z0) + (vec3<f32>(ci) + vec3<f32>(0.5)) * P.airH;
+  for (var k = 0u; k < P.ncols; k++) {
+    if (colNear(k, x) && sdfEval(k, x).x < 0.6 * P.airH) { a = colSurfVel(k, x); break; }
+  }
+  a = mix(a, vec3<f32>(P.q1, P.q2, P.q3), 1.0 - exp(-P.airDecay * P.dt));
+  air2[c] = vec4<f32>(a, 0.0);
+}
+@compute @workgroup_size(256)
+fn airCopy(@builtin(global_invocation_id) g: vec3<u32>) { let c = gid1(g); if (c >= P.aNx * P.aNy * P.aNz) { return; } air[c] = air2[c]; }
+// how wet each whitewater point is and the water's velocity there (a separate pass keeps every kernel within 8 storage buffers)
+@compute @workgroup_size(256)
+fn wwSample(@builtin(global_invocation_id) g: vec3<u32>) {
+  let j = gid1(g); if (j >= P.smax) { return; }
+  let sp = sPos[j]; if (sp.w <= 0.0) { return; }
+  let p = sp.xyz; var vf = vec3<f32>(0.0);
+  if (hasStorage(particleCell(p))) { vf = sampleBoth(p).vn; }
+  sAux[j] = vec4<f32>(vf, wetAt(p));
+}
+// every water particle near the surface can throw off whitewater: fast exposed water (crests, sheets, splashes) and churning white water (impacts,
+// breaking). Points made inside the water start as bubbles; the rest as spray or mist, and the next steps sort them by depth.
 @compute @workgroup_size(256)
 fn sprayEmit(@builtin(global_invocation_id) g: vec3<u32>) {
   let i = gid1(g); if (i >= P.n || P.smax == 0u || P.sprRate <= 0.0) { return; }
   let q = pos[i]; if (q.y < DEADY) { return; }
+  if (P.ocean != 0u && layerW(q.xyz) > 0.0) { return; }
   let v = vel[i].xyz; let foam = vel[i].w; let spd = length(v);
-  let fast = clamp((spd * P.vs - P.sprMin) / (2.0 * P.sprMin), 0.0, 1.0); if (fast <= 0.0) { return; }
+  let fast = clamp((spd * P.vs - P.sprMin) / (2.0 * P.sprMin), 0.0, 1.0);
   let bc = vec3<i32>(floor((q.xyz - vec3<f32>(P.x0, P.y0, P.z0)) * P.ih - vec3<f32>(0.5)));
-  var csum = 0.0;
-  for (var dz = 0; dz <= 1; dz++) { for (var dy = 0; dy <= 1; dy++) { for (var dx = 0; dx <= 1; dx++) {
-    let cc = clamp(bc + vec3<i32>(dx, dy, dz), vec3<i32>(0), vec3<i32>(i32(P.nx) - 1, i32(P.ny) - 1, i32(P.nz) - 1));
-    csum += f32(atomicLoad(&cnt[cellIdx(cc.x, cc.y, cc.z)]));
-  } } }
-  let rho = csum / (8.0 * P.rest);
-  let surf = 1.0 - smoothstep(0.3, 0.75, rho); if (surf <= 0.0) { return; }
-  let e = surf * fast * (0.3 + 0.7 * foam);
+  var rho = 0.0;
+  for (var dz = 0; dz <= 1; dz++) { for (var dy = 0; dy <= 1; dy++) { for (var dx = 0; dx <= 1; dx++) { rho += wetCell(bc + vec3<i32>(dx, dy, dz)); } } }
+  rho = rho / 8.0;
+  let crest = (1.0 - smoothstep(0.3, 0.75, rho)) * fast * (0.3 + 0.7 * foam);
+  let churn = (1.0 - smoothstep(0.8, 1.0, rho)) * clamp((foam - 0.55) / 0.45, 0.0, 1.0) * smoothstep(0.5, 1.5, spd * P.vs);   // moving water only: settling at the start is not churn
+  let e = (P.wwCrest * crest + P.wwImpact * churn) * smoothstep(0.1, 0.5, P.q8);   // none while the starting water settles
+  if (e <= 0.0) { return; }
   let h0 = i * 747796405u + P.seed * 2891336453u;
   let k = min(u32(floor(P.sprRate * e * P.dt + hash1(h0))), 4u);
   for (var m = 0u; m < k; m++) {
     let hh = h0 ^ ((m + 1u) * 0x9E3779B9u);
     let z = hash1(hh + 1u) * 2.0 - 1.0; let a = hash1(hh + 2u) * 6.2831853; let s = sqrt(max(0.0, 1.0 - z * z));
     let dir = vec3<f32>(s * cos(a), s * sin(a), z);
-    let mist = hash1(hh + 3u) < P.mistFrac * fast;
-    let nv = v * (0.85 + 0.3 * hash1(hh + 4u)) + dir * spd * select(0.12, 0.3, mist);
-    let life = P.sprLife * (0.6 + 0.8 * hash1(hh + 5u)) * select(1.0, 1.6, mist);
+    let under = rho > 0.7 && hash1(hh + 7u) < 0.7;
+    let mist = !under && hash1(hh + 3u) < P.mistFrac * fast;
+    var nv = v * (0.85 + 0.3 * hash1(hh + 4u)) + dir * spd * select(0.12, 0.3, mist);
+    var life = P.sprLife * (0.6 + 0.8 * hash1(hh + 5u)) * select(1.0, 1.6, mist);
+    var kind = select(0.0, 1.0, mist);
+    if (under) { nv = v + dir * spd * 0.05; life = P.wwFoamLife * (0.6 + 0.8 * hash1(hh + 5u)); kind = 3.0; }
     let slot = atomicAdd(&sctl[0], 1u) % P.smax;
     sPos[slot] = vec4<f32>(q.xyz + nv * P.dt + dir * P.h * 0.3 * hash1(hh + 6u), life);
-    sVel[slot] = vec4<f32>(nv, select(0.0, 1.0, mist));
+    sVel[slot] = vec4<f32>(nv, kind);
   }
 }
-// spray flies on its own: gravity, air drag towards the wind and gusts (mist feels them far more), gone when it lands back in water or hits something
+// moves every whitewater point by its kind: spray and mist fly with gravity and drag towards the air; foam follows the water's surface;
+// bubbles are carried by the water and rise. They are gone when their time is up, when they hit an object or leave the box.
 @compute @workgroup_size(256)
 fn sprayStep(@builtin(global_invocation_id) g: vec3<u32>) {
   let j = gid1(g); if (j >= P.smax) { return; }
   let sp = sPos[j]; if (sp.w <= 0.0) { return; }
-  var v = sVel[j].xyz; let mist = sVel[j].w > 0.5;
-  var gust = vec3<f32>(0.0);
-  if (P.q7 > 0.0) {
-    let gp = sp.xyz * 0.55 * P.vs; let tt = P.q8 * 0.6;
-    gust = vec3<f32>(vnz(gp + vec3<f32>(tt, 0.0, 0.0)), vnz(gp + vec3<f32>(17.3, tt, 4.1)), vnz(gp + vec3<f32>(5.7, 9.2, tt))) * 2.0 - vec3<f32>(1.0);
+  var v = sVel[j].xyz; var kind = u32(sVel[j].w + 0.5);
+  let aux = sAux[j]; let wet = aux.w; let vf = aux.xyz;
+  var life = sp.w;
+  let h0 = j * 2654435761u + P.seed * 974711u;
+  if (kind == 0u && v.y < 0.0 && wet > 0.55) { kind = 2u; life = P.wwFoamLife * (0.6 + 0.8 * hash1(h0)); v = vf; }   // spray landing on water turns to foam
+  else if (kind == 1u && wet > 0.55) { life = 0.0; }                                                                   // mist falling into water is gone
+  else if (kind == 2u && wet > 0.97) { kind = 3u; }                                                                    // foam pushed under: bubbles
+  else if (kind == 2u && wet < 0.04) { kind = 0u; life = min(life, P.sprLife); }                                       // foam that lost the surface falls as spray
+  else if (kind == 3u && wet < 0.6) { kind = 2u; life = max(life, 0.5 * P.wwFoamLife); }                              // a bubble reaching the surface: foam
+  let p = sp.xyz;
+  if (kind <= 1u) {
+    let mist = kind == 1u;
+    var gust = vec3<f32>(0.0);
+    if (P.q7 > 0.0) {
+      let gp = p * 0.55 * P.vs; let tt = P.q8 * 0.6;
+      gust = vec3<f32>(vnz(gp + vec3<f32>(tt, 0.0, 0.0)), vnz(gp + vec3<f32>(17.3, tt, 4.1)), vnz(gp + vec3<f32>(5.7, 9.2, tt))) * 2.0 - vec3<f32>(1.0);
+    }
+    var base = vec3<f32>(P.q1, P.q2, P.q3); if (P.airOn != 0u) { base = airAt(p); }
+    let airv = base + gust * P.q7 * select(1.0, 2.5, mist);
+    v.y -= P.gravity * P.dt;
+    v = v + (airv - v) * (1.0 - exp(-select(P.sprDrag, P.mistDrag, mist) * P.dt));
+    life -= P.dt;
+  } else if (kind == 2u) {
+    let vy = vf.y + clamp((wet - 0.5) * 4.0, -1.0, 1.0) * P.h * 4.0;   // held at the surface: pushed up when under, pulled down when above
+    v = mix(v, vec3<f32>(vf.x, vy, vf.z), 1.0 - exp(-10.0 * P.dt));
+    life -= P.dt;
+  } else {
+    v = mix(v, vf + vec3<f32>(0.0, P.wwRise, 0.0), 1.0 - exp(-6.0 * P.dt));
+    life -= 0.3 * P.dt;
   }
-  let airv = vec3<f32>(P.q1, P.q2, P.q3) + gust * P.q7 * select(1.0, 2.5, mist);
-  v.y -= P.gravity * P.dt;
-  v = v + (airv - v) * (1.0 - exp(-select(P.sprDrag, P.mistDrag, mist) * P.dt));
-  let np = sp.xyz + v * P.dt;
-  var life = sp.w - P.dt;
+  let np = p + v * P.dt;
   if (np.x < P.x0 || np.x > P.x1 || np.y < P.y0 || np.y > P.y1 || np.z < P.z0 || np.z > P.z1) { life = 0.0; }
-  else {
-    let c = particleCell(np);
-    if (v.y < 0.0 && hasStorage(c) && f32(atomicLoad(&cnt[cellIdx(c.x, c.y, c.z)])) > 0.6 * P.rest) { life = 0.0; }   // falling back into water
-    else if (P.ncols > 0u && colAt(np) >= 0) { life = 0.0; }
-  }
-  sPos[j] = vec4<f32>(np, life); sVel[j] = vec4<f32>(v, sVel[j].w);
+  else if (P.ncols > 0u && colAt(np) >= 0) { life = 0.0; }
+  else if (P.ocean != 0u && kind >= 2u && layerW(np) > 0.6) { life = 0.0; }
+  sPos[j] = vec4<f32>(np, life); sVel[j] = vec4<f32>(v, f32(kind));
 }
-// direction packed into 20 bits (octahedral), speed into 9 bits (quarter units per second), kind into one, top bit marks a spray point
-fn packSpray(v: vec3<f32>, mist: bool) -> u32 {
-  let s = length(v); var n = vec3<f32>(0.0, 1.0, 0.0); if (s > 1e-6) { n = v / s; }
+// packed for drawing: top bit marks whitewater, the next two bits the kind (00 spray, 10 mist, 01 foam, 11 bubble), 8 bits of speed in quarter
+// units per second, then for spray and mist the direction (octahedral, 20 bits), for foam and bubbles how much of their life is left (10 bits)
+fn packSpray(v: vec3<f32>, kind: u32, lifeFrac: f32) -> u32 {
+  let s = length(v);
+  var code = 0x80000000u | (min(u32(s * 4.0), 255u) << 21u);
+  if (kind == 1u) { code = code | 0x40000000u; } else if (kind == 2u) { code = code | 0x20000000u; } else if (kind == 3u) { code = code | 0x60000000u; }
+  if (kind >= 2u) { return code | u32(clamp(lifeFrac, 0.0, 1.0) * 1023.0); }
+  var n = vec3<f32>(0.0, 1.0, 0.0); if (s > 1e-6) { n = v / s; }
   var p = n.xy / (abs(n.x) + abs(n.y) + abs(n.z));
   if (n.z < 0.0) { p = (vec2<f32>(1.0) - abs(p.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), p >= vec2<f32>(0.0)); }
   let u = u32(clamp(round((p.x * 0.5 + 0.5) * 1023.0), 0.0, 1023.0)); let w = u32(clamp(round((p.y * 0.5 + 0.5) * 1023.0), 0.0, 1023.0));
-  return 0x80000000u | select(0u, 0x40000000u, mist) | (min(u32(s * 4.0), 511u) << 21u) | (w << 10u) | u;
+  return code | (w << 10u) | u;
 }
-// an even sample of the spray slots for the live view, written after the water points
+// an even sample of the whitewater slots for the live view, written after the water points
 @compute @workgroup_size(256)
 fn sprayDisp(@builtin(global_invocation_id) g: vec3<u32>) {
   let k = gid1(g); let o = P.sdOff + k; if (o >= arrayLength(&disp)) { return; }
   let j = k * P.sdStride;
   if (j >= P.smax || sPos[j].w <= 0.0) { disp[o] = vec4<f32>(0.0, -1.0e6, 0.0, 0.0); return; }
-  disp[o] = vec4<f32>(sPos[j].xyz, bitcast<f32>(packSpray(sVel[j].xyz, sVel[j].w > 0.5)));
+  disp[o] = vec4<f32>(sPos[j].xyz, bitcast<f32>(packSpray(sVel[j].xyz, u32(sVel[j].w + 0.5), sPos[j].w / max(P.wwFoamLife, 0.01))));
+}
+// wet objects drip: points over each collider's surface stay wet while they are in water and dry over P.dripDry seconds once out;
+// while drying they let go of drops (more from surfaces facing down), which fly as spray with the object's own velocity
+@compute @workgroup_size(256)
+fn dripStep(@builtin(global_invocation_id) g: vec3<u32>) {
+  let s = gid1(g); if (s >= P.ndrip) { return; }
+  let a = drip[s * 2u]; let b = drip[s * 2u + 1u];
+  let k = u32(a.w); if (k >= P.ncols) { return; }
+  let r0 = cols[k * 8u + 2u].xyz; let r1 = cols[k * 8u + 3u].xyz; let r2 = cols[k * 8u + 4u].xyz;
+  let wp = cols[k * 8u + 5u].xyz + r0 * a.x + r1 * a.y + r2 * a.z;
+  let wn = normalize(r0 * b.x + r1 * b.y + r2 * b.z);
+  let probe = wp + wn * P.h * 0.75;
+  let here = wetAt(probe);
+  if (here > 0.4) { drip[s * 2u + 1u].w = 1.0; return; }
+  let wetness = max(0.0, b.w - P.dt / max(P.dripDry, 0.05));
+  drip[s * 2u + 1u].w = wetness;
+  if (wetness <= 0.0 || here > 0.1 || P.smax == 0u || P.dripRate <= 0.0) { return; }
+  let down = clamp(-wn.y, 0.0, 1.0);
+  let rate = P.dripRate * wetness * wetness * (0.15 + 0.85 * down);
+  let h0 = s * 747796405u + P.seed * 2891336453u + 17u;
+  if (hash1(h0) >= rate * P.dt) { return; }
+  let slot = atomicAdd(&sctl[0], 1u) % P.smax;
+  sPos[slot] = vec4<f32>(probe, P.sprLife * 2.0);
+  sVel[slot] = vec4<f32>(colSurfVel(k, wp) + wn * P.h * 2.0 * hash1(h0 + 1u), 0.0);
 }
 // narrow band, look only: a point at the centre of deep water cells (water on the grid with no particles), for the live view and bakes,
 // written after the spray points (offset in P.opad). Above DEEPMAX deep cells an even, fixed sample is kept, sized from last frame's count.
@@ -661,8 +818,9 @@ fn g2p(@builtin(global_invocation_id) g: vec3<u32>) {
   // white water: fast spray in the air, hard impacts, and churning the grid cannot hold. Sensitivity is q6.
   let sens = max(P.q6, 0.05);
   let pacc = length(vn - vo) / P.dt;
-  let impact = clamp((pacc / sens - 15.0) / 80.0, 0.0, 1.0);
-  let turb = clamp((length(v0 - vo) / sens - 0.35) / 1.5, 0.0, 1.0);
+  let settle = smoothstep(0.1, 0.5, P.q8);   // the first moments after a start are the fill settling, not churning
+  let impact = clamp((pacc / sens - 15.0) / 80.0, 0.0, 1.0) * settle;
+  let turb = clamp((length(v0 - vo) / sens - 0.35) / 1.5, 0.0, 1.0) * settle;
   let spray = air * (0.25 + 0.75 * clamp(spd0 / 4.0, 0.0, 1.0));
   // airborne droplets stay white, surface foam fades over q5 seconds, foam buried deep in the water goes quickly
   let tau = max(P.q5, 0.05) * mix(1.0, 0.35, smoothstep(0.7, 1.0, rho)) * mix(1.0, 2.5, air);
@@ -847,7 +1005,7 @@ fn nbSpawn(@builtin(global_invocation_id) g: vec3<u32>) {
 }
 
 const FLIP_SLOT = { cells: 512 };   // one block of the sparse grid: 8 x 8 x 8 cells
-const FLIP_PARAMS_BYTES = 1568;      // the solver's uniform block: settings, starting-water shapes, ocean waves
+const FLIP_PARAMS_BYTES = 1632;      // the solver's uniform block: settings, whitewater, air and drips (words 68-83), starting-water shapes (84), ocean waves (148)
 const FLIP_DEEPMAX = 200000;          // deep water points drawn at most (narrow band, look only); matches DEEPMAX in the shader
 class FlipSim {
   constructor(device, opt) {
@@ -874,7 +1032,9 @@ class FlipSim {
     this.mk = mk;
     this.bPos = mk(M * 16); this.bVel = mk(M * 16);
     this.bPid = mk(M * 4); this.bTpid = mk(16); this.sortedEver = false;
-    this.sprayCap = 0; this.sprDispMax = 0; this.bSPos = mk(16); this.bSVel = mk(16); this.bSctl = mk(16); this.seed = 0;
+    this.sprayCap = 0; this.sprDispMax = 0; this.bSPos = mk(16); this.bSVel = mk(16); this.bSctl = mk(16); this.bSAux = mk(16); this.seed = 0;
+    this.airDims = null; this.bAir = mk(16); this.bAir2 = mk(16); this.bAirAcc = mk(16);   // air field, made when first used
+    this.bDrip = mk(32); this.ndrip = 0; this.dripSig = '';                                   // drip samples on the colliders
     { const ids = new Uint32Array(M); for (let k = 0; k < M; k++) ids[k] = k; device.queue.writeBuffer(this.bPid, 0, ids); }   // slot k starts as particle k
     this.bTmap = mk(this.ntiles * 4); this.bNeed = mk(this.ntiles * 4); this.bNew = mk(this.ntiles * 8);
     this.makeSlotBuffers(this.scap);
@@ -904,7 +1064,8 @@ class FlipSim {
       tileReset: [12], tileNeedClear: [0, 17], tileMark: [0, 1, 17], tileMarkPhi: [0, 7, 12, 17, 18, 19], tileMarkFill: [0, 10, 11, 17], phiInitAll: [0, 7, 10, 11, 12, 18, 19, 31], tileFree: [0, 12, 16, 17, 20, 21], argsNew: [12, 14], tileAlloc: [0, 12, 16, 19, 20, 21], tileFix: [0, 12],
       initNew: [0, 7, 8, 10, 11, 12, 21, 31], slotListBuild: [0, 12, 16, 18], argsSlots: [12, 14], growFree: [12, 20, 25],
       sortClear: [22], sortHist: [0, 1, 22], sortScan: [22], sortScatter: [0, 1, 2, 22, 23, 24, 26, 27], sortCopy: [0, 1, 2, 23, 24, 26, 27], unsort: [0, 1, 23, 26],
-      clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 16, 28, 29, 30], sprayStep: [0, 6, 10, 11, 16, 28, 29], sprayDisp: [0, 15, 28, 29],
+      clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], sprayStep: [0, 10, 11, 28, 29, 32, 33], sprayDisp: [0, 15, 28, 29], wwSample: [0, 3, 5, 6, 7, 16, 28, 33],
+      airClear: [0, 34], airSplatW: [0, 1, 2, 6, 16, 34], airSplatS: [0, 28, 29, 34], airUpdate: [0, 10, 11, 32, 34, 35], airCopy: [0, 32, 35], dripStep: [0, 6, 7, 10, 16, 28, 29, 30, 36],
       normFaces: [0, 3, 5, 7, 10, 12, 16, 18, 19], divergence: [0, 3, 6, 7, 9, 12, 16, 18, 19],
       listClear: [12], buildList: [0, 7, 12, 13, 18, 19], listArgs: [0, 12, 14], rbRed: [0, 7, 8, 9, 12, 13, 16, 19], rbBlack: [0, 7, 8, 9, 12, 13, 16, 19],
       project: [0, 3, 7, 8, 12, 16, 18, 19], subsample: [0, 1, 15], g2p: [0, 1, 2, 3, 5, 6, 10, 11, 16],
@@ -936,7 +1097,8 @@ class FlipSim {
   makeGroups() {
     const bufs = { 0: this.bParams, 1: this.bPos, 2: this.bVel, 3: this.bAcc, 5: this.bAccW, 6: this.bCnt, 7: this.bType, 8: this.bPres, 9: this.bRhs, 10: this.bCols, 11: this.bSdf,
       12: this.bCtl, 13: this.bList, 14: this.bArgs, 15: this.bDisp, 16: this.bTmap, 17: this.bNeed, 18: this.bSlotList, 19: this.bSlotTile, 20: this.bStack, 21: this.bNew,
-      22: this.bSortCnt, 23: this.bTpos, 24: this.bTvel, 25: this.bGro, 26: this.bPid, 27: this.bTpid, 28: this.bSPos, 29: this.bSVel, 30: this.bSctl, 31: this.bVelG };
+      22: this.bSortCnt, 23: this.bTpos, 24: this.bTvel, 25: this.bGro, 26: this.bPid, 27: this.bTpid, 28: this.bSPos, 29: this.bSVel, 30: this.bSctl, 31: this.bVelG,
+      32: this.bAir, 33: this.bSAux, 34: this.bAirAcc, 35: this.bAir2, 36: this.bDrip };
     for (const name in this.L) { const p = this.pipes[name]; p.bg = this.dev.createBindGroup({ layout: p.pipeline.getBindGroupLayout(0), entries: this.L[name].map((k) => ({ binding: k, resource: { buffer: bufs[k] } })) }); }
   }
   // more blocks: copy the old ones over unchanged and put the new slots on the free stack
@@ -1018,12 +1180,22 @@ class FlipSim {
     if (oc) {
       const key = JSON.stringify(oc) + '|' + o.g;
       if (key !== this.oceanKey) { this.oceanKey = key; this.oceanW = oceanWaves(oc, o.g, oc.level - b.y0); }
-      nw = this.oceanW.n; f32.set(this.oceanW.w, 132);
+      nw = this.oceanW.n; f32.set(this.oceanW.w, 148);
     }
     u32[58] = nw; f32[59] = o.time || 0; f32[60] = oc ? oc.level : 0; f32[61] = oc ? oc.layer : 0; f32[62] = nbOn && this.deepOn ? u32[B + 14] + this.sprDispMax : 0;
     f32[63] = b.y0; u32[64] = init; const fl = init ? this.nbFills.slice(0, 8) : []; u32[65] = fl.length; f32[66] = oc ? Math.max(oc.level - b.y0, 1e-3) : 1; u32[67] = nfv;
-    fl.forEach((f, k) => { const q = 68 + k * 8; if (f.t === 'box') f32.set([1, f.x0, f.y0, f.z0, f.x1, f.y1, f.z1, 0], q); else f32.set([2, f.x, f.y, f.z, f.r, 0, 0, 0], q); });
+    fl.forEach((f, k) => { const q = 84 + k * 8; if (f.t === 'box') f32.set([1, f.x0, f.y0, f.z0, f.x1, f.y1, f.z1, 0], q); else f32.set([2, f.x, f.y, f.z, f.r, 0, 0, 0], q); });
     if (init && !this.only) { this.nbInit = 0; this.nbFills = []; this.nbFillVols = []; }
+    // whitewater, air field and drips (words 68-83)
+    const ww = (sp && sp.ww) || {}, airo = on && o.air && o.air.on ? o.air : null, dr = on && o.drip && o.drip.on ? o.drip : null;
+    if (airo) this.airAlloc();
+    const ad = this.airDims;
+    f32[68] = ww.foamLife || 3; f32[69] = ww.rise || 0.3; f32[70] = ww.crest === undefined ? 1 : ww.crest; f32[71] = ww.impact === undefined ? 0.5 : ww.impact;
+    u32[72] = airo && ad ? 1 : 0; f32[73] = airo ? airo.couple : 0; f32[74] = airo ? airo.decay : 0; f32[75] = ad ? ad.h : 1;
+    u32[76] = ad ? ad.nx : 1; u32[77] = ad ? ad.ny : 1; u32[78] = ad ? ad.nz : 1;
+    if (dr) this.dripUpdate(o.cols.slice(0, nc)); u32[79] = dr ? this.ndrip : 0;
+    f32[80] = dr ? dr.rate : 0; f32[81] = dr ? dr.dry : 1; f32[82] = airo ? (airo.blur === undefined ? 0.35 : airo.blur) : 0; f32[83] = 0;
+    this.airOnStep = !!(airo && ad); this.dripOnStep = !!(dr && this.ndrip > 0);
     this.dev.queue.writeBuffer(this.bParams, 0, this.pu);
     const iters = Math.max(1, (this.opt.iters || o.iters) | 0);
     const enc = this.dev.createCommandEncoder();
@@ -1089,7 +1261,15 @@ class FlipSim {
       } },
       { name: 'project', fn: (ps) => { indirect(ps, 'project', 64); if (nb) indirect(ps, 'saveVel', 64); } },
       { name: 'g2p', fn: (ps) => dispatch(ps, 'g2p', N) },
-      ...(this.sprayCap > 0 ? [{ name: 'spray', fn: (ps) => { dispatch(ps, 'sprayStep', this.sprayCap); if (this.sprOnStep) dispatch(ps, 'sprayEmit', N); } }] : []),
+      ...(this.sprayCap > 0 ? [{ name: 'spray', fn: (ps) => {
+        if (this.airOnStep) {   // air field first, so the whitewater moves with this step's air
+          const na = this.airDims.n;
+          dispatch(ps, 'airClear', na); dispatch(ps, 'airSplatW', N); dispatch(ps, 'airSplatS', this.sprayCap); dispatch(ps, 'airUpdate', na); dispatch(ps, 'airCopy', na);
+        }
+        dispatch(ps, 'wwSample', this.sprayCap); dispatch(ps, 'sprayStep', this.sprayCap);
+        if (this.sprOnStep) dispatch(ps, 'sprayEmit', N);
+        if (this.dripOnStep) dispatch(ps, 'dripStep', this.ndrip);
+      } }] : []),
       ...(nb ? [{ name: 'reseed', fn: (ps) => {
         dispatch(ps, 'nbKill', N); dispatch(ps, 'nbReset', 1); dispatch(ps, 'nbDead', N); indirect(ps, 'nbDeficit', 64); dispatch(ps, 'nbArgs', 1); indirect(ps, 'nbSpawn', 96);
       } }] : [])
@@ -1119,11 +1299,33 @@ class FlipSim {
   setSprayCap(n) {
     n = Math.max(0, Math.min(n | 0, Math.floor((this.dev.limits.maxStorageBufferBindingSize || (1 << 27)) / 16)));
     if (n === this.sprayCap) return;
-    [this.bSPos, this.bSVel].forEach((x) => x.destroy());
+    [this.bSPos, this.bSVel, this.bSAux].forEach((x) => x.destroy());
     this.sprayCap = n; this.sprDispMax = Math.min(n, 200000);
-    this.bSPos = this.mk(Math.max(n, 1) * 16); this.bSVel = this.mk(Math.max(n, 1) * 16);
+    this.bSPos = this.mk(Math.max(n, 1) * 16); this.bSVel = this.mk(Math.max(n, 1) * 16); this.bSAux = this.mk(Math.max(n, 1) * 16);
     if (this.sstage) { this.sstage.destroy(); this.sstage = null; }
     this.dispAlloc();
+  }
+  // the air field's grid: cells a few solver cells wide, at most about 260 thousand of them
+  airAlloc() {
+    if (this.airDims) return;
+    const r = Math.max(2, Math.ceil(Math.cbrt(this.ncell / 260000))), h = this.h * r;
+    const nx = Math.ceil(this.nx / r) + 1, ny = Math.ceil(this.ny / r) + 1, nz = Math.ceil(this.nz / r) + 1, n = nx * ny * nz;
+    [this.bAir, this.bAir2, this.bAirAcc].forEach((x) => x.destroy());
+    this.bAir = this.mk(n * 16); this.bAir2 = this.mk(n * 16); this.bAirAcc = this.mk(n * 16);
+    this.airDims = { nx, ny, nz, n, h };
+    this.makeGroups();
+  }
+  // drip samples: points over each collider's surface, taken from its distance grid, rebuilt when the set of colliders changes
+  dripUpdate(cols) {
+    const sig = cols.map((c) => (c.sdf ? c.sdf.id : 'x')).join(',');
+    if (sig === this.dripSig) return;
+    this.dripSig = sig;
+    const parts = []; let n = 0;
+    cols.forEach((c, k) => { if (!c.sdf) return; const a = dripSamples(c.sdf, this.h, k); parts.push(a); n += a.length / 8; });
+    const all = new Float32Array(Math.max(n, 1) * 8); let o = 0; parts.forEach((a) => { all.set(a, o); o += a.length; });
+    if (this.bDrip.size < all.byteLength) { this.bDrip.destroy(); this.bDrip = this.mk(all.byteLength); this.makeGroups(); }
+    this.dev.queue.writeBuffer(this.bDrip, 0, all);
+    this.ndrip = n;
   }
   // the live view's gather buffer: water sample, then spray, then (narrow band, look only) the deep water points
   dispAlloc() {
@@ -1236,7 +1438,7 @@ class FlipSim {
   }
   destroy() {
     this.dead = true;
-    [this.bPos, this.bVel, this.bPid, this.bTpid, this.bSPos, this.bSVel, this.bSctl, this.sstage, this.bTmap, this.bNeed, this.bNew, this.bCols, this.bSortCnt, this.bTpos, this.bTvel, this.bSdf, this.bParams, this.stage, this.bList, this.bCtl, this.bGro, this.bArgs, this.bDisp, this.bStat, this.dstage]
+    [this.bPos, this.bVel, this.bPid, this.bTpid, this.bSPos, this.bSVel, this.bSctl, this.sstage, this.bTmap, this.bNeed, this.bNew, this.bCols, this.bSortCnt, this.bTpos, this.bTvel, this.bSdf, this.bParams, this.stage, this.bList, this.bCtl, this.bGro, this.bArgs, this.bDisp, this.bStat, this.dstage, this.bSAux, this.bAir, this.bAir2, this.bAirAcc, this.bDrip]
       .concat(this.slotBufs().map((k) => this[k])).forEach((x) => { try { x && x.destroy(); } catch (e) { /* ignore */ } });
     (this.rs || []).forEach((q) => q.buf.destroy());
   }
@@ -1245,21 +1447,56 @@ class FlipSim {
 // a restart puts every particle id back to its slot number, so the ids stay a clean 0..N-1
 FlipSim.prototype.clear = function () {
   GpuSim.prototype.clear.call(this);
+  this.tm = 0;   // time since the start: gusts replay the same after a reset, and the first moments count as settling
   this.nbInit = 1; this.nbFills = []; this.nbFillVols = [];   // narrow band: the depth field starts again from the starting water (or air)
   if (this.sprayCap) { const enc = this.dev.createCommandEncoder(); enc.clearBuffer(this.bSPos); this.dev.queue.submit([enc.finish()]); }
+  if (this.airDims) { const enc = this.dev.createCommandEncoder(); enc.clearBuffer(this.bAir); this.dev.queue.submit([enc.finish()]); }
+  this.dripSig = '';   // drip samples come back dry
   if (this.sortedEver) { const M = this.MAXN, ids = new Uint32Array(M); for (let k = 0; k < M; k++) ids[k] = k; this.dev.queue.writeBuffer(this.bPid, 0, ids); this.sortedEver = false; }
 };
 
-// the same 32-bit packing as the shader: top bit, kind, speed in quarter units per second, octahedral direction
-function packSprayJS(vx, vy, vz, mist) {
-  const s = Math.hypot(vx, vy, vz); let nx = 0, ny = 1, nz = 0; if (s > 1e-6) { nx = vx / s; ny = vy / s; nz = vz / s; }
+// the same 32-bit packing as the shader: top bit, two bits of kind (00 spray, 10 mist, 01 foam, 11 bubble), 8 bits of speed in quarter units
+// per second, then the direction (spray, mist) or how much life is left (foam, bubbles)
+function packSprayJS(vx, vy, vz, kind, lifeFrac) {
+  kind = kind === true ? 1 : (kind | 0);
+  const s = Math.hypot(vx, vy, vz);
+  let code = (0x80000000 | (Math.min(Math.floor(s * 4), 255) << 21)) >>> 0;
+  code = (code | [0, 0x40000000, 0x20000000, 0x60000000][kind & 3]) >>> 0;
+  if (kind >= 2) return (code | Math.round(Math.max(0, Math.min(1, lifeFrac || 0)) * 1023)) >>> 0;
+  let nx = 0, ny = 1, nz = 0; if (s > 1e-6) { nx = vx / s; ny = vy / s; nz = vz / s; }
   const l = Math.abs(nx) + Math.abs(ny) + Math.abs(nz); let px = nx / l, py = ny / l;
   if (nz < 0) { const qx = (1 - Math.abs(py)) * (px >= 0 ? 1 : -1), qy = (1 - Math.abs(px)) * (py >= 0 ? 1 : -1); px = qx; py = qy; }
   const u = Math.max(0, Math.min(1023, Math.round((px * 0.5 + 0.5) * 1023))), w = Math.max(0, Math.min(1023, Math.round((py * 0.5 + 0.5) * 1023)));
-  return (0x80000000 | (mist ? 0x40000000 : 0) | (Math.min(Math.floor(s * 4), 511) << 21) | (w << 10) | u) >>> 0;
+  return (code | (w << 10) | u) >>> 0;
+}
+// drip samples on a collider, from its distance grid: grid points near the surface, moved onto it along the gradient, about one per solver
+// cell of surface (at most 6000). 8 floats each: local position, collider number, local normal, wetness (starts dry).
+const DRIP_CACHE = new Map();
+function dripSamples(sdf, h, k) {
+  const key = sdf.id + '|' + h.toFixed(5);
+  let base = DRIP_CACHE.get(key);
+  if (!base) {
+    const [nx, ny, nz] = sdf.dims, c = sdf.cell, d = sdf.data, o = sdf.origin, pts = [];
+    const at = (i, j, q) => d[Math.min(nx - 1, Math.max(0, i)) + nx * (Math.min(ny - 1, Math.max(0, j)) + ny * Math.min(nz - 1, Math.max(0, q)))];
+    for (let q = 1; q < nz - 1; q++) for (let j = 1; j < ny - 1; j++) for (let i = 1; i < nx - 1; i++) {
+      const v = d[i + nx * (j + ny * q)]; if (Math.abs(v) > 0.6 * c) continue;
+      let gx = at(i + 1, j, q) - at(i - 1, j, q), gy = at(i, j + 1, q) - at(i, j - 1, q), gz = at(i, j, q + 1) - at(i, j, q - 1);
+      const gl = Math.hypot(gx, gy, gz); if (gl < 1e-9) continue; gx /= gl; gy /= gl; gz /= gl;
+      pts.push(o[0] + i * c - gx * v, o[1] + j * c - gy * v, o[2] + q * c - gz * v, gx, gy, gz);
+    }
+    const nsurf = pts.length / 6, want = Math.max(100, Math.min(6000, Math.round(nsurf * c * c / (h * h))));
+    const step = Math.max(1, nsurf / want), out = [];
+    let sd = 7 + (sdf.id | 0); const rnd = () => { sd = (sd * 16807) % 2147483647; return sd / 2147483647; };
+    for (let t = rnd() * step; t < nsurf; t += step) { const i = Math.floor(t) * 6; out.push(pts[i], pts[i + 1], pts[i + 2], 0, pts[i + 3], pts[i + 4], pts[i + 5], 0); }
+    base = new Float32Array(out); DRIP_CACHE.set(key, base);
+    if (DRIP_CACHE.size > 32) DRIP_CACHE.delete(DRIP_CACHE.keys().next().value);
+  }
+  const a = base.slice(); for (let i = 3; i < a.length; i += 8) a[i] = k;
+  return a;
 }
 // live spray slots for a cache frame: an even sample of at most cap points, positions across the box like the water
-function packSprayFrame(sd, b, cap) {
+function packSprayFrame(sd, b, cap, foamLife) {
+  foamLife = foamLife || 3;
   let alive = 0; for (let j = 0; j < sd.n; j++) if (sd.p[j * 4 + 3] > 0) alive++;
   const step = Math.max(1, Math.ceil(alive / cap)), m = Math.ceil(alive / step), pos = new Uint16Array(m * 3), pk = new Uint32Array(m);
   const kx = 65535 / (b.x1 - b.x0), ky = 65535 / (b.y1 - b.y0), kz = 65535 / (b.z1 - b.z0);
@@ -1269,7 +1506,7 @@ function packSprayFrame(sd, b, cap) {
     if ((c++ % step) !== 0) continue;
     pos[k * 3] = Math.max(0, Math.min(65535, Math.round((sd.p[j * 4] - b.x0) * kx))); pos[k * 3 + 1] = Math.max(0, Math.min(65535, Math.round((sd.p[j * 4 + 1] - b.y0) * ky)));
     pos[k * 3 + 2] = Math.max(0, Math.min(65535, Math.round((sd.p[j * 4 + 2] - b.z0) * kz)));
-    pk[k] = packSprayJS(sd.v[j * 4], sd.v[j * 4 + 1], sd.v[j * 4 + 2], sd.v[j * 4 + 3] > 0.5); k++;
+    pk[k] = packSprayJS(sd.v[j * 4], sd.v[j * 4 + 1], sd.v[j * 4 + 2], Math.round(sd.v[j * 4 + 3]), sd.p[j * 4 + 3] / foamLife); k++;
   }
   return { n: k, pos: k < m ? pos.slice(0, k * 3) : pos, pk: k < m ? pk.slice(0, k) : pk, alive };
 }
@@ -1326,7 +1563,7 @@ async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
       const t = (f - 1) * dtF + (s + 1) * dt;
       while (ei < ev.length && ev[ei].t <= t) { const e = ev[ei++]; sim.fillSphere(e.x, e.y, e.z, e.r, 0, -1, 0); }
       runner.step(dt, sampleAll(t), { g: desc.g, iters: desc.iters, flip: desc.flip, comp: desc.comp, wind: desc.wind, drag: desc.drag, foamTau: desc.foamTau, gust: desc.gust, foamSens: desc.foamSens, colMax: desc.colMax, vmax: desc.vmaxW, scale: desc.scale || 1, vs: desc.scale || 1, tear: desc.tear || 0, spr: desc.spr || null,
-        nb: nbc, ocean: oc, time: t });
+        nb: nbc, ocean: oc, time: t, air: desc.air || null, drip: desc.drip || null });
     }
     n = await sim.readbackInto(dst);
     let mv = 0; for (let i = 0; i < n; i++) { const w = dst[i * 4 + 3] % 64; if (w > mv) mv = w; }
@@ -1337,7 +1574,7 @@ async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
     const diag = Object.assign(bakeDiag(dst, n, sim.b, desc.vmaxW), { sub, objectSpeed: objV, fastestParticle: st.vmax, fluidCells: st.fluid, blocksUsed: st.sc, blockPool: sim.scap,
       blocksNoRoom: (sim.ovfTotal || 0) - ovf0, ms: performance.now() - tf0 });
     const frame = packFrameBuf(dst, n, sim.b, sampleAll(f * dtF));
-    if (sim.sprayCap) { const sd = await sim.readSpray(); if (sd) { frame.sp = packSprayFrame(sd, sim.b, 200000); diag.sprayPoints = frame.sp.alive; } }
+    if (sim.sprayCap) { const sd = await sim.readSpray(); if (sd) { frame.sp = packSprayFrame(sd, sim.b, 200000, (desc.spr && desc.spr.ww && desc.spr.ww.foamLife) || 3); diag.sprayPoints = frame.sp.alive; } }
     if (desc.nbLook) { const dd = await sim.readDeep(); if (dd && dd.n) { frame.dp = packDeep(dd.p, dd.n, sim.b); diag.deepPoints = dd.n; } }
     onFrame(frame, { f, F, n, elapsed: (Date.now() - t0) / 1000, full: sim.N >= sim.cap, sub, diag });
     if (isCancelled()) { ok = false; break; }
