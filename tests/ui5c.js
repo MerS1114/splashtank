@@ -7,7 +7,7 @@ const wait=(ms)=>new Promise(r=>setTimeout(r,ms));
  await pg.goto('file://'+PAGE); await wait(6000);
  const ev=(f,...a)=>pg.evaluate(f,...a);
  await pg.select('#scene','Dam break'); await wait(3000);
- const st=()=>ev(()=>{ const s=window.__splash, sim=s.getSim(); let deep=0, n=sim.outN||0; for(let i=0;i<n;i++){ const w=s.rawBuf[i*4+3]; if(w>=4096) deep++; } return {N:sim.N, nbOn:sim.nbOn, deepOn:!!sim.deepOn, deep, S_nb:s.S.nbOn}; });
+ const st=()=>ev(()=>{ const s=window.__splash, sim=s.getSim(), fr=sim.outFrame; let deep=0; if(fr&&fr.dp) for(let i=0;i<fr.dp.n;i++) if(fr.dp.spd[i]!==255) deep++; return {N:sim.N, nbOn:sim.nbOn, deepOn:!!sim.deepOn, deep, shown:fr?fr.n:0, spray:fr&&fr.sp?fr.sp.n:0, S_nb:s.S.nbOn}; });
  console.log('start', JSON.stringify(await st()));
  await pg.click('#ptabs [data-ptab=sim]'); await wait(200);
  await ev(()=>{ const c=document.querySelector('#c-nb'); c.closest('details').open=true; c.scrollIntoView({block:'center'}); }); await wait(200);

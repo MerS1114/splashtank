@@ -15,7 +15,7 @@ struct Params {
   q7: f32, q8: f32, q9: f32, q10: f32, q11: f32, q12: f32,
   lcap: u32, tx: u32, ty: u32, tz: u32, scap: u32,
   sheetMin: f32, sprRate: f32, sprMin: f32, sprLife: f32, mistFrac: f32, sprDrag: f32, mistDrag: f32, vs: f32,
-  smax: u32, sdOff: u32, sdStride: u32, seed: u32,
+  smax: u32, sdOff: u32, sdMax: u32, seed: u32,
   nb: u32, band: f32, ocean: u32, nwave: u32, otime: f32, olevel: f32, olayer: f32, opad: f32,
   oy0: f32, nbInit: u32, nfill: u32, odepth: f32, nfv: u32,
   wwFoamLife: f32, wwRise: f32, wwCrest: f32, wwImpact: f32,
@@ -70,7 +70,12 @@ fn gv0W(f: u32, v: f32) { atomicStore(&accW[f], bitcast<i32>(v)); }
 @group(0) @binding(33) var<storage, read_write> sAux: array<vec4<f32>>;      // per whitewater point: water velocity there (xyz), how wet (w)
 @group(0) @binding(34) var<storage, read_write> airAcc: array<atomic<i32>>;  // per air cell: momentum and weight pushed in this step (fixed point)
 @group(0) @binding(35) var<storage, read_write> air2: array<vec4<f32>>;
-@group(0) @binding(36) var<storage, read_write> drip: array<vec4<f32>>;      // per drip sample: (local position, collider), (local normal, wetness)   // the grid velocity kept from the last step (narrow band)
+@group(0) @binding(36) var<storage, read_write> drip: array<vec4<f32>>;
+// the live view packed the way cache frames are stored (see packDisp): 16-bit positions across the box, a speed byte and a white-water byte
+struct PackU { nW: u32, nS: u32, nD: u32, wFromPos: u32, srcS: u32, srcD: u32, oWp: u32, oWs: u32, oWf: u32, oSp: u32, oSk: u32, oDp: u32, oDs: u32, pad0: u32, pad1: u32, pad2: u32,
+  x0: f32, y0: f32, z0: f32, kx: f32, ky: f32, kz: f32, pad3: f32, pad4: f32 };
+@group(0) @binding(37) var<storage, read_write> packOut: array<u32>;
+@group(0) @binding(38) var<uniform> PK: PackU;      // per drip sample: (local position, collider), (local normal, wetness)   // the grid velocity kept from the last step (narrow band)
 ${SDF_WGSL}
 
 const DEADY: f32 = -1.0e5;
@@ -648,11 +653,12 @@ fn sprayEmit(@builtin(global_invocation_id) g: vec3<u32>) {
     let dir = vec3<f32>(s * cos(a), s * sin(a), z);
     let under = rho > 0.7 && hash1(hh + 7u) < 0.7;
     let mist = !under && hash1(hh + 3u) < P.mistFrac * fast;
-    var nv = v * (0.85 + 0.3 * hash1(hh + 4u)) + dir * spd * select(0.12, 0.3, mist);
+    var nv = v * (0.9 + 0.2 * hash1(hh + 4u)) + dir * spd * select(0.06, 0.2, mist);   // mostly the water's own velocity: a wide random spread looks like a sparkler
     var life = P.sprLife * (0.6 + 0.8 * hash1(hh + 5u)) * select(1.0, 1.6, mist);
     var kind = select(0.0, 1.0, mist);
     if (under) { nv = v + dir * spd * 0.05; life = P.wwFoamLife * (0.6 + 0.8 * hash1(hh + 5u)); kind = 3.0; }
     let slot = atomicAdd(&sctl[0], 1u) % P.smax;
+    if (sPos[slot].w > 0.0) { continue; }   // never replace a living point: when the pool is full, new whitewater waits for room
     sPos[slot] = vec4<f32>(q.xyz + nv * P.dt + dir * P.h * 0.3 * hash1(hh + 6u), life);
     sVel[slot] = vec4<f32>(nv, kind);
   }
@@ -663,15 +669,19 @@ fn sprayEmit(@builtin(global_invocation_id) g: vec3<u32>) {
 fn sprayStep(@builtin(global_invocation_id) g: vec3<u32>) {
   let j = gid1(g); if (j >= P.smax) { return; }
   let sp = sPos[j]; if (sp.w <= 0.0) { return; }
-  var v = sVel[j].xyz; var kind = u32(sVel[j].w + 0.5);
+  var v = sVel[j].xyz; let kw = sVel[j].w; var kind = u32(kw + 0.5);
+  // the fraction part of the kind is how long the point has been this kind (0.4 = WWHOLD seconds or more). A point keeps its kind at least
+  // that long, so it never flickers between kinds (and sizes) from one step to the next where the water is thin or broken up.
+  var tk = (kw - f32(kind)) / 0.4 * WWHOLD; let settled = tk >= WWHOLD * 0.999; let k0 = kind;
   let aux = sAux[j]; let wet = aux.w; let vf = aux.xyz;
   var life = sp.w;
   let h0 = j * 2654435761u + P.seed * 974711u;
-  if (kind == 0u && v.y < 0.0 && wet > 0.55) { kind = 2u; life = P.wwFoamLife * (0.6 + 0.8 * hash1(h0)); v = vf; }   // spray landing on water turns to foam
+  if (kind == 0u && v.y < vf.y && wet > 0.55 && tk > 0.05) { kind = 2u; life = P.wwFoamLife * (0.6 + 0.8 * hash1(h0)); v = vf; }   // spray landing on water turns to foam
   else if (kind == 1u && wet > 0.55) { life = 0.0; }                                                                   // mist falling into water is gone
-  else if (kind == 2u && wet > 0.97) { kind = 3u; }                                                                    // foam pushed under: bubbles
-  else if (kind == 2u && wet < 0.04) { kind = 0u; life = min(life, P.sprLife); }                                       // foam that lost the surface falls as spray
-  else if (kind == 3u && wet < 0.6) { kind = 2u; life = max(life, 0.5 * P.wwFoamLife); }                              // a bubble reaching the surface: foam
+  else if (kind == 2u && wet > 0.97 && settled) { kind = 3u; }                                                         // foam pushed under: bubbles
+  else if (kind == 2u && wet < 0.04 && settled) { kind = 0u; life = min(life, P.sprLife); }                            // foam that lost the surface falls as spray
+  else if (kind == 3u && wet < 0.6 && settled) { kind = 2u; life = max(life, 0.5 * P.wwFoamLife); }                   // a bubble reaching the surface: foam
+  if (kind != k0) { tk = 0.0; } else { tk = min(tk + P.dt, WWHOLD); }
   let p = sp.xyz;
   if (kind <= 1u) {
     let mist = kind == 1u;
@@ -697,8 +707,9 @@ fn sprayStep(@builtin(global_invocation_id) g: vec3<u32>) {
   if (np.x < P.x0 || np.x > P.x1 || np.y < P.y0 || np.y > P.y1 || np.z < P.z0 || np.z > P.z1) { life = 0.0; }
   else if (P.ncols > 0u && colAt(np) >= 0) { life = 0.0; }
   else if (P.ocean != 0u && kind >= 2u && layerW(np) > 0.6) { life = 0.0; }
-  sPos[j] = vec4<f32>(np, life); sVel[j] = vec4<f32>(v, f32(kind));
+  sPos[j] = vec4<f32>(np, life); sVel[j] = vec4<f32>(v, f32(kind) + 0.4 * tk / WWHOLD);
 }
+const WWHOLD: f32 = 0.2;
 // packed for drawing: top bit marks whitewater, the next two bits the kind (00 spray, 10 mist, 01 foam, 11 bubble), 8 bits of speed in quarter
 // units per second, then for spray and mist the direction (octahedral, 20 bits), for foam and bubbles how much of their life is left (10 bits)
 fn packSpray(v: vec3<f32>, kind: u32, lifeFrac: f32) -> u32 {
@@ -717,11 +728,60 @@ fn packSpray(v: vec3<f32>, kind: u32, lifeFrac: f32) -> u32 {
 fn wwArgs() { split((min(atomicLoad(&sctl[0]), P.smax) + 255u) / 256u, 28u); }
 // an even sample of the whitewater slots for the live view, written after the water points
 @compute @workgroup_size(256)
+// The sample takes every stride-th slot of those handed out so far (the same slots from frame to frame, so a point stays shown all its life);
+// the living ones are packed together, counted in sctl[2] (cleared by dispBegin).
 fn sprayDisp(@builtin(global_invocation_id) g: vec3<u32>) {
-  let k = gid1(g); let o = P.sdOff + k; if (o >= arrayLength(&disp)) { return; }
-  let j = k * P.sdStride;
-  if (j >= P.smax || sPos[j].w <= 0.0) { disp[o] = vec4<f32>(0.0, -1.0e6, 0.0, 0.0); return; }
+  let k = gid1(g); if (k >= P.sdMax) { return; }
+  let used = min(atomicLoad(&sctl[0]), P.smax); let stride = max(1u, (used + P.sdMax - 1u) / P.sdMax);
+  let j = k * stride; if (j >= used || sPos[j].w <= 0.0) { return; }
+  let o = P.sdOff + atomicAdd(&sctl[2], 1u); if (o >= arrayLength(&disp)) { return; }
   disp[o] = vec4<f32>(sPos[j].xyz, bitcast<f32>(packSpray(sVel[j].xyz, u32(sVel[j].w + 0.5), sPos[j].w / max(P.wwFoamLife, 0.01))));
+}
+@compute @workgroup_size(1)
+fn dispBegin() { atomicStore(&sctl[2], 0u); }
+// The live view as a cache frame: every thread packs four points of one part (water, whitewater or deep water). Positions are 16 bits
+// across the box (three per point, so four points fill six words), water gets a speed byte (16ths, 255 = gone) and a white-water byte,
+// whitewater its 32-bit code (0 = none), deep water a speed byte. Word 0 and 1 hold how many whitewater and deep points there are.
+fn q16(p: vec3<f32>) -> vec3<u32> { return vec3<u32>(clamp(round((p - vec3<f32>(PK.x0, PK.y0, PK.z0)) * vec3<f32>(PK.kx, PK.ky, PK.kz)), vec3<f32>(0.0), vec3<f32>(65535.0))); }
+fn put6(o: u32, q: array<vec3<u32>, 4>) {
+  packOut[o] = q[0].x | (q[0].y << 16u); packOut[o + 1u] = q[0].z | (q[1].x << 16u); packOut[o + 2u] = q[1].y | (q[1].z << 16u);
+  packOut[o + 3u] = q[2].x | (q[2].y << 16u); packOut[o + 4u] = q[2].z | (q[3].x << 16u); packOut[o + 5u] = q[3].y | (q[3].z << 16u);
+}
+@compute @workgroup_size(256)
+fn packDisp(@builtin(global_invocation_id) g: vec3<u32>) {
+  let t = gid1(g);
+  let gW = (PK.nW + 3u) / 4u; let gS = (PK.nS + 3u) / 4u; let gD = (PK.nD + 3u) / 4u;
+  let nS = min(atomicLoad(&sctl[2]), PK.nS); let nD = min(atomicLoad(&ctl[14]), PK.nD);
+  if (t == 0u) { packOut[0] = nS; packOut[1] = nD; packOut[2] = 0u; packOut[3] = 0u; }
+  var q: array<vec3<u32>, 4>; var b0 = 0u; var b1 = 0u;
+  if (t < gW) {
+    for (var m = 0u; m < 4u; m++) {
+      let i = t * 4u + m; var v = vec4<f32>(0.0, -1.0e6, 0.0, 0.0);
+      if (i < PK.nW) { if (PK.wFromPos != 0u) { v = pos[i]; } else { v = disp[i]; } }
+      var s = 255u; var f = 0u; q[m] = vec3<u32>(0u);
+      if (v.y > DEADY) { q[m] = q16(v.xyz); let lv = floor(v.w / 64.0); s = u32(clamp((v.w - lv * 64.0) * 16.0, 0.0, 191.0)); f = u32(clamp(lv, 0.0, 15.0)) * 17u; }
+      b0 = b0 | (s << (8u * m)); b1 = b1 | (f << (8u * m));
+    }
+    put6(PK.oWp + t * 6u, q); packOut[PK.oWs + t] = b0; packOut[PK.oWf + t] = b1; return;
+  }
+  let ts = t - gW;
+  if (ts < gS) {
+    for (var m = 0u; m < 4u; m++) {
+      let k = ts * 4u + m; var code = 0u; q[m] = vec3<u32>(0u);
+      if (k < nS) { let v = disp[PK.srcS + k]; if (v.y > DEADY) { q[m] = q16(v.xyz); code = bitcast<u32>(v.w); } }
+      packOut[PK.oSk + k] = code;
+    }
+    put6(PK.oSp + ts * 6u, q); return;
+  }
+  let td = ts - gS;
+  if (td < gD) {
+    for (var m = 0u; m < 4u; m++) {
+      let k = td * 4u + m; var s = 255u; q[m] = vec3<u32>(0u);
+      if (k < nD) { let v = disp[PK.srcD + k]; if (v.y > DEADY) { q[m] = q16(v.xyz); s = u32(clamp((v.w - 4096.0) * 16.0, 0.0, 191.0)); } }
+      b0 = b0 | (s << (8u * m));
+    }
+    put6(PK.oDp + td * 6u, q); packOut[PK.oDs + td] = b0;
+  }
 }
 // wet objects drip: points over each collider's surface stay wet while they are in water and dry over P.dripDry seconds once out;
 // while drying they let go of drops (more from surfaces facing down), which fly as spray with the object's own velocity
@@ -744,6 +804,7 @@ fn dripStep(@builtin(global_invocation_id) g: vec3<u32>) {
   let h0 = s * 747796405u + P.seed * 2891336453u + 17u;
   if (hash1(h0) >= rate * P.dt) { return; }
   let slot = atomicAdd(&sctl[0], 1u) % P.smax;
+  if (sPos[slot].w > 0.0) { return; }
   sPos[slot] = vec4<f32>(probe, P.sprLife * 2.0);
   sVel[slot] = vec4<f32>(colSurfVel(k, wp) + wn * P.h * 2.0 * hash1(h0 + 1u), 0.0);
 }
@@ -765,7 +826,7 @@ fn deepPick(@builtin(global_invocation_id) g: vec3<u32>) {
   disp[o] = vec4<f32>(x, 4096.0 + min(length(velGVec(x)), 63.0));
 }
 @compute @workgroup_size(1)
-fn deepFin() { atomicStore(&ctl[12], atomicLoad(&ctl[11])); atomicStore(&ctl[11], 0u); atomicStore(&ctl[13], 0u); }
+fn deepFin() { atomicStore(&ctl[14], min(atomicLoad(&ctl[13]), DEEPMAX)); atomicStore(&ctl[12], atomicLoad(&ctl[11])); atomicStore(&ctl[11], 0u); atomicStore(&ctl[13], 0u); }
 fn collideP(pin: vec3<f32>) -> vec3<f32> {
   var p = pin;
   let m = P.margin;
@@ -1046,6 +1107,7 @@ class FlipSim {
     this.bGro = mk(16);
     this.dispMax = 300000; this.stride = 1;
     this.bDisp = mk(Math.min(this.MAXN, this.dispMax + 1) * 16 + 16);
+    this.bPack = mk(16); this.bPackU = device.createBuffer({ size: 96, usage: U.UNIFORM | U.COPY_DST }); this.packWords = 4;
     this.bArgs = device.createBuffer({ size: 128, usage: U.STORAGE | U.INDIRECT | U.COPY_DST });
     this.sdfCap = 16; this.sdfSig = null; this.bSdf = mk(64);
     this.bParams = device.createBuffer({ size: FLIP_PARAMS_BYTES, usage: U.UNIFORM | U.COPY_DST });
@@ -1067,7 +1129,7 @@ class FlipSim {
       tileReset: [12], tileNeedClear: [0, 17], tileMark: [0, 1, 17], tileMarkPhi: [0, 7, 12, 17, 18, 19], tileMarkFill: [0, 10, 11, 17], phiInitAll: [0, 7, 10, 11, 12, 18, 19, 31], tileFree: [0, 12, 16, 17, 20, 21], argsNew: [12, 14], tileAlloc: [0, 12, 16, 19, 20, 21], tileFix: [0, 12],
       initNew: [0, 7, 8, 10, 11, 12, 21, 31], slotListBuild: [0, 12, 16, 18], argsSlots: [12, 14], growFree: [12, 20, 25],
       sortClear: [22], sortHist: [0, 1, 22], sortScan: [22], sortScatter: [0, 1, 2, 22, 23, 24, 26, 27], sortCopy: [0, 1, 2, 23, 24, 26, 27], unsort: [0, 1, 23, 26],
-      clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], sprayStep: [0, 10, 11, 28, 29, 32, 33], sprayDisp: [0, 15, 28, 29], wwSample: [0, 3, 5, 6, 7, 16, 28, 33], wwArgs: [0, 14, 30],
+      clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], sprayStep: [0, 10, 11, 28, 29, 32, 33], sprayDisp: [0, 15, 28, 29, 30], dispBegin: [30], packDisp: [1, 12, 15, 30, 37, 38], wwSample: [0, 3, 5, 6, 7, 16, 28, 33], wwArgs: [0, 14, 30],
       airClear: [0, 34], airSplatW: [0, 1, 2, 6, 16, 34], airSplatS: [0, 28, 29, 34], airUpdate: [0, 10, 11, 32, 34, 35], airCopy: [0, 32, 35], dripStep: [0, 6, 7, 10, 16, 28, 29, 30, 36],
       normFaces: [0, 3, 5, 7, 10, 12, 16, 18, 19], divergence: [0, 3, 6, 7, 9, 12, 16, 18, 19],
       listClear: [12], buildList: [0, 7, 12, 13, 18, 19], listArgs: [0, 12, 14], rbRed: [0, 7, 8, 9, 12, 13, 16, 19], rbBlack: [0, 7, 8, 9, 12, 13, 16, 19],
@@ -1077,7 +1139,7 @@ class FlipSim {
       nbSpawn: [0, 1, 2, 12, 13, 16, 31], deepClear: [0, 15], deepPick: [0, 6, 7, 12, 15, 16, 18, 19, 31], deepFin: [12] };
     this.L = L; this.pipes = {};
     for (const name in L) this.pipes[name] = { pipeline: device.createComputePipeline({ layout: 'auto', compute: { module: mod, entryPoint: name } }) };
-    this.makeGroups();
+    this.dispAlloc();   // also makes the bind groups
   }
   // per-block storage: cell count, type, pressure, rhs (4 bytes each per cell), two numbers for each of the three faces, plus slot bookkeeping
   makeSlotBuffers(n) {
@@ -1101,7 +1163,7 @@ class FlipSim {
     const bufs = { 0: this.bParams, 1: this.bPos, 2: this.bVel, 3: this.bAcc, 5: this.bAccW, 6: this.bCnt, 7: this.bType, 8: this.bPres, 9: this.bRhs, 10: this.bCols, 11: this.bSdf,
       12: this.bCtl, 13: this.bList, 14: this.bArgs, 15: this.bDisp, 16: this.bTmap, 17: this.bNeed, 18: this.bSlotList, 19: this.bSlotTile, 20: this.bStack, 21: this.bNew,
       22: this.bSortCnt, 23: this.bTpos, 24: this.bTvel, 25: this.bGro, 26: this.bPid, 27: this.bTpid, 28: this.bSPos, 29: this.bSVel, 30: this.bSctl, 31: this.bVelG,
-      32: this.bAir, 33: this.bSAux, 34: this.bAirAcc, 35: this.bAir2, 36: this.bDrip };
+      32: this.bAir, 33: this.bSAux, 34: this.bAirAcc, 35: this.bAir2, 36: this.bDrip, 37: this.bPack, 38: this.bPackU };
     for (const name in this.L) { const p = this.pipes[name]; p.bg = this.dev.createBindGroup({ layout: p.pipeline.getBindGroupLayout(0), entries: this.L[name].map((k) => ({ binding: k, resource: { buffer: bufs[k] } })) }); }
   }
   // more blocks: copy the old ones over unchanged and put the new slots on the free stack
@@ -1174,7 +1236,7 @@ class FlipSim {
     const sp = o.spr || null, on = !!sp && this.sprayCap > 0;
     f32[B + 5] = o.tear || 0; f32[B + 6] = on ? sp.rate : 0; f32[B + 7] = on ? Math.max(0.05, sp.min) : 1; f32[B + 8] = on ? sp.life : 1; f32[B + 9] = on ? sp.mist : 0;
     f32[B + 10] = on ? sp.drag : 1; f32[B + 11] = on ? sp.mdrag : 4; f32[B + 12] = o.vs || 1;
-    u32[B + 13] = this.sprayCap; u32[B + 14] = this.stride <= 1 ? N : Math.ceil(N / this.stride); u32[B + 15] = this.sprDispMax ? Math.max(1, Math.ceil(this.sprayCap / this.sprDispMax)) : 1;
+    u32[B + 13] = this.sprayCap; u32[B + 14] = this.stride <= 1 ? N : Math.ceil(N / this.stride); u32[B + 15] = this.sprDispMax;
     if (!this.only) this.seed = (this.seed + 1) >>> 0; u32[B + 16] = this.seed;
     this.sprOnStep = on;
     // narrow band and ocean (words 55 on, then the starting-water shapes and the wave list)
@@ -1336,8 +1398,41 @@ class FlipSim {
     const dm = this.deepOn ? FLIP_DEEPMAX : 0;
     this.bDisp.destroy(); this.bDisp = this.mk((Math.min(this.MAXN, this.dispMax + 1) + this.sprDispMax + dm) * 16 + 16);
     this.ringCap = Math.min(this.MAXN, this.dispMax + 1) + this.sprDispMax + dm;
+    const big = this.packLayout(Math.min(this.MAXN, this.dispMax + 1), this.sprDispMax, dm);   // the packed live view at its largest
+    this.bPack.destroy(); this.bPack = this.mk(big.words * 4); this.packWords = big.words;
     (this.rs || []).forEach((q) => { try { q.buf.destroy(); } catch (e) { /* ignore */ } }); this.rs = null;
     this.makeGroups();
+  }
+  // where each part of the packed live view goes, in 32-bit words (see packDisp): a 4-word header, then the water's positions, speed bytes and
+  // white-water bytes, the whitewater's positions and codes, the deep water's positions and speed bytes. Every part is a whole number of words.
+  packLayout(nW, nS, nD) {
+    const gW = Math.ceil(nW / 4), gS = Math.ceil(nS / 4), gD = Math.ceil(nD / 4), L = { nW, nS, nD, groups: gW + gS + gD, oWp: 4 };
+    L.oWs = L.oWp + gW * 6; L.oWf = L.oWs + gW; L.oSp = L.oWf + gW; L.oSk = L.oSp + gS * 6; L.oDp = L.oSk + gS * 4; L.oDs = L.oDp + gD * 6; L.words = L.oDs + gD;
+    return L;
+  }
+  // gather the live view (a sample of the water, the whitewater, the deep water) and pack it on the GPU into bPack; returns the layout
+  dispPack(enc) {
+    const spr = this.sprDispMax > 0 && this.lastN, deep = this.deepOn && this.nbOn && this.velGOn && this.lastN;
+    const fromPos = !spr && !deep && (this.stride <= 1 || !this.lastN);
+    const nW = fromPos ? Math.min(this.N, this.dispMax + 1, this.MAXN) : Math.ceil(this.lastN / this.stride);
+    this.dispWaterN = nW;
+    const L = this.packLayout(nW, spr ? this.sprDispMax : 0, deep ? FLIP_DEEPMAX : 0);
+    const b = this.b, u = new ArrayBuffer(96), u32 = new Uint32Array(u), f32 = new Float32Array(u);
+    u32.set([L.nW, L.nS, L.nD, fromPos ? 1 : 0, nW, deep ? Math.round(this.pf32[62]) : 0, L.oWp, L.oWs, L.oWf, L.oSp, L.oSk, L.oDp, L.oDs, 0, 0, 0]);
+    f32.set([b.x0, b.y0, b.z0, 65535 / (b.x1 - b.x0), 65535 / (b.y1 - b.y0), 65535 / (b.z1 - b.z0), 0, 0], 16);
+    this.dev.queue.writeBuffer(this.bPackU, 0, u);
+    const run = (ps, name, items) => { const p = this.pipes[name], g = Math.ceil(items / 256); ps.setPipeline(p.pipeline); ps.setBindGroup(0, p.bg); ps.dispatchWorkgroups(Math.max(1, Math.min(g, 65535)), Math.max(1, Math.ceil(g / 65535))); };
+    const ps = enc.beginComputePass();
+    if (!fromPos) run(ps, 'subsample', nW);
+    if (spr) { run(ps, 'dispBegin', 1); run(ps, 'sprayDisp', this.sprDispMax); }
+    if (deep) {
+      const c = this.pipes.deepClear, g3 = Math.ceil(FLIP_DEEPMAX / 256); ps.setPipeline(c.pipeline); ps.setBindGroup(0, c.bg); ps.dispatchWorkgroups(Math.min(g3, 65535), Math.ceil(g3 / 65535));
+      const q = this.pipes.deepPick; ps.setPipeline(q.pipeline); ps.setBindGroup(0, q.bg); ps.dispatchWorkgroupsIndirect(this.bArgs, 64);
+      const f = this.pipes.deepFin; ps.setPipeline(f.pipeline); ps.setBindGroup(0, f.bg); ps.dispatchWorkgroups(1);
+    }
+    if (L.groups) run(ps, 'packDisp', L.groups * 1); else run(ps, 'packDisp', 1);
+    ps.end();
+    return L;
   }
   // narrow band look only: draw the deep water (cells with no particles) as points too
   setDeepLook(on) { on = !!on; if (on === !!this.deepOn) return; this.deepOn = on; this.dispAlloc(); }
@@ -1390,22 +1485,6 @@ class FlipSim {
       return n;
     });
   }
-  // when there are more particles than the view needs, gather every stride-th one into bDisp and read just those
-  dispSource(enc) {
-    const spr = this.sprDispMax > 0 && this.lastN, deep = this.deepOn && this.nbOn && this.velGOn && this.lastN;
-    if (!spr && !deep && (this.stride <= 1 || !this.lastN)) { this.dispWaterN = Math.min(this.N, this.ringCap); return { buf: this.bPos, n: this.dispWaterN }; }
-    const p = this.pipes.subsample, n = Math.ceil(this.lastN / this.stride), groups = Math.ceil(n / 256);
-    this.dispWaterN = n;   // the water sample comes first in the display buffer; the drawing needs to know where it ends
-    const ps = enc.beginComputePass(); ps.setPipeline(p.pipeline); ps.setBindGroup(0, p.bg); ps.dispatchWorkgroups(Math.min(groups, 65535), Math.ceil(groups / 65535));
-    if (spr) { const q = this.pipes.sprayDisp, g2 = Math.ceil(this.sprDispMax / 256); ps.setPipeline(q.pipeline); ps.setBindGroup(0, q.bg); ps.dispatchWorkgroups(Math.min(g2, 65535), Math.ceil(g2 / 65535)); }
-    if (deep) {
-      const c = this.pipes.deepClear, g3 = Math.ceil(FLIP_DEEPMAX / 256); ps.setPipeline(c.pipeline); ps.setBindGroup(0, c.bg); ps.dispatchWorkgroups(Math.min(g3, 65535), Math.ceil(g3 / 65535));
-      const q = this.pipes.deepPick; ps.setPipeline(q.pipeline); ps.setBindGroup(0, q.bg); ps.dispatchWorkgroupsIndirect(this.bArgs, 64);
-      const f = this.pipes.deepFin; ps.setPipeline(f.pipeline); ps.setBindGroup(0, f.bg); ps.dispatchWorkgroups(1);
-    }
-    ps.end();
-    return { buf: this.bDisp, n: n + (spr ? this.sprDispMax : 0) + (deep ? FLIP_DEEPMAX : 0) };
-  }
   // debugging: one column of cells (type, depth, particle count, kept vertical velocity) at grid (i, k)
   async dbgColumn(i, k) {
     const rd = async (buf, bytes) => { const st = this.dev.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }); const enc = this.dev.createCommandEncoder(); enc.copyBufferToBuffer(buf, 0, st, 0, bytes); this.dev.queue.submit([enc.finish()]); await st.mapAsync(GPUMapMode.READ); const a = st.getMappedRange().slice(0); st.unmap(); st.destroy(); return a; };
@@ -1448,15 +1527,49 @@ class FlipSim {
   }
   destroy() {
     this.dead = true;
-    [this.bPos, this.bVel, this.bPid, this.bTpid, this.bSPos, this.bSVel, this.bSctl, this.sstage, this.bTmap, this.bNeed, this.bNew, this.bCols, this.bSortCnt, this.bTpos, this.bTvel, this.bSdf, this.bParams, this.stage, this.bList, this.bCtl, this.bGro, this.bArgs, this.bDisp, this.bStat, this.dstage, this.sctlStage, this.bSAux, this.bAir, this.bAir2, this.bAirAcc, this.bDrip]
+    [this.bPos, this.bVel, this.bPid, this.bTpid, this.bSPos, this.bSVel, this.bSctl, this.sstage, this.bTmap, this.bNeed, this.bNew, this.bCols, this.bSortCnt, this.bTpos, this.bTvel, this.bSdf, this.bParams, this.stage, this.bList, this.bCtl, this.bGro, this.bArgs, this.bDisp, this.bStat, this.dstage, this.sctlStage, this.bSAux, this.bAir, this.bAir2, this.bAirAcc, this.bDrip, this.bPack, this.bPackU]
       .concat(this.slotBufs().map((k) => this[k])).forEach((x) => { try { x && x.destroy(); } catch (e) { /* ignore */ } });
     (this.rs || []).forEach((q) => q.buf.destroy());
   }
 }
-['setCap', 'clear', 'add', 'flushRun', 'pump', 'track', 'fillBox', 'fillSphere'].forEach((m) => { FlipSim.prototype[m] = GpuSim.prototype[m]; });
+['setCap', 'clear', 'add', 'flushRun', 'track', 'fillBox', 'fillSphere'].forEach((m) => { FlipSim.prototype[m] = GpuSim.prototype[m]; });
+// The live view: packed on the GPU (dispPack) and read back with up to three copies in flight, so stepping never waits for them.
+// The newest finished copy becomes this.outFrame, a frame in the cache format that the drawing uploads as it is and the live cache keeps.
+FlipSim.prototype.pump = function () {
+  if (!this.needRead) return;
+  if (!this.rs) this.rs = [0, 1, 2].map(() => ({ buf: this.dev.createBuffer({ size: Math.max(this.packWords * 4, 16), usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), busy: false }));
+  const s = this.rs.find((q) => !q.busy); if (!s) return;
+  this.flushRun();
+  const enc = this.dev.createCommandEncoder();
+  const L = this.dispPack(enc), bytes = Math.min(L.words * 4, s.buf.size), seq = this.rseq = (this.rseq || 0) + 1, b = Object.assign({}, this.b);
+  enc.copyBufferToBuffer(this.bPack, 0, s.buf, 0, bytes);
+  this.dev.queue.submit([enc.finish()]);
+  this.needRead = false; s.busy = true;
+  s.buf.mapAsync(GPUMapMode.READ, 0, bytes).then(() => {
+    if (!this.dead && seq > (this.outSeqDone || 0)) {
+      const t0 = performance.now();
+      this.outFrame = unpackLive(s.buf.getMappedRange(0, bytes), L, b); this.outN = L.nW; this.outSeqDone = seq; this.gen = (this.gen || 0) + 1;
+      this.unpackMs = performance.now() - t0;
+    }
+    s.buf.unmap(); s.busy = false;
+  }).catch(() => { s.busy = false; });
+};
+// the packed live view (see packLayout) as a frame: one copy into a buffer just big enough for what is there
+function unpackLive(range, L, b) {
+  const hdr = new Uint32Array(range, 0, 4), nW = L.nW, nS = Math.min(hdr[0], L.nS), nD = Math.min(hdr[1], L.nD);
+  const sz = [nS * 4, nW * 6, nS * 6, nD * 6, nW, nW, nD], off = []; let o = 0;
+  for (const z of sz) { off.push(o); o += Math.ceil(z / 4) * 4; }
+  const ab = new ArrayBuffer(Math.max(o, 4)), src = new Uint8Array(range);
+  const cp = (k, from) => { if (sz[k]) new Uint8Array(ab, off[k], sz[k]).set(src.subarray(from, from + sz[k])); };
+  cp(0, L.oSk * 4); cp(1, L.oWp * 4); cp(2, L.oSp * 4); cp(3, L.oDp * 4); cp(4, L.oWs * 4); cp(5, L.oWf * 4); cp(6, L.oDs * 4);
+  const fr = { n: nW, pos: new Uint16Array(ab, off[1], nW * 3), spd: new Uint8Array(ab, off[4], nW), fm: new Uint8Array(ab, off[5], nW), b, bytes: ab.byteLength };
+  if (nS) fr.sp = { n: nS, pos: new Uint16Array(ab, off[2], nS * 3), pk: new Uint32Array(ab, off[0], nS), alive: nS };
+  if (nD) fr.dp = { n: nD, pos: new Uint16Array(ab, off[3], nD * 3), spd: new Uint8Array(ab, off[6], nD) };
+  return fr;
+}
 // a restart puts every particle id back to its slot number, so the ids stay a clean 0..N-1
 FlipSim.prototype.clear = function () {
-  GpuSim.prototype.clear.call(this);
+  GpuSim.prototype.clear.call(this); this.outFrame = null;
   this.tm = 0;   // time since the start: gusts replay the same after a reset, and the first moments count as settling
   this.nbInit = 1; this.nbFills = []; this.nbFillVols = [];   // narrow band: the depth field starts again from the starting water (or air)
   if (this.sprayCap) { const enc = this.dev.createCommandEncoder(); enc.clearBuffer(this.bSPos); enc.clearBuffer(this.bSctl); this.dev.queue.submit([enc.finish()]); }
@@ -1504,21 +1617,23 @@ function dripSamples(sdf, h, k) {
   const a = base.slice(); for (let i = 3; i < a.length; i += 8) a[i] = k;
   return a;
 }
-// live spray slots for a cache frame: an even sample of at most cap points, positions across the box like the water
+// live whitewater slots for a cache frame: an even sample of at most about cap points, positions across the box like the water. The sample goes
+// by slot number, so a point that stays alive stays in the sample from frame to frame (sampling by count would pick different points each frame).
 function packSprayFrame(sd, b, cap, foamLife) {
   foamLife = foamLife || 3;
   let alive = 0; for (let j = 0; j < sd.n; j++) if (sd.p[j * 4 + 3] > 0) alive++;
-  const step = Math.max(1, Math.ceil(alive / cap)), m = Math.ceil(alive / step), pos = new Uint16Array(m * 3), pk = new Uint32Array(m);
+  const step = Math.max(1, Math.ceil(alive / cap));
+  let m = 0; for (let j = 0; j < sd.n; j += step) if (sd.p[j * 4 + 3] > 0) m++;
+  const pos = new Uint16Array(m * 3), pk = new Uint32Array(m);
   const kx = 65535 / (b.x1 - b.x0), ky = 65535 / (b.y1 - b.y0), kz = 65535 / (b.z1 - b.z0);
-  let k = 0, c = 0;
-  for (let j = 0; j < sd.n && k < m; j++) {
+  let k = 0;
+  for (let j = 0; j < sd.n && k < m; j += step) {
     if (!(sd.p[j * 4 + 3] > 0)) continue;
-    if ((c++ % step) !== 0) continue;
     pos[k * 3] = Math.max(0, Math.min(65535, Math.round((sd.p[j * 4] - b.x0) * kx))); pos[k * 3 + 1] = Math.max(0, Math.min(65535, Math.round((sd.p[j * 4 + 1] - b.y0) * ky)));
     pos[k * 3 + 2] = Math.max(0, Math.min(65535, Math.round((sd.p[j * 4 + 2] - b.z0) * kz)));
     pk[k] = packSprayJS(sd.v[j * 4], sd.v[j * 4 + 1], sd.v[j * 4 + 2], Math.round(sd.v[j * 4 + 3]), sd.p[j * 4 + 3] / foamLife); k++;
   }
-  return { n: k, pos: k < m ? pos.slice(0, k * 3) : pos, pk: k < m ? pk.slice(0, k) : pk, alive };
+  return { n: k, pos, pk, alive };
 }
 // Per-frame measurements for the bake report: where the water is, how fast, how much left or went bad.
 function bakeDiag(dst, n, b, vcap) {

@@ -44,85 +44,33 @@
   const rawBuf = new Float32Array(1500000 * 4 + 4);   // the GPU readback lands here first
   let lastGen = -1, lastK = -1, lastCount = 0, lastAlive = 0;
   // ---------- what is drawn ----------
-  // The CPU writes one entry per point (x, y, z and a kind code) into a float texture; the drawing then makes each point and its look-only
-  // extras on the GPU: vertex v reads entry v / copies from the texture and pushes copies after the first out by a fixed random amount.
-  // (Instancing would do the same but is slow for tiny instances on integrated GPUs.)
-  // Codes: below 1024 water (speed + 64 x white-water level), 2048 spray, 3072 mist, 4096 + speed deep water (narrow band),
-  // 6144 + life foam, 7168 + life bubbles (life 0 to 63, how much is left). Dead entries have y = DEAD and are not drawn.
-  // Layout in a slot: water [0, nW) in particle order (so cache frames line up for blending), deep water [nW, nW + nD), whitewater after.
-  // Two slots: the live view uses slot 0; cache playback decodes the frames either side of the playhead into the two and the shader
-  // blends between them, so between cache frames nothing is rebuilt.
-  const DEAD = -1e6, TEXW = 2048;
-  const SLOTS = [0, 1].map(() => ({ arr: null, tex: null, rows: 0, key: null, n: 0, nW: 0, nD: 0, nS: 0, alive: 0 }));
-  function slotEnsure(sl, n) {
-    const rows = Math.max(16, Math.ceil(Math.max(n, 1) / TEXW / 16) * 16);
-    if (sl.tex && sl.rows >= rows) return;
-    if (sl.tex) sl.tex.dispose();
-    sl.rows = Math.ceil(rows * 1.25 / 16) * 16; sl.arr = new Float32Array(TEXW * sl.rows * 4);
-    sl.tex = new THREE.DataTexture(sl.arr, TEXW, sl.rows, THREE.RGBAFormat, THREE.FloatType);
-    sl.tex.minFilter = THREE.NearestFilter; sl.tex.magFilter = THREE.NearestFilter; sl.tex.generateMipmaps = false; sl.tex.flipY = false;
-    sl.key = null;
-  }
-  function slotUpload(sl) { sl.tex.needsUpdate = true; }
-  function dead(o, from, to) { for (let i = from; i < to; i++) o[i * 4 + 1] = DEAD; }
-  // a whitewater point from its packed form (see packSpray in flip.js): spray as short streaks along its motion, mist, foam and bubbles as one entry
-  function putSprayBase(o, n, x, y, z, pk) {
-    const kc = (pk >>> 29) & 3, spd = ((pk >>> 21) & 255) / 4;
-    if (kc === 1 || kc === 3) { const k4 = n * 4; o[k4] = x; o[k4 + 1] = y; o[k4 + 2] = z; o[k4 + 3] = (kc === 1 ? 6144 : 7168) + Math.round(((pk & 1023) / 1023) * 63); return n + 1; }
-    const mist = kc === 2, code = mist ? 3072 : 2048;
-    const u = (pk & 1023) / 1023 * 2 - 1, w = ((pk >>> 10) & 1023) / 1023 * 2 - 1;
-    let nx = u, ny = w; const nz = 1 - Math.abs(u) - Math.abs(w);
-    if (nz < 0) { nx = (1 - Math.abs(w)) * (u >= 0 ? 1 : -1); ny = (1 - Math.abs(u)) * (w >= 0 ? 1 : -1); }
-    const l = Math.hypot(nx, ny, nz) || 1, L = mist ? 0 : Math.min(spd * S.streak, 0.6), M = L > 0.004 ? 3 : 1;
-    for (let m = 0; m < M; m++) { const t = M > 1 ? (m / (M - 1)) * L / l : 0, k4 = n * 4; o[k4] = x - nx * t; o[k4 + 1] = y - ny * t; o[k4 + 2] = z - nz * t; o[k4 + 3] = code; n++; }
-    return n;
-  }
-  // the live view: the GPU's display buffer as it came back (water sample first, then whitewater, then deep water)
-  function buildLive(src, n) {
-    const sl = SLOTS[0], U = new Uint32Array(src.buffer, src.byteOffset, src.length), show = S.showSpray !== false;
-    const nW = Math.min(n, sim && sim.dispWaterN !== undefined ? sim.dispWaterN : n);
-    let nD = 0, nS = 0;
-    for (let i = nW; i < n; i++) { const k = i * 4; if (src[k + 1] < -1e5) continue; if (U[k + 3] >= 0x80000000) { if (show) nS++; } else nD++; }
-    slotEnsure(sl, nW + nD + nS * 3); const o = sl.arr;
-    let alive = 0;
-    for (let i = 0; i < nW; i++) { const k = i * 4; if (src[k + 1] < -1e5) { o[k + 1] = DEAD; continue; } o[k] = src[k]; o[k + 1] = src[k + 1]; o[k + 2] = src[k + 2]; o[k + 3] = src[k + 3]; alive++; }
-    let d = nW, w = nW + nD;
-    for (let i = nW; i < n; i++) {
-      const k = i * 4; if (src[k + 1] < -1e5) continue;
-      if (U[k + 3] >= 0x80000000) { if (show) { w = putSprayBase(o, w, src[k], src[k + 1], src[k + 2], U[k + 3]); alive++; } continue; }
-      const q = d * 4; o[q] = src[k]; o[q + 1] = src[k + 1]; o[q + 2] = src[k + 2]; o[q + 3] = src[k + 3]; d++; alive++;
+  // Every view (live, live cache, bake) draws a frame in the cache format: water positions as 16 bits across the box (pos), a speed byte in
+  // 16ths (spd, 255 = gone) and a white-water byte (fm); whitewater positions and 32-bit codes (sp, see packSpray in flip.js); deep water
+  // positions and speed bytes (dp, narrow band look only). A frame goes to the GPU as it is, into integer textures one texel per point and
+  // 2048 wide: water from row 0, then deep water, then whitewater. The shaders turn the bytes back into points and make the look-only
+  // extras (fixed random offsets from a hash of the point's number), so the CPU never goes over the points one by one.
+  // Slot 0 is the live view and the live cache; slots 1 to 3 hold baked frames (the two either side of the playhead and the next one).
+  const TEXW = 2048, NSLOT = 4;
+  const SLOTS = Array.from({ length: NSLOT }, () => ({ rows: 0, gl: null, T: null, key: null, used: 0, nW: 0, nD: 0, nS: 0, rowD: 0, rowS: 0, fm: false, b: null, alive: 0 }));
+  const perf = { up: 0, upBytes: 0, upN: 0, build: 0, render: 0, frame: 0 };   // milliseconds of the last upload, frame build and draw (for the benchmark)
+  // how many points of a frame are really there (counted once per frame)
+  function frameAlive(fr, show) {
+    if (fr._alive === undefined) {
+      let a = 0; const s = fr.spd; for (let i = 0; i < fr.n; i++) if (s[i] !== 255) a++;
+      if (fr.dp) { const d = fr.dp.spd; for (let i = 0; i < fr.dp.n; i++) if (d[i] !== 255) a++; }
+      fr._alive = a;
     }
-    Object.assign(sl, { nW, nD, nS: w - nW - nD, n: w, key: null, alive }); slotUpload(sl);
-    return w;
+    return fr._alive + (show && fr.sp ? fr.sp.n : 0);
   }
-  // the CPU solver's particles
-  function buildCpu(P, Sp, n) {
-    const sl = SLOTS[0]; slotEnsure(sl, n); const o = sl.arr; let alive = 0;
-    for (let i = 0; i < n; i++) { const k = i * 4, i3 = i * 3; if (P[i3 + 1] < -1e5) { o[k + 1] = DEAD; continue; } o[k] = P[i3]; o[k + 1] = P[i3 + 1]; o[k + 2] = P[i3 + 2]; o[k + 3] = Sp[i]; alive++; }
-    Object.assign(sl, { nW: n, nD: 0, nS: 0, n, key: null, alive }); slotUpload(sl);
-    return n;
-  }
-  // how many entries a cache frame needs in each part
-  function frameLayout(fr) { const show = S.showSpray !== false; return { nW: fr.n, nD: fr.dp ? fr.dp.n : 0, nS: show && fr.sp ? fr.sp.n * (S.streak > 0 ? 3 : 1) : 0 }; }
-  // a cache frame (baked or live cache) into a slot, in layout L (the larger of the two frames being blended), padded with dead entries
-  function decodeFrame(sl, fr, b, L) {
-    const show = S.showSpray !== false, sp = show ? fr.sp : null, dp = fr.dp;
-    slotEnsure(sl, L.nW + L.nD + L.nS);
-    const o = sl.arr, qx = (b.x1 - b.x0) / 65535, qy = (b.y1 - b.y0) / 65535, qz = (b.z1 - b.z0) / 65535, pa = fr.pos, sa = fr.spd, fa = fr.fm;
-    let alive = 0;
-    for (let i = 0; i < L.nW; i++) {
-      const k = i * 4, j = i * 3;
-      if (i >= fr.n || sa[i] === 255) { o[k + 1] = DEAD; continue; }
-      o[k] = pa[j] * qx + b.x0; o[k + 1] = pa[j + 1] * qy + b.y0; o[k + 2] = pa[j + 2] * qz + b.z0; o[k + 3] = sa[i] / 16 + 64 * Math.round((fa ? fa[i] / 255 : 0) * 15); alive++;
+  // the CPU solver's particles as a frame
+  function packCpuFrame(P, Sp, n, b) {
+    const pos = new Uint16Array(n * 3), spd = new Uint8Array(n), kx = 65535 / (b.x1 - b.x0), ky = 65535 / (b.y1 - b.y0), kz = 65535 / (b.z1 - b.z0);
+    for (let i = 0; i < n; i++) {
+      const i3 = i * 3; if (P[i3 + 1] < -1e5) { spd[i] = 255; continue; }
+      pos[i3] = clamp(Math.round((P[i3] - b.x0) * kx), 0, 65535); pos[i3 + 1] = clamp(Math.round((P[i3 + 1] - b.y0) * ky), 0, 65535); pos[i3 + 2] = clamp(Math.round((P[i3 + 2] - b.z0) * kz), 0, 65535);
+      spd[i] = Math.min(191, Sp[i] * 16);
     }
-    let n = L.nW;
-    if (dp) for (let i = 0; i < dp.n && i < L.nD; i++) { const k = n * 4; o[k] = dp.pos[i * 3] * qx + b.x0; o[k + 1] = dp.pos[i * 3 + 1] * qy + b.y0; o[k + 2] = dp.pos[i * 3 + 2] * qz + b.z0; o[k + 3] = 4096 + dp.spd[i] / 16; n++; alive++; }
-    dead(o, n, L.nW + L.nD); n = L.nW + L.nD;
-    const end = n + L.nS;
-    if (sp) for (let i = 0; i < sp.n && n + 3 <= end; i++) { n = putSprayBase(o, n, sp.pos[i * 3] * qx + b.x0, sp.pos[i * 3 + 1] * qy + b.y0, sp.pos[i * 3 + 2] * qz + b.z0, sp.pk[i]); alive++; }
-    dead(o, n, end);
-    Object.assign(sl, { nW: L.nW, nD: L.nD, nS: L.nS, n: end, alive }); slotUpload(sl);
-    return end;
+    return { n, pos, spd, b };
   }
   let sim = null, runner = null;
   function makeSim() {
@@ -186,73 +134,150 @@
   function setOrtho(on) { S.ortho = !!on; camera = S.ortho ? orthoCam : perspCam; updateCam(); }
 
   const LKMAX = 16;   // the most copies of a point (itself and 15 look-only extras)
-  // two draws: water and deep water, then whitewater (each with its own number of look-only copies). The vertex count is
-  // entries x copies; the only vertex attribute is a dummy that three.js needs to know how many vertices to draw.
-  let dummyPos = new THREE.BufferAttribute(new Uint8Array(1 << 16), 1);
-  const geoA = new THREE.BufferGeometry(), geoB = new THREE.BufferGeometry();
-  geoA.setAttribute('position', dummyPos); geoB.setAttribute('position', dummyPos); geoA.setDrawRange(0, 0); geoB.setDrawRange(0, 0);
-  let shownN = 0;
-  // show slot a (and b to blend towards, by w)
-  function showSlots(a, bslot, w) {
-    const A = SLOTS[a], B = SLOTS[bslot];
-    const kA = 1 + Math.max(S.detail | 0, A.nD > 0 ? 4 : 0), kB = 1 + Math.min(S.sprDetail | 0, LKMAX - 1);
-    const vA = (A.nW + A.nD) * kA, vB = A.nS * kB, need = Math.max(vA, vB);
-    if (dummyPos.count < need) { dummyPos = new THREE.BufferAttribute(new Uint8Array(Math.ceil(need * 1.25)), 1); geoA.setAttribute('position', dummyPos); geoB.setAttribute('position', dummyPos); }
-    const u = pmat.uniforms; u.tA.value = A.tex; u.tB.value = B.tex; u.uBlend.value = w; u.uKw.value = S.detail | 0; u.uKs.value = Math.min(S.sprDetail | 0, LKMAX - 1);
-    u.uK1.value = kA; u.uBase.value = 0; pmatB.uniforms.uK1.value = kB; pmatB.uniforms.uBase.value = A.nW + A.nD;
-    geoA.setDrawRange(0, vA); geoB.setDrawRange(0, vB); shownN = A.n;
+  // ---- integer textures for the frames, made with WebGL directly (three.js r128 cannot update part of a texture) and handed to three.js
+  // by setting the WebGL texture of an empty THREE.Texture, which three.js then only binds ----
+  const gl = renderer.getContext();
+  const TFMT = { p: [gl.RGB16UI, gl.RGB_INTEGER, gl.UNSIGNED_SHORT, 3], s: [gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE, 1], f: [gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE, 1], k: [gl.R32UI, gl.RED_INTEGER, gl.UNSIGNED_INT, 1] };
+  function slotAlloc(sl, rows) {
+    rows = Math.max(16, rows); if (sl.gl && sl.rows >= rows) return;
+    rows = Math.min(Math.ceil(rows * 1.25 / 16) * 16, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+    if (sl.gl) for (const k in sl.gl) gl.deleteTexture(sl.gl[k]);
+    sl.gl = {}; sl.T = sl.T || {};
+    for (const k of ['p', 's', 'f', 'k']) {
+      const t = gl.createTexture(); renderer.state.bindTexture(gl.TEXTURE_2D, t);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, TFMT[k][0], TEXW, rows);
+      sl.gl[k] = t; if (!sl.T[k]) sl.T[k] = new THREE.Texture();
+      renderer.properties.get(sl.T[k]).__webglTexture = t;
+    }
+    sl.rows = rows; sl.key = null;
   }
-  function uploadParticles() { showSlots(0, 0, 0); }
-  slotEnsure(SLOTS[0], 1); slotEnsure(SLOTS[1], 1);
-  // the points. speed holds the kind: below 1024 water (speed + 64 x white water level), 2048 spray, 3072 mist, 4096 + speed a deep water point (narrow band, look only).
-  // Colour by Speed runs blue to cyan to white with speed and draws churned water white; Colour by Type gives each kind its own colour, as in Houdini.
-  // kinds by the speed attribute: below 1024 water (speed + 64 x white-water level), 2048 spray, 3072 mist, 4096 + speed deep water (narrow band),
-  // 6144 + life foam, 7168 + life bubbles (life 0 to 63, how much is left)
+  // n values of a frame array into rows from row0: the whole rows, then the part of the last one
+  function upTex(t, k, row0, data, n) {
+    if (!n) return 0;
+    const f = TFMT[k], c = f[3], full = Math.floor(n / TEXW), rem = n - full * TEXW;
+    renderer.state.bindTexture(gl.TEXTURE_2D, t);
+    if (full) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row0, TEXW, full, f[1], f[2], data, 0);
+    if (rem) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row0 + full, rem, 1, f[1], f[2], data, full * TEXW * c);
+    return n * c * data.BYTES_PER_ELEMENT;
+  }
+  // a frame into a slot, as it is (no per-point work on the CPU)
+  function slotLoad(sl, fr, b) {
+    const t0 = performance.now(), show = S.showSpray !== false;
+    const nW = fr ? fr.n : 0, nD = fr && fr.dp ? fr.dp.n : 0, nS = fr && show && fr.sp ? fr.sp.n : 0;
+    const rW = Math.ceil(nW / TEXW), rD = Math.ceil(nD / TEXW), rS = Math.ceil(nS / TEXW);
+    slotAlloc(sl, rW + rD + rS + 1);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    let by = 0;
+    if (nW) { by += upTex(sl.gl.p, 'p', 0, fr.pos, nW) + upTex(sl.gl.s, 's', 0, fr.spd, nW); if (fr.fm) by += upTex(sl.gl.f, 'f', 0, fr.fm, nW); }
+    if (nD) by += upTex(sl.gl.p, 'p', rW, fr.dp.pos, nD) + upTex(sl.gl.s, 's', rW, fr.dp.spd, nD);
+    if (nS) by += upTex(sl.gl.p, 'p', rW + rD, fr.sp.pos, nS) + upTex(sl.gl.k, 'k', rW + rD, fr.sp.pk, nS);
+    Object.assign(sl, { nW, nD, nS, rowD: rW, rowS: rW + rD, fm: !!(fr && fr.fm), b: (fr && fr.b) || b || DEFB, alive: fr ? frameAlive(fr, show) : 0 });
+    perf.up = performance.now() - t0; perf.upBytes = by; perf.upN++;
+  }
+  // three draws: water (blended between two frames), deep water and whitewater (from the nearer frame). The vertex count is points x copies;
+  // the only vertex attribute is a dummy that three.js needs to know how many vertices to draw.
+  let dummyPos = new THREE.BufferAttribute(new Uint8Array(1 << 16), 1);
+  const geoW = new THREE.BufferGeometry(), geoD = new THREE.BufferGeometry(), geoS = new THREE.BufferGeometry();
+  [geoW, geoD, geoS].forEach((g) => { g.setAttribute('position', dummyPos); g.setDrawRange(0, 0); });
+  let shownN = 0;
   const TYPE_COL = { water: [0.16, 0.46, 0.96], churn: [0.55, 0.85, 0.97], foam: [0.98, 0.98, 0.98], spray: [1.0, 0.6, 0.16], mist: [0.86, 0.56, 1.0], deep: [0.07, 0.2, 0.52], bubble: [0.25, 0.85, 0.6] };
   const v3 = (c) => 'vec3(' + c.map((x) => x.toFixed(3)).join(',') + ')';
-  const pmat = new THREE.ShaderMaterial({
-    uniforms: { uSize: { value: 0.1 }, uScale: { value: 600 }, uMax: { value: S.vmax }, uFoam: { value: S.foam }, uOrtho: { value: 0 }, uMode: { value: 0 },
-      uBlend: { value: 0 }, uD: { value: 0.04 }, uCR: { value: 2 }, uKw: { value: 0 }, uKs: { value: 4 }, tA: { value: null }, tB: { value: null }, uBase: { value: 0 }, uK1: { value: 1 } },
-    vertexShader: 'uniform highp sampler2D tA; uniform highp sampler2D tB; uniform float uBase; uniform float uK1; uniform float uSize; uniform float uScale; uniform float uFoam; uniform float uOrtho;' +
-      ' uniform float uBlend; uniform float uD; uniform float uCR; uniform float uKw; uniform float uKs; varying float vS; varying float vF; varying float vK; varying float vL;' +
-      ' uint hsh(uint x) { x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u; return x; }' +
-      ' vec3 ball(uint s) { vec3 r = vec3(float(hsh(s) & 65535u), float(hsh(s + 7919u) & 65535u), float(hsh(s + 104729u) & 65535u)) / 32767.5 - 1.0; float l = length(r); return l > 1.0 ? r / l : r; }' +
-      ' void hide() { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; vK = 0.0; vS = 0.0; vF = 0.0; vL = 0.0; }' +
-      'void main(){ int k1 = int(uK1 + 0.5); int bi = gl_VertexID / k1; float lk = float(gl_VertexID - bi * k1); int idx = int(uBase + 0.5) + bi;' +
-      ' ivec2 tc = ivec2(idx % ' + TEXW + ', idx / ' + TEXW + '); vec4 a = texelFetch(tA, tc, 0); vec4 b = texelFetch(tB, tc, 0); vec4 q;' +
-      ' bool wa = a.y > -1.0e5 && a.w < 1024.0; bool wb = b.y > -1.0e5 && b.w < 1024.0;' +
-      ' if (uBlend <= 0.0) q = a;' +
-      ' else if (wa && wb) { float la = floor(a.w / 64.0 + 0.01); float lb = floor(b.w / 64.0 + 0.01); q = vec4(mix(a.xyz, b.xyz, uBlend), mix(a.w - la * 64.0, b.w - lb * 64.0, uBlend) + 64.0 * floor(mix(la, lb, uBlend) + 0.5)); }' +
-      ' else if (wb) q = b; else if (uBlend < 0.5) q = a; else q = b;' +
-      ' if (q.y < -1.0e5) { hide(); return; }' +
-      ' float speed = q.w;' +
-      ' vK = speed >= 7168.0 ? 5.0 : (speed >= 6144.0 ? 4.0 : (speed >= 4096.0 ? 3.0 : (speed >= 3072.0 ? 2.0 : (speed >= 2048.0 ? 1.0 : 0.0))));' +
-      ' float sp = vK > 4.5 ? speed - 7168.0 : (vK > 3.5 ? speed - 6144.0 : (vK > 2.5 ? speed - 4096.0 : speed)); float lv = vK > 2.5 ? 0.0 : floor(sp / 64.0 + 0.01); vS = sp - lv * 64.0; vL = lv / 15.0; vF = vL * uFoam;' +
-      ' float life = clamp(vS / 63.0, 0.0, 1.0);' +
-      // how many look-only copies this kind gets, and how far they spread
-      ' float K = vK > 4.5 ? min(uKs, 2.0) : (vK > 3.5 ? ceil(uKs * 0.5) : (vK > 2.5 ? 4.0 : (vK > 0.5 ? uKs : uKw)));' +
-      ' if (lk > K + 0.5) { hide(); return; }' +
-      ' vec3 pos = q.xyz;' +
-      ' if (lk > 0.5) { float rad = vK > 4.5 ? 0.25 * uD : (vK > 3.5 ? uD * (0.5 + 0.5 * life) : (vK > 2.5 ? 0.5 * uD * uCR : (vK > 1.5 ? 1.6 * uD : (vK > 0.5 ? 0.55 * uD : 0.5 * uD))));' +
-      '   vec3 o = ball(uint(idx) * 16u + uint(lk)); if (vK > 3.5 && vK < 4.5) o.y *= 0.12; pos += o * rad; }' +
-      ' vec4 mv = modelViewMatrix * vec4(pos, 1.0); gl_Position = projectionMatrix * mv;' +
-      ' float sz = vK > 4.5 ? 0.3 : (vK > 3.5 ? 0.34 * (0.6 + 0.4 * life) : (vK > 2.5 ? 1.3 : (vK > 1.5 ? 0.6 : (vK > 0.5 ? 0.42 : 1.0 - 0.3 * vF))));' +
-      ' gl_PointSize = max((uOrtho > 0.0 ? uSize * uOrtho : uSize * uScale / (-mv.z)) * sz, (vK > 0.5 && vK < 2.5) || vK > 3.5 ? 1.0 : 1.5); }',
-    fragmentShader: 'uniform float uMax; uniform float uMode; varying float vS; varying float vF; varying float vK; varying float vL;' +
-      'vec3 ramp(float t){ vec3 a = vec3(0.03,0.12,0.95); vec3 b = vec3(0.0,0.82,0.98); vec3 c = vec3(1.0); return t < 0.5 ? mix(a,b,t*2.0) : mix(b,c,(t-0.5)*2.0); }' +
-      'void main(){ vec2 p = gl_PointCoord*2.0-1.0; float r2 = dot(p,p); if(r2 > 1.0) discard; float sh = 0.78+0.22*(1.0-r2);' +
-      ' if (vK > 4.5) { gl_FragColor = vec4((uMode > 0.5 ? ' + v3(TYPE_COL.bubble) + ' : vec3(0.72,0.88,0.96))*sh,1.0); return; }' +
-      ' if (vK > 3.5) { float h = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898,78.233))) * 43758.5453); if (h > 0.3 + 0.6 * clamp(vS / 63.0, 0.0, 1.0)) discard;' +
-      '   gl_FragColor = vec4((uMode > 0.5 ? ' + v3(TYPE_COL.foam) + ' : vec3(0.9,0.94,0.97))*(0.84+0.16*(1.0-r2)),1.0); return; }' +
-      ' if (vK > 1.5 && vK < 2.5) { float h = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898,78.233))) * 43758.5453); if (h > 0.28) discard;' +
-      '   gl_FragColor = vec4((uMode > 0.5 ? ' + v3(TYPE_COL.mist) + ' : vec3(0.84,0.89,0.94))*(0.9+0.1*(1.0-r2)),1.0); return; }' +
-      ' if (vK > 0.5 && vK < 1.5) { gl_FragColor = vec4((uMode > 0.5 ? ' + v3(TYPE_COL.spray) + ' : vec3(0.95,0.98,1.0))*(0.86+0.14*(1.0-r2)),1.0); return; }' +
-      ' if (uMode > 0.5) { vec3 c = vK > 2.5 ? ' + v3(TYPE_COL.deep) + ' : (vL > 0.3 ? ' + v3(TYPE_COL.churn) + ' : ' + v3(TYPE_COL.water) + '); gl_FragColor = vec4(c*sh,1.0); return; }' +
-      ' float t = clamp(vS/uMax,0.0,1.0); vec3 col = vK > 2.5 ? ramp(t)*0.82 : mix(ramp(t), vec3(0.97,0.99,1.0), vF); gl_FragColor = vec4(col*sh,1.0); }'
-  });
-  const pmatB = new THREE.ShaderMaterial({ uniforms: Object.assign({}, pmat.uniforms, { uBase: { value: 0 }, uK1: { value: 1 } }), vertexShader: pmat.vertexShader, fragmentShader: pmat.fragmentShader });
-  const points = new THREE.Group(), pointsA = new THREE.Points(geoA, pmat), pointsB = new THREE.Points(geoB, pmatB);
-  pointsA.frustumCulled = false; pointsB.frustumCulled = false; points.add(pointsA, pointsB); scene.add(points);
+  const U = { uSize: { value: 0.1 }, uScale: { value: 600 }, uMax: { value: S.vmax }, uFoam: { value: S.foam }, uOrtho: { value: 0 }, uMode: { value: 0 },
+    uD: { value: 0.04 }, uCR: { value: 2 }, uKw: { value: 0 }, uKs: { value: 4 }, uStreak: { value: 0.02 } };
+  const tex = () => ({ value: null }), num = (v) => ({ value: v || 0 }), vec = () => ({ value: new THREE.Vector3() });
+  const VHEAD = 'uniform float uSize; uniform float uScale; uniform float uFoam; uniform float uOrtho; uniform float uD; uniform float uCR; uniform float uKw; uniform float uKs; uniform float uStreak; uniform float uK1;' +
+    ' varying float vS; varying float vF; varying float vK; varying float vL;' +
+    ' uint hsh(uint x) { x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u; return x; }' +
+    ' vec3 ball(uint s) { vec3 r = vec3(float(hsh(s) & 65535u), float(hsh(s + 7919u) & 65535u), float(hsh(s + 104729u) & 65535u)) / 32767.5 - 1.0; float l = length(r); return l > 1.0 ? r / l : r; }' +
+    ' void hide() { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; vK = 0.0; vS = 0.0; vF = 0.0; vL = 0.0; }' +
+    ' ivec2 tcOf(int i) { return ivec2(i % ' + TEXW + ', i / ' + TEXW + '); }' +
+    ' void place(vec3 p, float sz, float minPx) { vec4 mv = modelViewMatrix * vec4(p, 1.0); gl_Position = projectionMatrix * mv; gl_PointSize = max((uOrtho > 0.0 ? uSize * uOrtho : uSize * uScale / (-mv.z)) * sz, minPx); }';
+  // water: blended between frame A and frame B (the same particle has the same number in both). A particle only in B shows at once;
+  // one only in A shows until halfway.
+  const VW = VHEAD + ' uniform highp usampler2D tPA; uniform highp usampler2D tSA; uniform highp usampler2D tFA; uniform highp usampler2D tPB; uniform highp usampler2D tSB; uniform highp usampler2D tFB;' +
+    ' uniform float uNA; uniform float uNB; uniform float uFmA; uniform float uFmB; uniform float uBlend; uniform float uFdt; uniform vec3 uB0A; uniform vec3 uQA; uniform vec3 uB0B; uniform vec3 uQB;' +
+    ' void main() { int k1 = int(uK1 + 0.5); int bi = gl_VertexID / k1; float lk = float(gl_VertexID - bi * k1); ivec2 tc = tcOf(bi); bool bl = uBlend > 0.0;' +
+    '  uint sa = bi < int(uNA + 0.5) ? texelFetch(tSA, tc, 0).r : 255u; uint sb = (bl && bi < int(uNB + 0.5)) ? texelFetch(tSB, tc, 0).r : 255u;' +
+    '  bool va = sa != 255u; bool vb = sb != 255u; vec3 p; float spd; float lv;' +
+    '  float la = (va && uFmA > 0.5) ? floor(float(texelFetch(tFA, tc, 0).r) / 17.0 + 0.5) : 0.0; float lb = (vb && uFmB > 0.5) ? floor(float(texelFetch(tFB, tc, 0).r) / 17.0 + 0.5) : 0.0;' +
+    // a slot can be a different particle in the next frame (narrow band reseeding reuses slots): if it is further than it could have moved,
+    // it is not blended but switches halfway, so nothing streaks across the water
+    '  vec3 pa = va ? vec3(texelFetch(tPA, tc, 0).xyz) * uQA + uB0A : vec3(0.0); vec3 pb = vb ? vec3(texelFetch(tPB, tc, 0).xyz) * uQB + uB0B : vec3(0.0);' +
+    '  if (va && vb && length(pb - pa) > max(float(sa), float(sb)) / 16.0 * 2.0 * uFdt + 3.0 * uD) { if (uBlend < 0.5) vb = false; else va = false; }' +
+    '  if (va && vb) { p = mix(pa, pb, uBlend); spd = mix(float(sa), float(sb), uBlend) / 16.0; lv = floor(mix(la, lb, uBlend) + 0.5); }' +
+    '  else if (va && uBlend < 0.5) { p = pa; spd = float(sa) / 16.0; lv = la; }' +
+    '  else if (vb) { p = pb; spd = float(sb) / 16.0; lv = lb; }' +
+    '  else { hide(); return; }' +
+    '  vK = 0.0; vS = spd; vL = lv / 15.0; vF = vL * uFoam;' +
+    '  if (lk > uKw + 0.5) { hide(); return; }' +
+    '  if (lk > 0.5) p += ball(uint(bi) * 16u + uint(lk)) * 0.5 * uD;' +
+    '  place(p, 1.0 - 0.3 * vF, 1.5); }';
+  // deep water (narrow band, look only): the centre of each deep cell and four extras spread over the cell
+  const VD = VHEAD + ' uniform highp usampler2D tP; uniform highp usampler2D tS; uniform float uBase; uniform float uN; uniform vec3 uB0; uniform vec3 uQ;' +
+    ' void main() { int k1 = int(uK1 + 0.5); int bi = gl_VertexID / k1; float lk = float(gl_VertexID - bi * k1); if (bi >= int(uN + 0.5)) { hide(); return; }' +
+    '  int idx = int(uBase + 0.5) + bi; ivec2 tc = tcOf(idx); uint s = texelFetch(tS, tc, 0).r; if (s == 255u) { hide(); return; }' +
+    '  vec3 p = vec3(texelFetch(tP, tc, 0).xyz) * uQ + uB0; vK = 3.0; vS = float(s) / 16.0; vL = 0.0; vF = 0.0;' +
+    '  if (lk > 0.5) p += ball(uint(idx) * 16u + uint(lk)) * 0.5 * uD * uCR;' +
+    '  place(p, 1.3, 1.5); }';
+  // whitewater from its 32-bit code: spray (its copies trail back along its motion as a short streak), mist (a soft cloud), foam (flat on the
+  // surface, fading with its life) and bubbles
+  const VS = VHEAD + ' uniform highp usampler2D tP; uniform highp usampler2D tK; uniform float uBase; uniform float uN; uniform vec3 uB0; uniform vec3 uQ;' +
+    ' void main() { int k1 = int(uK1 + 0.5); int bi = gl_VertexID / k1; float lk = float(gl_VertexID - bi * k1); if (bi >= int(uN + 0.5)) { hide(); return; }' +
+    '  int idx = int(uBase + 0.5) + bi; ivec2 tc = tcOf(idx); uint pk = texelFetch(tK, tc, 0).r; if (pk == 0u) { hide(); return; }' +
+    '  vec3 p = vec3(texelFetch(tP, tc, 0).xyz) * uQ + uB0; uint kc = (pk >> 29u) & 3u; float spd = float((pk >> 21u) & 255u) / 4.0; float life = float(pk & 1023u) / 1023.0;' +
+    '  vF = 0.0; vL = 0.0; uint hs = uint(idx) * 16u + uint(lk);' +
+    '  if (kc == 0u) { vK = 1.0; vS = spd; if (lk > uKs + 0.5) { hide(); return; }' +
+    '   float u = float(pk & 1023u) / 1023.0 * 2.0 - 1.0; float w = float((pk >> 10u) & 1023u) / 1023.0 * 2.0 - 1.0; vec3 n = vec3(u, w, 1.0 - abs(u) - abs(w));' +
+    '   if (n.z < 0.0) n.xy = vec2((1.0 - abs(w)) * (u >= 0.0 ? 1.0 : -1.0), (1.0 - abs(u)) * (w >= 0.0 ? 1.0 : -1.0)); n = normalize(n);' +
+    '   if (lk > 0.5) p += -n * min(spd * uStreak, 0.6) * lk / max(uKs, 1.0) + ball(hs) * 0.2 * uD;' +
+    '   place(p, 0.42, 1.0); return; }' +
+    '  if (kc == 2u) { vK = 2.0; vS = spd; if (lk > uKs + 0.5) { hide(); return; } if (lk > 0.5) p += ball(hs) * 1.6 * uD; place(p, 0.6, 1.0); return; }' +
+    '  vS = life * 63.0;' +
+    '  if (kc == 1u) { vK = 4.0; if (lk > ceil(uKs * 0.5) + 0.5) { hide(); return; } if (lk > 0.5) { vec3 o = ball(hs); o.y *= 0.12; p += o * uD * (0.5 + 0.5 * life); } place(p, 0.5 * (0.6 + 0.4 * life), 1.0); return; }' +
+    '  vK = 5.0; if (lk > min(uKs, 2.0) + 0.5) { hide(); return; } if (lk > 0.5) p += ball(hs) * 0.25 * uD; place(p, 0.32, 1.0); }';
+  const FRAG = 'uniform float uMax; uniform float uMode; varying float vS; varying float vF; varying float vK; varying float vL;' +
+    'vec3 ramp(float t){ vec3 a = vec3(0.03,0.12,0.95); vec3 b = vec3(0.0,0.82,0.98); vec3 c = vec3(1.0); return t < 0.5 ? mix(a,b,t*2.0) : mix(b,c,(t-0.5)*2.0); }' +
+    'void main(){ vec2 p = gl_PointCoord*2.0-1.0; float r2 = dot(p,p); if(r2 > 1.0) discard;\n' +
+    '#ifdef WW\n' +
+    // whitewater is drawn see-through and soft-edged, so many points build up into white masses instead of hard dots
+    ' float edge = 1.0 - smoothstep(0.45, 1.0, r2); float life = clamp(vS / 63.0, 0.0, 1.0); vec3 c; float a;' +
+    ' if (vK > 4.5) { c = uMode > 0.5 ? ' + v3(TYPE_COL.bubble) + ' : vec3(0.74,0.89,0.97); a = 0.55; }' +
+    ' else if (vK > 3.5) { c = uMode > 0.5 ? ' + v3(TYPE_COL.foam) + ' : vec3(0.95,0.97,0.99); a = 0.85 * (0.35 + 0.65 * life); }' +
+    ' else if (vK > 1.5) { c = uMode > 0.5 ? ' + v3(TYPE_COL.mist) + ' : vec3(0.86,0.9,0.95); a = 0.22; }' +
+    ' else { c = uMode > 0.5 ? ' + v3(TYPE_COL.spray) + ' : vec3(0.96,0.98,1.0); a = 0.9; }' +
+    ' gl_FragColor = vec4(c, a * edge);\n' +
+    '#else\n' +
+    ' float sh = 0.78+0.22*(1.0-r2);' +
+    ' if (uMode > 0.5) { vec3 c = vK > 2.5 ? ' + v3(TYPE_COL.deep) + ' : (vL > 0.3 ? ' + v3(TYPE_COL.churn) + ' : ' + v3(TYPE_COL.water) + '); gl_FragColor = vec4(c*sh,1.0); return; }' +
+    ' float t = clamp(vS/uMax,0.0,1.0); vec3 col = vK > 2.5 ? ramp(t)*0.82 : mix(ramp(t), vec3(0.97,0.99,1.0), vF); gl_FragColor = vec4(col*sh,1.0);\n' +
+    '#endif\n }';
+  const matW = new THREE.ShaderMaterial({ uniforms: Object.assign({}, U, { tPA: tex(), tSA: tex(), tFA: tex(), tPB: tex(), tSB: tex(), tFB: tex(), uNA: num(), uNB: num(), uFmA: num(), uFmB: num(), uBlend: num(), uFdt: num(1 / 24), uK1: num(1), uB0A: vec(), uQA: vec(), uB0B: vec(), uQB: vec() }), vertexShader: VW, fragmentShader: FRAG });
+  const matD = new THREE.ShaderMaterial({ uniforms: Object.assign({}, U, { tP: tex(), tS: tex(), uBase: num(), uN: num(), uK1: num(5), uB0: vec(), uQ: vec() }), vertexShader: VD, fragmentShader: FRAG });
+  const matS = new THREE.ShaderMaterial({ uniforms: Object.assign({}, U, { tP: tex(), tK: tex(), uBase: num(), uN: num(), uK1: num(1), uB0: vec(), uQ: vec() }), vertexShader: VS, fragmentShader: FRAG,
+    defines: { WW: 1 }, transparent: true, depthWrite: false });
+  const pmat = matW;   // the shared uniforms (size, colours, ...) are the same objects in all three materials
+  const boxU = (b0, q, b) => { b0.value.set(b.x0, b.y0, b.z0); q.value.set((b.x1 - b.x0) / 65535, (b.y1 - b.y0) / 65535, (b.z1 - b.z0) / 65535); };
+  // show slot a (and slot bi to blend the water towards, by w)
+  function showSlots(a, bi, w) {
+    const A = SLOTS[a], B = SLOTS[bi], N = w < 0.5 ? A : B;
+    const kW = 1 + Math.min(S.detail | 0, LKMAX - 1), kS = 1 + Math.min(S.sprDetail | 0, LKMAX - 1), kD = 5;
+    const vW = (w > 0 ? Math.max(A.nW, B.nW) : A.nW) * kW, vD = N.nD * kD, vS = N.nS * kS, need = Math.max(vW, vD, vS);
+    if (dummyPos.count < need) { dummyPos = new THREE.BufferAttribute(new Uint8Array(Math.ceil(need * 1.25)), 1); [geoW, geoD, geoS].forEach((g) => g.setAttribute('position', dummyPos)); }
+    U.uKw.value = S.detail | 0; U.uKs.value = Math.min(S.sprDetail | 0, LKMAX - 1); U.uStreak.value = S.streak;
+    const uw = matW.uniforms;
+    uw.tPA.value = A.T.p; uw.tSA.value = A.T.s; uw.tFA.value = A.T.f; uw.tPB.value = B.T.p; uw.tSB.value = B.T.s; uw.tFB.value = B.T.f;
+    uw.uNA.value = A.nW; uw.uNB.value = w > 0 ? B.nW : 0; uw.uFmA.value = A.fm ? 1 : 0; uw.uFmB.value = B.fm ? 1 : 0; uw.uBlend.value = w; uw.uK1.value = kW;
+    boxU(uw.uB0A, uw.uQA, A.b || DEFB); boxU(uw.uB0B, uw.uQB, B.b || DEFB);
+    const ud = matD.uniforms; ud.tP.value = N.T.p; ud.tS.value = N.T.s; ud.uBase.value = N.rowD * TEXW; ud.uN.value = N.nD; ud.uK1.value = kD; boxU(ud.uB0, ud.uQ, N.b || DEFB);
+    const us = matS.uniforms; us.tP.value = N.T.p; us.tK.value = N.T.k; us.uBase.value = N.rowS * TEXW; us.uN.value = N.nS; us.uK1.value = kS; boxU(us.uB0, us.uQ, N.b || DEFB);
+    geoW.setDrawRange(0, vW); geoD.setDrawRange(0, vD); geoS.setDrawRange(0, vS); shownN = N.nW + N.nD + N.nS;
+  }
+  function hideSlots() { geoW.setDrawRange(0, 0); geoD.setDrawRange(0, 0); geoS.setDrawRange(0, 0); shownN = 0; }
+  SLOTS.forEach((sl) => slotAlloc(sl, 16));
+  const points = new THREE.Group(), pointsW = new THREE.Points(geoW, matW), pointsD = new THREE.Points(geoD, matD), pointsS = new THREE.Points(geoS, matS);
+  [pointsW, pointsD, pointsS].forEach((q) => { q.frustumCulled = false; points.add(q); }); scene.add(points);
 
   // the ocean around the box: a grid of look-only points on the wave surface, worked out on the GPU from the same waves the solver uses.
   // It covers the boundary at the sides (which holds no particles) and runs out past the box; the inside of the box is the simulated water.
@@ -474,10 +499,32 @@
     const lg = new THREE.BufferGeometry(); lg.setAttribute('position', new THREE.BufferAttribute(lp, 3));
     o.wire.geometry.dispose(); o.wire.geometry = lg;
   }
-  function rebuildSDF(o) {
-    o.sdf = buildSDF(o.mesh, 0.025, 0.16);
+  function rebuildSDF(o) { sdfDone(o, buildSDF(o.mesh, 0.025, 0.16)); }
+  function sdfDone(o, sd) {
+    o.sdf = sd;
     { let c = 0; const D = o.sdf.data; for (let i = 0; i < D.length; i++) if (D[i] < 0) c++; const bb = meshBounds(o.mesh), v = (bb.hi[0] - bb.lo[0]) * (bb.hi[1] - bb.lo[1]) * (bb.hi[2] - bb.lo[2]); o.sdf.fillFrac = v > 1e-9 ? Math.min(1, c * o.sdf.cell ** 3 / v) : 0.6; }
     let r = 0; for (const q of o.mesh.v) r = Math.max(r, Math.hypot(q[0], q[1], q[2])); o.rad = r;
+  }
+  // After a collider is scaled or reshaped its distance grid is rebuilt in a worker, so the page never stops for it; the solver keeps the old
+  // grid for the moment that takes (water volumes are rebuilt at once, since their water is poured from it).
+  let sdfWorker = null, sdfSeq = 0; const sdfJobs = new Map();
+  function rebuildSDFLater(o) {
+    let r = 0; for (const q of o.mesh.v) r = Math.max(r, Math.hypot(q[0], q[1], q[2])); o.rad = Math.max(r, o.rad || 0);
+    if (o.water || !sharedSrc) { rebuildSDF(o); return; }
+    try {
+      if (!sdfWorker) {
+        const url = URL.createObjectURL(new Blob([sharedSrc + '\nself.onmessage = (e) => { const m = e.data; const sd = buildSDF(m.mesh, 0.025, 0.16); self.postMessage({ key: m.key, dims: sd.dims, origin: sd.origin, cell: sd.cell, data: sd.data }, [sd.data.buffer]); };'], { type: 'text/javascript' }));
+        sdfWorker = new Worker(url);
+        sdfWorker.onmessage = (e) => {
+          const m = e.data, ob = sdfJobs.get(m.key); sdfJobs.delete(m.key);
+          if (!ob || ob.sdfJob !== m.key || !objs.includes(ob)) return;
+          sdfDone(ob, { id: SDF_ID++, dims: m.dims, origin: m.origin, cell: m.cell, data: m.data }); updateEst();
+        };
+        sdfWorker.onerror = () => { sdfWorker = null; for (const ob of sdfJobs.values()) rebuildSDF(ob); sdfJobs.clear(); };
+      }
+      const key = ++sdfSeq; o.sdfJob = key; sdfJobs.set(key, o);
+      sdfWorker.postMessage({ key, mesh: { v: o.mesh.v, f: o.mesh.f } });
+    } catch (e) { rebuildSDF(o); }
   }
   function makeObj(shape, p) {
     p = p || {};
@@ -614,20 +661,6 @@
       makeObj('cube', { x: 0.45, y: 0.45, z: 0, hx: 0.35, hy: 0.45, hz: 0.35, yaw: 0.3 });
       makeObj('sphere', { x: 0.7, y: 0.3, z: 0.9, r: 0.3 });
     },
-    'Waterfall': () => {
-      // a wide river on a plateau, flanked by rough stone pillars, ending in a ragged sheer drop with a long fall below it
-      let seed = 7; const rnd = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
-      [-0.6, 0, 0.6].forEach((z) => makeObj('emitter', { x: -2.7, y: 5.85, z, az: 0, el: -3, speed: 2.4, radius: 0.28 }));
-      makeObj('cube', { name: 'plateau', x: -2.0, y: 4.6, z: 0, hx: 1.0, hy: 1.0, hz: 1.4 });
-      [-1.12, -0.56, 0, 0.56, 1.12].forEach((z, i) => {
-        const hy = 0.9 + rnd() * 0.9;
-        makeObj('cube', { name: 'lip' + (i + 1), x: -0.9 + (rnd() - 0.5) * 0.2, y: 5.6 - hy, z: z + (rnd() - 0.5) * 0.08, hx: 0.3 + rnd() * 0.15, hy, hz: 0.28, yaw: (rnd() - 0.5) * 0.12, rz: (rnd() - 0.5) * 0.05 });
-      });
-      for (const sg of [-1, 1]) for (let i = 0; i < 4; i++) {
-        const hy = 0.45 + rnd() * 0.5, hx = 0.35 + rnd() * 0.15;
-        makeObj('cube', { name: (sg < 0 ? 'pillarL' : 'pillarR') + (i + 1), x: -2.75 + i * 0.7 + (rnd() - 0.5) * 0.12, y: 5.6 + hy, z: sg * (1.15 + rnd() * 0.1), hx, hy, hz: 0.22 + rnd() * 0.06, yaw: (rnd() - 0.5) * 0.15 });
-      }
-    },
     'Cascade': () => {
       // after Torc Waterfall: a wide sloping chute between rock walls, a lip, then ledges and a boulder field with whitewater running between the rocks
       let seed = 11; const rnd = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
@@ -656,15 +689,6 @@
         makeObj('cube', { name: 'boulder' + (i + 1), x, y: ground(x) + hy * 0.8, z: (rnd() - 0.5) * 2.2, hx: 0.18 + rnd() * 0.14, hy, hz: 0.18 + rnd() * 0.14, yaw: rnd() * 3, rx: (rnd() - 0.5) * 0.5, rz: (rnd() - 0.5) * 0.5 });
       }
     },
-    'Meteor lake': () => {
-      // at scene scale 10 this is a 52 m lake, 9 m deep, and a 14 m meteor. The meteor waits above the box, jumps to the water faster than its speed limit
-      // (so it only displaces water), drives down into the lake below the limit (so it pushes the crater open), then jumps away
-      const w = makeObj('cube', { water: true, name: 'Lake', x: 0, y: 0.45, z: 0, hx: 2.55, hy: 0.45, hz: 2.55 });
-      const m = makeObj('sphere', { name: 'meteor', x: 1.8, y: 9, z: 0.8, r: 0.7 });
-      const K = (t, x, y, z) => ({ t, x, y, z, rx: 0, yaw: 0, rz: 0 });
-      m.keys = [K(0, 1.8, 9, 0.8), K(0.8, 1.8, 9, 0.8), K(0.801, 0, 1.65, 0), K(0.891, 0, 0.6, 0), K(1.5, 0, 0.6, 0), K(1.501, 0, 9, 0)];   // at 10 m a unit: a 14 m meteor driving in at about 115 m/s   // the jumps take 1 ms, so they never get split across frames
-      applyKeysAt(0); fillNow(w);
-    },
     'Ocean': () => {
       const hull = makeObj('cube', { name: 'Hull', x: 0, y: 0.5, z: 0, hx: 0.9, hy: 0.35, hz: 0.45, yaw: 0.4 });
       const K = (t, y) => ({ t, x: 0, y, z: 0, rx: 0, yaw: 0.4, rz: 0 });
@@ -681,15 +705,17 @@
   const DEF_PARAMS = { foamSens: 1, foamTau: 1.2, gust: 1, airDrag: 0.3, colMax: 100, vmaxW: 50, subMax: 16, scale: 1 };
   let lastHadParams = false;
   const SCENE_CFG = {
-    'Waterfall': { dom: { w: 6, h: 7.5, d: 3 }, open: ALLC(true) },
     'Cascade': { dom: { w: 7, h: 8, d: 3.6 }, open: ALLC(true), params: { foamSens: 0.6, foamTau: 2.2, gust: 1.5, airDrag: 0.5 }, cam: { theta: 0.6, phi: 1.2, r: 15 } },
-    'Meteor lake': { dom: { w: 5.2, h: 5, d: 5.2 }, open: Object.assign(ALLC(false), { y1: true }), params: { foamSens: 0.8, foamTau: 2, gust: 1, airDrag: 0.4, colMax: 300, vmaxW: 400, subMax: 16, scale: 10 },
-      cam: { theta: 0.7, phi: 1.12, r: 14 }, waterVol: 5.1 * 0.9 * 5.1, linear: true, dur: 8 },
     // at scene scale 10: a 60 m patch of open sea, 16 m deep, 3 m waves 40 m long, and an 18 m hull rising out of it
     'Ocean': { dom: { w: 6, h: 3.2, d: 6 }, open: Object.assign(ALLC(false), { y1: true }), params: { foamSens: 0.8, foamTau: 2, gust: 1, airDrag: 0.3, colMax: 300, vmaxW: 200, subMax: 16, scale: 10 },
       cam: { theta: 0.75, phi: 1.15, r: 15 }, dur: 10, nb: true, cap: 450000, ocean: { on: true, height: 3, length: 40, dir: 25, spread: 25, level: 0.5, layer: 0.15, seed: 7 } }
   };
   function loadScene(name) {
+    if (typeof SCENE_FILES !== 'undefined' && SCENE_FILES[name]) {   // a preset saved from the app: loaded like a scene file
+      applySceneData(JSON.parse(JSON.stringify(SCENE_FILES[name])));
+      lcClear(); S.prevStates = null; LC.armed = S.lcOn; LC.staleEnd = 0; lcUi();
+      return;
+    }
     const cfg = SCENE_CFG[name] || DEF_CFG;
     S.dom = Object.assign({}, cfg.dom); S.min = { x: -cfg.dom.w / 2, y: 0, z: -cfg.dom.d / 2 }; S.open = Object.assign({}, cfg.open);
     if (cfg.params || lastHadParams) Object.assign(S, DEF_PARAMS, cfg.params || {});
@@ -1336,15 +1362,20 @@
     const bd = $('#b-dur'); if (bd) { bd.value = v; bd.parentNode.querySelector('output').textContent = v.toFixed(1) + ' s'; }
     S.tl.t = Math.min(S.tl.t, v); renderKF(); updateEst();
   }
-  const tAt = (clientX) => { const r = kfTracks.getBoundingClientRect(); return clamp((clientX - r.left) / r.width, 0, 1) * S.tl.dur; };
+  // the timeline is the same in the live view and when a bake is shown; with a bake it spans the bake (or the scene, if longer) and the
+  // playhead is the bake's frame
+  const cacheDur = (c) => Math.max(c.partial ? c.total : c.frames.length - 1, 1) / c.fps;
+  function tlSpan() { return viewMode() === 'cache' ? Math.max(S.tl.dur, cacheDur(S.cache)) : S.tl.dur; }
+  function tlNow() { return viewMode() === 'cache' ? S.ct / S.cache.fps : S.tl.t; }
+  const tAt = (clientX) => { const r = kfTracks.getBoundingClientRect(); return clamp((clientX - r.left) / r.width, 0, 1) * tlSpan(); };
   function renderKF() {
     kfNames.innerHTML = ''; kfTracks.innerHTML = '';
     const sp = document.createElement('div'); sp.className = 'spacer'; kfNames.appendChild(sp);
     const sp2 = document.createElement('div'); sp2.className = 'spacer c'; kfNames.appendChild(sp2);
     const ruler = document.createElement('div'); ruler.className = 'kf-ruler'; ruler.dataset.role = 'ruler';
-    const step = S.tl.dur > 24 ? 5 : S.tl.dur > 12 ? 2 : 1;
-    for (let sec = 0; sec <= S.tl.dur + 1e-6; sec += step) {
-      const x = (sec / S.tl.dur) * 100;
+    const span = tlSpan(), step = span > 24 ? 5 : span > 12 ? 2 : 1;
+    for (let sec = 0; sec <= span + 1e-6; sec += step) {
+      const x = (sec / span) * 100;
       ruler.insertAdjacentHTML('beforeend', '<i style="left:' + x + '%"></i><span style="left:' + x + '%">' + sec + 's</span>');
     }
     kfTracks.appendChild(ruler);
@@ -1359,7 +1390,7 @@
       const row = document.createElement('div'); row.className = 'kf-row' + (o === selected ? ' cur' : ''); row.dataset.role = 'row'; row.dataset.oid = o.id;
       for (const k of o.keys) {
         const d = document.createElement('div'); d.className = 'kf-key' + (o.kind === 'emitter' ? ' emitter' : '') + (S.selKey && S.selKey.k === k ? ' cur' : '');
-        d.style.left = (k.t / S.tl.dur) * 100 + '%'; d.dataset.role = 'key'; d.title = o.name + ' at ' + k.t.toFixed(2) + ' s';
+        d.style.left = (k.t / span) * 100 + '%'; d.dataset.role = 'key'; d.title = o.name + ' at ' + k.t.toFixed(2) + ' s';
         d._o = o; d._k = k; row.appendChild(d);
       }
       kfTracks.appendChild(row);
@@ -1367,10 +1398,14 @@
     const ph = document.createElement('div'); ph.className = 'kf-ph'; ph.id = 'kf-ph'; kfTracks.appendChild(ph);
     updatePlayhead(); if (typeof lcUi === 'function') lcUi();
   }
+  let phLast = '', ptLast = '';
   function updatePlayhead() {
     const ph = $('#kf-ph'); if (!ph) return;
-    ph.style.left = (clamp(S.tl.t, 0, S.tl.dur) / S.tl.dur) * 100 + '%';
-    $('#kf-time').textContent = S.tl.t.toFixed(2) + ' s · frame ' + (Math.round(S.tl.t * FPS_TL) + 1) + ' / ' + Math.round(S.tl.dur * FPS_TL);
+    const span = tlSpan(), t = tlNow(), c = viewMode() === 'cache' ? S.cache : null;
+    const left = (clamp(t, 0, span) / span) * 100 + '%'; if (left !== phLast) { phLast = left; ph.style.left = left; }
+    const txt = c ? (Math.round(S.ct) / c.fps).toFixed(2) + ' s · frame ' + (Math.round(S.ct) + 1) + ' / ' + (Math.round(cacheDur(c) * c.fps) + 1) + ' (bake)'
+      : S.tl.t.toFixed(2) + ' s · frame ' + (Math.round(S.tl.t * FPS_TL) + 1) + ' / ' + Math.round(S.tl.dur * FPS_TL);
+    if (txt !== ptLast) { ptLast = txt; $('#kf-time').textContent = txt; }
   }
   let kdrag = null, lastKeyClick = null;
   kfTracks.addEventListener('pointerdown', (e) => {
@@ -1396,19 +1431,49 @@
   });
   function endKdrag() {
     if (!kdrag) return;
-    if (kdrag.type === 'head') scrubTo(S.tl.t, true); else if (kdrag.moved) { const t = S.tl.t; applyKeysAt(t); updateEst(); lcClear(); }
+    if (kdrag.type === 'head') { if (viewMode() !== 'cache') scrubTo(S.tl.t, true); } else if (kdrag.moved) { const t = S.tl.t; applyKeysAt(t); updateEst(); lcClear(); }
     kdrag = null; renderUI();
   }
   kfTracks.addEventListener('pointerup', endKdrag); kfTracks.addEventListener('pointercancel', endKdrag);
   // move the playhead. final = true restarts the particles from this time.
   function scrubTo(t, final) {
+    if (viewMode() === 'cache') {   // a bake is shown: move its playhead (while baking, at the newest frame it follows the bake again)
+      const c = S.cache, last = Math.max(0, c.frames.length - 1);
+      setCPlay(false); S.ct = clamp(Math.round(t * c.fps), 0, last); if (c.partial) S.cfollow = S.ct >= last; updatePlayhead(); return;
+    }
     t = clamp(t, 0, S.tl.dur); setPlaying(false); S.tl.t = t;
     if (lcCanPlay(t)) { lcEnter(t); updatePlayhead(); return; }
     applyKeysAt(t);
     if (final) resetSim(t); else updatePlayhead();
     updatePlayhead();
   }
-  $('#kf-rewind').addEventListener('click', () => { scrubTo(0, true); renderUI(); });
+  $('#kf-rewind').addEventListener('click', (e) => { e.currentTarget.blur(); scrubTo(0, true); renderUI(); });
+  // one frame back or forward: a bake's next frame; in the live view the next frame of the timeline (24 a second), from the live cache when it
+  // has it, otherwise simulated (forward only: the simulation cannot run backwards)
+  function stepFrame(dir) {
+    if (tf) return;
+    if (viewMode() === 'cache') {
+      const c = S.cache, last = Math.max(0, c.frames.length - 1);
+      setCPlay(false); S.cfollow = false; S.ct = clamp(Math.round(S.ct) + dir, 0, last); if (c.partial && S.ct >= last) S.cfollow = true; updatePlayhead(); return;
+    }
+    const t = (Math.round(S.tl.t * FPS_TL) + dir) / FPS_TL;
+    if (t < -1e-6 || t > S.tl.dur + 1e-6) return;
+    setPlaying(false);
+    if (lcCanPlay(t)) { lcEnter(Math.max(0, t)); updatePlayhead(); return; }
+    if (dir < 0 || S.lcPlay) { flash(dir < 0 ? 'Stepping back needs the live cache. Press Reset and play from the start to fill it.' : 'End of the cached part. Press Start to simulate on from where the sim is.'); return; }
+    const target = Math.round(t * 60); let n = 0;
+    while (S.frame < target && n++ < 30) stepOnce();
+    S.tl.t = S.frame / 60; updatePlayhead();
+  }
+  $('#kf-fprev').addEventListener('click', (e) => { e.currentTarget.blur(); stepFrame(-1); });
+  $('#kf-fnext').addEventListener('click', (e) => { e.currentTarget.blur(); stepFrame(1); });
+  window.addEventListener('keydown', (e) => {
+    if ((e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') || typing() || tf || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (document.activeElement !== document.body && !document.activeElement.closest('.kf, #stage')) return;
+    e.preventDefault();
+    if (e.shiftKey) { if (e.key === 'ArrowLeft') { scrubTo(0, true); renderUI(); } else scrubTo(viewMode() === 'cache' ? cacheDur(S.cache) : S.tl.dur, true); return; }
+    stepFrame(e.key === 'ArrowLeft' ? -1 : 1);
+  });
   $('#kf-add').addEventListener('click', () => { if (selected) addKey(selected, S.tl.t); });
   $('#kf-del').addEventListener('click', deleteKey);
   $('#kf-auto').addEventListener('change', (e) => { S.tl.auto = e.target.checked; });
@@ -1443,14 +1508,16 @@
   }
 
   // ---------- buttons ----------
+  const ICO_PLAY = 'M3 1.5l9 5.5-9 5.5z', ICO_PAUSE = 'M2.5 1.5h3.4v11H2.5zM8.1 1.5h3.4v11H8.1z';
+  function kfPlayIcon() { const el = document.getElementById('kf-play-ico'); if (el) el.setAttribute('d', (viewMode() === 'cache' ? S.cplay : S.playing) ? ICO_PAUSE : ICO_PLAY); }
   function setPlaying(v) {
-    S.playing = v;
+    S.playing = v; kfPlayIcon();
     $('#btn-play').setAttribute('aria-pressed', v ? 'true' : 'false');
     $('#ico-pause').toggleAttribute('hidden', !v); $('#ico-play').toggleAttribute('hidden', v); $('#play-label').textContent = v ? 'Stop' : 'Start';
     if (typeof updStatus === 'function') try { updStatus(); } catch (e) { /* panel not ready */ }
   }
   function setCPlay(v) {
-    S.cplay = v;
+    S.cplay = v; kfPlayIcon();
     $('#ico-cpause').toggleAttribute('hidden', !v); $('#ico-cplay').toggleAttribute('hidden', v); $('#cplay-label').textContent = v ? 'Pause' : 'Play';
     $('#btn-cplay').setAttribute('aria-pressed', v ? 'true' : 'false');
   }
@@ -1480,7 +1547,9 @@
     const cache = viewMode() === 'cache';
     $('#tab-live').hidden = S.tab !== 'live'; $('#tab-bake').hidden = S.tab !== 'bake';
     $('#bar-live').hidden = cache; $('#bar-cache').hidden = !cache;
-    $('#tl-live').hidden = cache; $('#tl-cache').hidden = !cache; $('#kf').hidden = cache;
+    $('#tl-live').hidden = false; $('#tl-cache').hidden = true; $('#kf').hidden = false;   // one timeline for both: it shows the bake when a bake is shown
+    $('#ms').closest('.stat').hidden = cache; $('#meter').parentNode.hidden = cache; $('#capshow').textContent = cache ? fmtN(S.cache.maxN || 0) : fmtN(S.cap);
+    if (typeof renderKF === 'function') try { renderKF(); kfPlayIcon(); } catch (e) { /* the timeline is made later at start */ }
     setSeg($('#seg-mode'), S.tab); hud();
     try { syncPtab(); } catch (e) { /* the layout code runs later at start */ }
     resize();
@@ -1503,7 +1572,8 @@
     $('#seg-mode').querySelectorAll('button').forEach((x) => { x.disabled = running; });
   }
   function fmtTime(s) { s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
-  function cacheBytes(c) { let n = 0; for (const f of c.frames) n += f.pos.byteLength + f.spd.byteLength + f.objs.byteLength + (f.fm ? f.fm.byteLength : 0) + (f.sp ? f.sp.pos.byteLength + f.sp.pk.byteLength : 0) + (f.dp ? f.dp.pos.byteLength + f.dp.spd.byteLength : 0); return n; }
+  function frameBytes(f) { return f.pos.byteLength + f.spd.byteLength + (f.objs ? f.objs.byteLength : 0) + (f.fm ? f.fm.byteLength : 0) + (f.sp ? f.sp.pos.byteLength + f.sp.pk.byteLength : 0) + (f.dp ? f.dp.pos.byteLength + f.dp.spd.byteLength : 0); }
+  function cacheBytes(c) { let n = 0; for (const f of c.frames) n += frameBytes(f); return n; }
 
   // the bake settings without the heavy parts (distance grids, recorded motion), for the cache file and the report
   function lightDesc(desc) {
@@ -1651,25 +1721,31 @@
   $('#scrub').addEventListener('input', (e) => { S.ct = +e.target.value; if (S.cache && S.cache.partial) S.cfollow = S.ct >= S.cache.frames.length - 1.5; });
 
   const DEFB = { x0: -1.5, x1: 1.5, y0: 0, y1: 2.6, z0: -1.5, z1: 1.5 };
-  // a slot holding frame k of cache c in layout L (decoded on demand into whichever slot is not needed for the other frame)
-  function slotFor(c, k, L, keep) {
-    const key = c.uid + ':' + k + ':' + L.nW + ':' + L.nD + ':' + L.nS + ':' + (S.showSpray !== false) + ':' + S.streak;
-    for (let s2 = 0; s2 < 2; s2++) if (SLOTS[s2].key === key) return s2;
-    const s2 = keep === 0 ? 1 : 0;
-    decodeFrame(SLOTS[s2], c.frames[k], c.b || DEFB, L); SLOTS[s2].key = key;
-    return s2;
+  // Baked frames live in slots 1 to 3: the frame at the playhead, the next one (to blend towards) and, while playing, the one after that,
+  // loaded ahead on a display frame that had nothing else to load, so crossing into a new frame never has to load two at once.
+  let useTick = 0;
+  function slotKey(c, k) { return c.uid + ':' + k + ':' + (S.showSpray !== false); }
+  function findSlot(key) { for (let i = 1; i < NSLOT; i++) if (SLOTS[i].key === key) { SLOTS[i].used = ++useTick; return i; } return -1; }
+  function slotFor(c, k, keep) {
+    const key = slotKey(c, k); let i = findSlot(key); if (i > 0) return i;
+    let v = -1; for (let j = 1; j < NSLOT; j++) if (!keep.includes(j) && (v < 0 || SLOTS[j].used < SLOTS[v].used)) v = j;
+    slotLoad(SLOTS[v], c.frames[k], c.b || DEFB); SLOTS[v].key = key; SLOTS[v].used = ++useTick; loadedNow = true;
+    return v;
   }
-  let cacheUid = 0;
+  let cacheUid = 0, loadedNow = false;
   function showCache(t) {
     const c = S.cache, fr = c.frames, last = fr.length - 1; lastGen = -1;
     if (!c.uid) c.uid = ++cacheUid;
-    if (last < 0) { geoA.setDrawRange(0, 0); geoB.setDrawRange(0, 0); return 0; }   // a bake that has not finished its first frame yet
-    t = clamp(t, 0, last);
+    if (last < 0) { hideSlots(); return 0; }   // a bake that has not finished its first frame yet
+    t = clamp(t, 0, last); loadedNow = false;
     // blend between frames only when the same slot is the same particle in both (older caches with sorting were not saved that way)
     const a = Math.floor(t), bi = Math.min(a + 1, last), w = c.stableIds && bi !== a ? t - a : 0, A = fr[a], B = fr[bi], og = c.org || { x: 0, y: 0, z: 0 };
-    const la = frameLayout(A), lb = w > 0 ? frameLayout(B) : la, L = { nW: Math.max(la.nW, lb.nW), nD: Math.max(la.nD, lb.nD), nS: Math.max(la.nS, lb.nS) };
-    const sa = slotFor(c, a, L, -1), sb = w > 0 ? slotFor(c, bi, L, sa) : sa;
-    pmat.uniforms.uD.value = c.d; pmat.uniforms.uCR.value = (c.desc && c.desc.cellRatio) || 2;
+    const sa = slotFor(c, a, []), sb = w > 0 ? slotFor(c, bi, [sa]) : sa;
+    if (!loadedNow && S.cplay && last > 1) {   // nothing loaded this time: load the frame after next now
+      let nx = bi + 1; if (nx > last) nx = S.cloop && !c.partial ? 0 : -1;
+      if (nx >= 0 && findSlot(slotKey(c, nx)) < 0) slotFor(c, nx, [sa, sb]);
+    }
+    pmat.uniforms.uD.value = c.d; pmat.uniforms.uCR.value = (c.desc && c.desc.cellRatio) || 2; matW.uniforms.uFdt.value = 1 / c.fps;
     showSlots(sa, sb, w);
     c.ids.forEach((id, k) => {
       const o = objs.find((q) => q.id === id); if (!o) return;
@@ -2144,11 +2220,11 @@
     const t = tf; if (!t) return;
     tf = null; canvas.style.cursor = 'default';
     if (t.edit) {
-      rebuildSDF(t.o);
+      rebuildSDFLater(t.o);
       meshGeo(t.o); edList = meshEdges(t.o.mesh); updateOverlay();
     } else {
       for (const o of t.list) {
-        if (t.type === 's' && o.kind === 'mesh') { o.group.scale.set(1, 1, 1); meshGeo(o); rebuildSDF(o); }
+        if (t.type === 's' && o.kind === 'mesh') { o.group.scale.set(1, 1, 1); meshGeo(o); rebuildSDFLater(o); }
         syncMesh(o);
         if (!S.playing && o.keys.length) autoKey(o);
       }
@@ -2395,7 +2471,7 @@
     if (typeof sv.nbOn === 'boolean') S.nbOn = sv.nbOn; if (typeof sv.nbBand === 'number') S.nbBand = sv.nbBand; if (typeof sv.oceanView === 'boolean') S.oceanView = sv.oceanView; if (typeof sv.nbLook === 'boolean') S.nbLook = sv.nbLook;
     S.ocean = Object.assign({}, OCEAN_DEF, d.ocean || {});
     if (sv.wind) S.wind = Object.assign({ speed: 0, az: 0, up: 0 }, sv.wind);
-    if (d.timeline) Object.assign(S.tl, d.timeline);
+    if (d.timeline) { Object.assign(S.tl, d.timeline); $('#kf-dur').value = S.tl.dur; setSeg($('#kf-interp'), S.tl.smooth ? 'smooth' : 'linear'); setSeg($('#kf-end'), S.tl.end); $('#kf-auto').checked = S.tl.auto !== false; }
     if (d.bake) { if (d.bake.dur) S.bk.dur = d.bake.dur; if (d.bake.fps) S.bk.fps = d.bake.fps; if (d.bake.detail) S.bkDetail = d.bake.detail; }
     LC.staleEnd = 0;
     S.fills = d.fills || []; S.events = d.events || [];
@@ -2406,7 +2482,7 @@
     const first = objs.find((o) => o.kind === 'emitter') || objs[0] || null;
     selSet.clear(); if (first) selSet.add(first); selected = first;
     pmat.uniforms.uFoam.value = S.foam;
-    buildBoxUI(); buildLiveUI(); buildBakeUI();
+    buildBoxUI(); buildLiveUI(); buildBakeUI(); $('#capshow').textContent = fmtN(S.cap);
     frameAll(); resetSim(0); renderUI(); updateRecInfo(); updateEst(); renderKF(); hud();
   }
   function saveSceneFile() {
@@ -2492,16 +2568,80 @@
       // moving particles to the CPU for drawing
       const tmp = new Float32Array(sim.MAXN * 4 + 4); await sim.readbackInto(tmp);
       let rb = 0; for (let r = 0; r < 6; r++) { const t0 = performance.now(); await sim.readbackInto(tmp); rb += performance.now() - t0; }
-      const dp = () => { const t0 = performance.now(); for (let r = 0; r < 5; r++) buildLive(tmp, Math.min(N, sim.ringCap || N)); return (performance.now() - t0) / 5; };
       say('');
-      say('Copying all particles to the CPU: ' + f1(rb / 6) + ' ms each (live view now does this in the background, without stalling steps)');
-      say('Building the draw buffer on the CPU: ' + f1(dp()) + ' ms (look-only points are made on the GPU)'); lastGen = -1;
+      say('Copying all particles to the CPU: ' + f1(rb / 6) + ' ms each (bakes do this every frame; the live view copies a packed sample in the background)');
+      if (sim.outFrame) { const fr = sim.outFrame; let t = 0; for (let r = 0; r < 5; r++) { const t0 = performance.now(); slotLoad(SLOTS[0], fr, sim.b); t += performance.now() - t0; } say('Handing the live view to the drawing: ' + f1(t / 5) + ' ms for ' + fmtN(fr.n + (fr.sp ? fr.sp.n : 0) + (fr.dp ? fr.dp.n : 0)) + ' points (' + (perf.upBytes / 1048576).toFixed(1) + ' MB)'); SLOTS[0].key = null; }
       say('');
       say('Done. Press Copy results and paste it back.');
     } catch (e) { say('Benchmark failed: ' + (e && e.message || e)); }
     delete sim.step; Object.assign(sim.opt, opt0); S.tl.end = endMode; S.subMin = sub0[0]; S.subMax = sub0[1]; resetSim(0); renderUI(); renderKF(); setPlaying(wasPlaying); benching = false;
   }
   $('#btn-bench').addEventListener('click', (e) => { e.currentTarget.blur(); runBenchmark(); });
+  // ---------- smoothness test: what Mer feels (hitches, slow playback), measured frame by frame on her computer ----------
+  let frameHook = null;
+  async function runSmooth() {
+    if (benching || S.baking || tf) return;
+    benching = true;
+    const lines = [], say = (t) => { lines.push(t); bout.value = lines.join('\n'); bout.scrollTop = bout.scrollHeight; };
+    const f1 = (v) => (v || 0).toFixed(1), f0 = (v) => String(Math.round(v || 0)), avg = (a) => (a.length ? a.reduce((p, q) => p + q, 0) / a.length : 0);
+    const pctl = (a, p) => { if (!a.length) return 0; const b = a.slice().sort((x, y) => x - y); return b[Math.min(b.length - 1, Math.floor(p * b.length))]; };
+    const record = (secs) => new Promise((res) => {
+      const rec = { gaps: [], js: [], up: [], upMB: [], render: [], unpack: [], t0: performance.now(), frame0: S.frame, ct0: S.ct, wrapped: 0 };
+      let upN = perf.upN, prev = performance.now(), lastCt = S.ct, lastG = sim ? sim.gen : 0;
+      frameHook = (now) => {
+        rec.gaps.push(now - prev); prev = now; rec.js.push(perf.frame); rec.render.push(perf.render);
+        if (perf.upN !== upN) { upN = perf.upN; rec.up.push(perf.up); rec.upMB.push(perf.upBytes / 1048576); }
+        if (sim && sim.gen !== lastG && viewMode() === 'live') { lastG = sim.gen; if (sim.unpackMs) rec.unpack.push(sim.unpackMs); }
+        if (S.ct < lastCt) rec.wrapped++; lastCt = S.ct;
+        if (now - rec.t0 > secs * 1000) { frameHook = null; rec.secs = (now - rec.t0) / 1000; res(rec); }
+      };
+    });
+    const report = (rec) => {
+      const g = rec.gaps, slow = g.slice().sort((x, y) => y - x).slice(0, 5).map(f0).join(', ');
+      say('  ' + f1(g.length / rec.secs) + ' frames a second drawn. Typical frame ' + f0(pctl(g, 0.5)) + ' ms, 1 in 20 slower than ' + f0(pctl(g, 0.95)) + ' ms, slowest ' + slow + ' ms. Frames over 50 ms: ' + g.filter((v) => v > 50).length + ', over 100 ms: ' + g.filter((v) => v > 100).length + '.');
+      say('  Page work per frame ' + f1(avg(rec.js)) + ' ms on average (' + f1(pctl(rec.js, 0.95)) + ' ms for 1 in 20), of which handing it to the drawing ' + f1(avg(rec.render)) + ' ms.');
+      if (rec.up.length) say('  New points sent to the drawing ' + rec.up.length + ' times, ' + f1(avg(rec.up)) + ' ms each (slowest ' + f1(Math.max(...rec.up)) + ' ms), about ' + f1(avg(rec.upMB)) + ' MB each.');
+      if (rec.unpack.length) say('  Copying the GPU\'s points for the view: ' + f1(avg(rec.unpack)) + ' ms each.');
+    };
+    const wasTab = S.tab, wasPlaying = S.playing, wasC = S.cplay, wasCt = S.ct;
+    try {
+      const cv = renderer.domElement;
+      say('SplashTank smoothness test');
+      say('GPU: ' + (S.gpu && S.gpu.name) + '. Browser: ' + navigator.userAgent.replace(/^Mozilla\/5.0 /, '').slice(0, 90));
+      say('Scene: ' + $('#scene').value + ', ' + S.engine.toUpperCase() + ', spacing ' + S.liveD.toFixed(3) + ', max points ' + fmtN(S.cap) + ', whitewater ' + (S.sprOn ? 'on (pool ' + fmtN(S.sprCap) + ')' : 'off') + ', narrow band ' + (nbActive() ? 'on' : 'off') + '. View ' + cv.width + ' × ' + cv.height + ' pixels, look-only copies ' + (1 + (S.detail | 0)) + ' water, ' + (1 + (S.sprDetail | 0)) + ' whitewater.');
+      // 1. the live sim from the start
+      S.tab = 'live'; applyMode(); setCPlay(false); setPlaying(false); lcClear(); resetSim(0);
+      await new Promise((r) => setTimeout(r, 400));
+      setPlaying(true);
+      say(''); say('Live sim, ' + (window.__smoothSecs || 10) + ' seconds from the start:');
+      const L = await record(window.__smoothSecs || 10); setPlaying(false);
+      const simS = (S.frame - L.frame0) / 60;
+      say('  The sim got through ' + f1(simS) + ' s of its time (' + Math.round(100 * simS / L.secs) + '% of real time). ' + fmtN(sim.N) + ' particles now, solver step about ' + f1(sim.lastMs) + ' ms on the GPU' + (S.lastSub > 1 ? ' with ' + S.lastSub + ' substeps a frame' : '') + ', ' + fmtN(shownN) + ' points drawn.');
+      report(L);
+      // 2. the bake, if there is one
+      if (S.cache && S.cache.frames.length > 2) {
+        const c = S.cache;
+        S.tab = 'bake'; applyMode(); S.ct = 0; S.cfollow = false; setCPlay(true);
+        await new Promise((r) => setTimeout(r, 400));
+        say(''); say('Bake playback, ' + (window.__smoothSecs || 10) + ' seconds (' + (c.frames.length - 1) + ' frames at ' + c.fps + ' a second, up to ' + fmtN(c.maxN) + ' water points):');
+        const P = await record(window.__smoothSecs || 10);
+        report(P);
+      } else { say(''); say('No bake to play (bake something first to test playback).'); }
+      // 3. collision shapes
+      const ms = objs.filter((o) => o.kind === 'mesh');
+      if (ms.length) {
+        say(''); say('Rebuilding collision shapes (done after scaling or reshaping; it now runs in the background, so this is how long the water waits for the new shape):');
+        const parts = [];
+        for (const o of ms.slice(0, 8)) { const t0 = performance.now(); const sd = buildSDF(o.mesh, 0.025, 0.16); parts.push(o.name + ' ' + f0(performance.now() - t0) + ' ms (' + sd.dims.join('×') + ')'); await new Promise((r) => setTimeout(r, 0)); }
+        say('  ' + parts.join(', ') + (ms.length > 8 ? ', and ' + (ms.length - 8) + ' more' : '') + '.');
+      }
+      say(''); say('Done. Press Copy results and paste it into the chat.');
+    } catch (e) { say('The test failed: ' + (e && e.message || e)); }
+    frameHook = null;
+    S.tab = wasTab; applyMode(); S.ct = wasCt; setCPlay(wasC && viewMode() === 'cache'); setPlaying(false); if (wasPlaying) setPlaying(true); renderUI(); renderKF();
+    benching = false;
+  }
+  $('#btn-smooth').addEventListener('click', (e) => { e.currentTarget.blur(); runSmooth(); });
   $('#btn-bench-copy').addEventListener('click', (e) => {
     e.currentTarget.blur(); bout.select();
     try { navigator.clipboard.writeText(bout.value).catch(() => document.execCommand('copy')); } catch (er) { try { document.execCommand('copy'); } catch (e2) { /* ignore */ } }
@@ -2641,15 +2781,15 @@
     S.tl.t = LC.parked / 60; applyKeysAt(S.tl.t);
     LC.armed = !LC.full;
   }
-  function lcRecord() {
-    if (!LC.armed || S.lcPlay || !S.playing || !isGpu() || !sim.outN) return;
+  function lcRecord(fr) {
+    if (!fr || !LC.armed || S.lcPlay || !S.playing || !isGpu()) return;
     const f = S.frame, last = lcEnd();
     if (!LC.frames.length && f > 8) { LC.armed = false; return; }   // it did not start at the beginning
     if (f - last < 2 || f < last) return;                              // about 30 frames a second is enough
     if (LC.bytes > S.lcBudget * 1048576) { LC.full = true; LC.armed = false; lcUi(); return; }
     if (!LC.frames.length) { LC.ids = objs.map((o) => o.id); LC.b = Object.assign({}, sim.b); LC.org = Object.assign({}, S.simOrg); LC.d = S.liveD; LC.scale = S.scale || 1; }
-    const fr = packFrameBuf(rawBuf, sim.outN, sim.b, S.lastStates || []);
-    LC.frames.push(fr); LC.fnum.push(f); LC.bytes += fr.n * (fr.fm ? 8 : 7) + 96 + (fr.sp ? fr.sp.n * 10 : 0) + (fr.dp ? fr.dp.n * 7 : 0);
+    const rec = Object.assign({}, fr, { objs: packObjs(S.lastStates || []) });   // the frame as it was drawn: nothing to pack
+    LC.frames.push(rec); LC.fnum.push(f); LC.bytes += frameBytes(rec);
     if (LC.staleEnd && lcEnd() >= LC.staleEnd) LC.staleEnd = 0;
     lcUi();
   }
@@ -2658,7 +2798,7 @@
     while (lo < hi) { const m = (lo + hi + 1) >> 1; if (fn[m] <= S.lcT) lo = m; else hi = m - 1; }
     const A = LC.frames[lo], cb = LC.b, og = LC.org;
     const sl = SLOTS[0], key = 'lc:' + lo + ':' + LC.fnum[lo] + ':' + (S.showSpray !== false);
-    if (sl.key !== key) { decodeFrame(sl, A, cb, frameLayout(A)); sl.key = key; }
+    if (sl.key !== key) { slotLoad(sl, A, cb); sl.key = key; }
     pmat.uniforms.uD.value = LC.d; pmat.uniforms.uCR.value = S.cellRatio;
     showSlots(0, 0, 0); lastGen = -1;
     const n = sl.alive;
@@ -2678,7 +2818,7 @@
       else if (LC.staleEnd > 0) el.textContent = 'Out of date: something changed. Press Reset to simulate and cache it again.';
       else el.textContent = LC.armed ? 'Recording from the start as the sim runs.' : 'Empty. It records the next time the sim runs from the beginning (press Reset).';
     }
-    const dur = S.tl.dur || 1, pc = (s) => clamp(s / dur, 0, 1) * 100;
+    const dur = tlSpan() || 1, pc = (s) => clamp(s / dur, 0, 1) * 100;
     const bar = $('#lc-bar'), stl = $('#lc-stale'), bk = $('#bk-bar'), bp = $('#bk-prog');
     const on = S.lcOn && LC.frames.length > 1, endS = on ? lcEnd() / 60 : 0, se = S.lcOn ? LC.staleEnd / 60 : 0;
     if (bar) { bar.hidden = !on; if (on) bar.style.width = pc(endS) + '%'; }
@@ -2767,10 +2907,11 @@
       }
       pmat.uniforms.uMax.value = S.vmax / (c.scale || 1); pmat.uniforms.uSize.value = S.psize * c.d; points.position.set((c.org || S.org).x, (c.org || S.org).y, (c.org || S.org).z);
       count = showCache(S.ct);
+      updatePlayhead();
       uiT += dt;
-      if (uiT > 0.1) {
+      if (uiT > 0.2) {
         uiT = 0; const fi = Math.round(S.ct);
-        $('#c-frame').textContent = String(fi + 1).padStart(4, '0'); $('#c-count').textContent = count; $('#c-fps').textContent = Math.round(fpsE);
+        $('#frame').textContent = String(fi + 1).padStart(4, '0'); $('#count').textContent = count; $('#fps').textContent = Math.round(fpsE);
         const sc = $('#scrub'); if (document.activeElement !== sc) sc.value = fi;
       }
     } else if (S.lcPlay) {
@@ -2803,12 +2944,18 @@
       if (isGpu()) {
         if (sim.setDeepLook) sim.setDeepLook(S.nbLook && nbActive());
         sim.pump();
-        if (sim.gen !== lastGen) { lcRecord(); lastCount = buildLive(rawBuf, sim.outN); lastGen = sim.gen; fresh = true; } else fresh = false;
+        if (sim.gen !== lastGen || SLOTS[0].key !== 'live') {
+          const t0 = performance.now();
+          const fr = S.engine === 'flip' ? sim.outFrame : (sim.outN ? packFrameBuf(rawBuf, sim.outN, sim.b, []) : null);
+          if (sim.gen !== lastGen) lcRecord(fr);
+          slotLoad(SLOTS[0], fr, sim.b); SLOTS[0].key = 'live'; lastCount = SLOTS[0].alive; lastGen = sim.gen; fresh = true;
+          perf.build = performance.now() - t0 - perf.up;
+        } else fresh = false;
         count = lastCount;
         S.ms = sim.lastMs;
       }
       else {
-        count = buildCpu(sim.P, sim.S, sim.N); fresh = true;
+        slotLoad(SLOTS[0], packCpuFrame(sim.P, sim.S, sim.N, sim.b), sim.b); SLOTS[0].key = 'live'; count = SLOTS[0].alive; fresh = true;
       }
       showSlots(0, 0, 0); pmat.uniforms.uD.value = S.liveD; pmat.uniforms.uCR.value = S.cellRatio;
       pmat.uniforms.uMax.value = S.vmax / (S.scale || 1); pmat.uniforms.uSize.value = S.psize * S.liveD; points.position.set(S.simOrg.x, S.simOrg.y, S.simOrg.z);
@@ -2826,7 +2973,8 @@
     vpT += dt; if (vpT > 0.25) { vpT = 0; try { vpInfo(); } catch (e) { /* not ready */ } }
     placeHandles();
     oceanUpdate(mode);
-    renderer.render(scene, camera);
+    const tr = performance.now(); renderer.render(scene, camera); perf.render = performance.now() - tr; perf.frame = performance.now() - now;
+    if (frameHook) frameHook(performance.now());
   }
 
   // ---------- panel: collapsible groups, tooltips, right-click menu, search, status bar ----------
@@ -3077,17 +3225,17 @@
   S.snapTo = lsGet('snapTo') || S.snapTo; $('#vh-snapto').value = S.snapTo; setOrient(lsGet('orient') || 'global'); setColorBy(S.colorBy);
 
   // timeline header: play, next and previous key
-  $('#kf-play').addEventListener('click', (e) => { e.currentTarget.blur(); $('#btn-play').click(); });
+  $('#kf-play').addEventListener('click', (e) => { e.currentTarget.blur(); if (viewMode() === 'cache') $('#btn-cplay').click(); else $('#btn-play').click(); });
   function jumpKey(dir) {
     const ts = []; (selSet.size ? [...selSet] : objs).forEach((o) => o.keys.forEach((k) => ts.push(k.t)));
-    ts.sort((a, c) => a - c); const t0 = S.tl.t, eps = 0.5 / FPS_TL;
+    ts.sort((a, c) => a - c); const t0 = tlNow(), eps = 0.5 / FPS_TL;
     const t = dir > 0 ? ts.find((q) => q > t0 + eps) : [...ts].reverse().find((q) => q < t0 - eps);
     if (t === undefined) { flash('No ' + (dir > 0 ? 'later' : 'earlier') + ' key'); return; }
     scrubTo(t, true); renderUI();
   }
   $('#kf-prev').addEventListener('click', (e) => { e.currentTarget.blur(); jumpKey(-1); });
   $('#kf-next').addEventListener('click', (e) => { e.currentTarget.blur(); jumpKey(1); });
-  window.addEventListener('keydown', (e) => { if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !typing() && !tf && document.activeElement === document.body && viewMode() === 'live') { e.preventDefault(); jumpKey(e.key === 'ArrowUp' ? 1 : -1); } });
+  window.addEventListener('keydown', (e) => { if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !typing() && !tf && document.activeElement === document.body) { e.preventDefault(); jumpKey(e.key === 'ArrowUp' ? 1 : -1); } });
 
   // splitters: the side panels' width, the outliner's height and the timeline's height; remembered in this browser
   const root = document.documentElement;
@@ -3129,7 +3277,7 @@
     const ss = $('#ol-sim-sub'); if (ss) ss.textContent = (isGpu() ? fmtN(sim ? sim.N : 0) : fmtN(sim ? sim.N : 0)) + ' particles' + (S.engine === 'flip' && nbActive() ? ' · narrow band' : '');
     const vm = $('#vh-mode'); if (vm && document.activeElement !== vm) vm.value = uiMode;
   }
-  window.__splash = { setTool, setSnap, setOrient, setColorBy, setPtab, renderOutliner, setHidden, layState, bakeRes, buildDesc, LC, filterPanel, drawCount: () => shownN, slots: SLOTS, rawBuf, geoA, geoB, pmat, renderer, scene, gizmo, pickGizmo, snapView, setOrtho, tfLines, snapMark, getCam: () => camera, select, get tfState() { return tf; }, lc: () => ({ frames: LC.frames.length, end: lcEnd(), armed: LC.armed, play: S.lcPlay, t: S.lcT, bytes: LC.bytes, full: LC.full }), lcRestart, stepOnce, runBenchmark, getSim: () => sim, cam, b, setFaceCoord, commitBox, FACES, sceneData, applySceneData, S, objs, addKey, resetSim, setDomain, selSet, select, startTf, confirmTf, cancelTf, enterEdit, exitEdit, extrudeFaces, ES, undo, redo, addAt, setSelMode, lastM, get tf() { return tf; }, get uiMode() { return uiMode; }, editPick, toScreen, makeObj, selVerts, selectAllEdit, modalKey, evalTf };
+  window.__splash = { setTool, setSnap, setOrient, setColorBy, setPtab, renderOutliner, setHidden, layState, bakeRes, buildDesc, LC, filterPanel, drawCount: () => shownN, slots: SLOTS, perf, rawBuf, geoW, geoD, geoS, pmat, matS, slotLoad, showSlots, packCpuFrame, renderer, scene, gizmo, pickGizmo, snapView, setOrtho, tfLines, snapMark, getCam: () => camera, select, get tfState() { return tf; }, lc: () => ({ frames: LC.frames.length, end: lcEnd(), armed: LC.armed, play: S.lcPlay, t: S.lcT, bytes: LC.bytes, full: LC.full }), lcRestart, stepOnce, runBenchmark, runSmooth, getSim: () => sim, cam, b, setFaceCoord, commitBox, FACES, sceneData, applySceneData, S, objs, addKey, resetSim, setDomain, selSet, select, startTf, confirmTf, cancelTf, enterEdit, exitEdit, extrudeFaces, ES, undo, redo, addAt, setSelMode, lastM, get tf() { return tf; }, get uiMode() { return uiMode; }, editPick, toScreen, makeObj, selVerts, selectAllEdit, modalKey, evalTf };
   initGpu().then((g) => {
     S.gpu = g; applyPreset(g ? 'flip' : 'cpu');
     buildLiveUI(); buildBakeUI(); makeSim(); $('#capshow').textContent = fmtN(S.cap);

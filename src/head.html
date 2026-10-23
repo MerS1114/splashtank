@@ -128,11 +128,17 @@ select.dd option, select option { background: #2b2b2b; color: #e2e2e2; }
 
 /* ---------- timeline ---------- */
 .kf { flex-shrink: 0; background: #262626; font: 400 11px var(--font-mono); color: var(--dim); user-select: none; }
-.kf-head { display: flex; align-items: center; gap: 4px; height: 30px; padding: 0 8px; border-bottom: 1px solid #1c1c1c; font-family: var(--font-ui); overflow: hidden; white-space: nowrap; }
+.kf-head { display: flex; align-items: center; gap: 4px; height: 34px; padding: 0 8px; border-bottom: 1px solid #1c1c1c; font-family: var(--font-ui); overflow: hidden; white-space: nowrap; }
 .kf-head .grow { flex: 1; }
 .kf-head .ib { width: 24px; height: 24px; }
 .kf-head .ib svg { width: 12px; height: 12px; }
 .kf-head .seg button { height: 22px; padding: 0 8px; font-size: 11.5px; }
+.kf-head .kbtn { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 5px; border: 1px solid #555; background: #3d3d3d; color: var(--fg); font: 500 12px var(--font-ui); cursor: pointer; flex-shrink: 0; }
+.kf-head .kbtn svg { width: 16px; height: 16px; }
+.kf-head .kbtn:hover { background: #4a4a4a; border-color: #666; }
+.kf-head .kbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.kf-head .kbtn:disabled { opacity: 0.45; cursor: default; }
+@media (max-width: 1380px) { .kf-head .kbtn span { display: none; } .kf-head .kbtn { padding: 0 7px; } }
 .tog { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px; border-radius: 4px; background: #3a3a3a; border: 1px solid #474747; color: #e2e2e2; cursor: pointer; font: 12px var(--font-ui); }
 .tog input { position: absolute; opacity: 0; width: 0; height: 0; }
 .tog i { width: 8px; height: 8px; border-radius: 4px; background: #6a6a6a; }
@@ -441,14 +447,16 @@ kbd { font: 500 10px var(--font-mono); color: #e8e8e8; background: #3c3c3c; bord
       <div class="split h" id="sp-tl" role="separator" aria-orientation="horizontal" aria-label="Resize the timeline" tabindex="0"></div>
       <div class="kf" id="kf">
         <div class="kf-head">
-          <button class="ib" id="kf-rewind" type="button" title="Back to the start and clear the particles" aria-label="Back to the start"><svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M2 2h1.6v10H2zM12 2v10L4.5 7z"/></svg></button>
-          <button class="ib" id="kf-prev" type="button" title="Previous key (Down arrow)" aria-label="Previous key"><svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M10 2v10L3 7z"/></svg></button>
-          <button class="ib" id="kf-play" type="button" title="Play or stop (Space)" aria-label="Play or stop"><svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M3 1.5l9 5.5-9 5.5z"/></svg></button>
-          <button class="ib" id="kf-next" type="button" title="Next key (Up arrow)" aria-label="Next key"><svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M4 2v10l7-5z"/></svg></button>
+          <button class="ib" id="kf-rewind" type="button" title="Back to the start (Shift+Left arrow)" aria-label="Back to the start"><svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M1.5 2h1.6v10H1.5zM8 2v10L3.6 7zM13 2v10L8.6 7z"/></svg></button>
+          <button class="ib" id="kf-prev" type="button" title="Previous key (Down arrow)" aria-label="Previous key"><svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M3.5 4.5L6 7 3.5 9.5 1 7zM13 2v10L7 7z"/></svg></button>
+          <button class="ib" id="kf-fprev" type="button" title="Back one frame (Left arrow)" aria-label="Back one frame"><svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M2.5 2h1.6v10H2.5zM11.5 2v10L5 7z"/></svg></button>
+          <button class="ib" id="kf-play" type="button" title="Play or stop (Space)" aria-label="Play or stop"><svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path id="kf-play-ico" d="M3 1.5l9 5.5-9 5.5z"/></svg></button>
+          <button class="ib" id="kf-fnext" type="button" title="Forward one frame (Right arrow)" aria-label="Forward one frame"><svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M9.9 2h1.6v10H9.9zM2.5 2v10L9 7z"/></svg></button>
+          <button class="ib" id="kf-next" type="button" title="Next key (Up arrow)" aria-label="Next key"><svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M10.5 4.5L13 7l-2.5 2.5L8 7zM1 2v10l6-5z"/></svg></button>
           <span class="stat" id="kf-time">0.00 s</span>
           <span class="vsep"></span>
-          <button class="ib" id="kf-add" type="button" title="Key the selected object at the playhead (I)" aria-label="Add key"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M7 2l5 5-5 5-5-5z"/><path d="M7 5v4M5 7h4"/></svg></button>
-          <button class="ib" id="kf-del" type="button" title="Delete the selected key (Delete)" aria-label="Delete key"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M7 2l5 5-5 5-5-5z"/><path d="M5 7h4"/></svg></button>
+          <button class="kbtn" id="kf-add" type="button" title="Key the selected object at the playhead (I)" aria-label="Add key"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M7 1.5l5.5 5.5L7 12.5 1.5 7z"/><path d="M7 4.6v4.8M4.6 7h4.8"/></svg><span>Add key</span></button>
+          <button class="kbtn" id="kf-del" type="button" title="Delete the selected key (Delete)" aria-label="Delete key"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M7 1.5l5.5 5.5L7 12.5 1.5 7z"/><path d="M4.6 7h4.8"/></svg><span>Delete key</span></button>
           <label class="tog" title="Auto-key: moving a keyed object changes its key at the playhead"><input type="checkbox" id="kf-auto" checked><i></i><span>Auto key</span></label>
           <span class="grow"></span>
           <span class="seg" id="kf-interp" role="group" aria-label="Interpolation"><button type="button" data-v="smooth" aria-pressed="true">Smooth</button><button type="button" data-v="linear" aria-pressed="false">Linear</button></span>
@@ -552,7 +560,7 @@ kbd { font: 500 10px var(--font-mono); color: #e8e8e8; background: #3c3c3c; bord
 
           <div class="group" id="g-sim" data-ptab="sim bake"><h2 data-tip="One set of settings for both the live view and the bake. Changing them clears the live cache.">Simulation</h2></div>
           <div class="group" id="g-perf" data-ptab="perf"><h2>Performance</h2>
-            <div class="btnrow"><button class="btn flat" id="btn-bench" type="button" data-tip="Times every stage of the FLIP solver on your GPU, with and without the speed-ups, on whatever is in the scene. It takes about 20 seconds.">Run benchmark</button><button class="btn flat" id="btn-bench-copy" type="button">Copy results</button></div>
+            <div class="btnrow"><button class="btn flat" id="btn-smooth" type="button" data-tip="Measures how smoothly this scene runs on your computer: 10 seconds of the live sim from the start, then 10 seconds of the bake if there is one, then how long each object's collision shape takes to rebuild (what happens after scaling). Every drawn frame is timed, so it shows the hitches and where the time goes. About 30 seconds.">Smoothness test</button><button class="btn flat" id="btn-bench" type="button" data-tip="Times every stage of the FLIP solver on your GPU, with and without the speed-ups, on whatever is in the scene. It takes about 20 seconds.">Solver benchmark</button><button class="btn flat" id="btn-bench-copy" type="button">Copy results</button></div>
             <textarea id="bench-out" readonly rows="14" spellcheck="false" aria-label="Benchmark results"></textarea>
           </div>
 

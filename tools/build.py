@@ -2,7 +2,7 @@
 """Builds dist/SplashTank.html: one self-contained page (double-click to open, no server needed).
 
 The page is src/head.html (styles and layout) followed by three.js r128, then src/shared.js,
-src/gpu.js + src/flip.js and src/app.js as inline scripts. three.js comes from node_modules
+src/gpu.js + src/flip.js, src/presets.js and src/app.js as inline scripts. three.js comes from node_modules
 (run `npm install` once)."""
 import os, re, sys
 
@@ -24,6 +24,7 @@ head = head.replace(tag, '<script>\n' + three + '\n</script>')
 out = (head
        + '\n<script id="shared">\n' + src('shared.js') + '\n</script>\n'
        + '<script>\n' + src('gpu.js') + '\n' + src('flip.js') + '\n</script>\n'
+       + '<script>\n' + src('presets.js') + '\n</script>\n'
        + '<script>\n' + src('app.js') + '\n</script>\n</body>\n</html>\n')
 os.makedirs(os.path.join(ROOT, 'dist'), exist_ok=True)
 dst = os.path.join(ROOT, 'dist', 'SplashTank.html')

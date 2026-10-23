@@ -96,37 +96,86 @@ function ptTriDist2(px, py, pz, a, b, c) {   // squared distance from a point to
 }
 // signed distance grid of a closed mesh. cell is the voxel size, margin how far outside the mesh the field stays exact.
 function buildSDF(mesh, cell, margin) {
+  // Signed distance grid of a closed mesh, built so it is quick enough to redo after every edit:
+  //  1. exact distances only near the surface: each triangle visits the cells within a band around it,
+  //  2. the rest by sweeping those distances outwards twice (chamfer distances, within a few percent of exact),
+  //  3. inside or outside from lines along x: where each line crosses the mesh, counted from the low end.
   cell = cell || 0.025; margin = margin === undefined ? 0.16 : margin;
   const bb = meshBounds(mesh), lo = bb.lo.map((x) => x - margin), hi = bb.hi.map((x) => x + margin);
   let dims = lo.map((x, k) => Math.ceil((hi[k] - x) / cell) + 1);
   while (dims[0] * dims[1] * dims[2] > 2.6e6) { cell *= 1.25; dims = lo.map((x, k) => Math.ceil((hi[k] - x) / cell) + 1); }
+  const nx = dims[0], ny = dims[1], nz = dims[2], nxy = nx * ny, N = nxy * nz, ic = 1 / cell;
   const { t } = meshTris(mesh), nt = t.length / 3, V = mesh.v;
-  const tri = [], tmin = [], tmax = [];
-  for (let i = 0; i < nt; i++) {
-    const a = V[t[i * 3]], b = V[t[i * 3 + 1]], c = V[t[i * 3 + 2]]; tri.push([a, b, c]);
-    tmin.push([Math.min(a[1], b[1], c[1]), Math.min(a[2], b[2], c[2])]); tmax.push([Math.max(a[1], b[1], c[1]), Math.max(a[2], b[2], c[2])]);
-  }
-  const data = new Float32Array(dims[0] * dims[1] * dims[2]);
-  const dir = [1, 0.0371, 0.0137];   // slanted ray, so it rarely grazes an edge
-  let idx = 0;
-  for (let k = 0; k < dims[2]; k++) for (let j = 0; j < dims[1]; j++) for (let i = 0; i < dims[0]; i++, idx++) {
-    const px = lo[0] + i * cell, py = lo[1] + j * cell, pz = lo[2] + k * cell;
-    let best = 1e30;
-    for (let q = 0; q < nt; q++) { const d2 = ptTriDist2(px, py, pz, tri[q][0], tri[q][1], tri[q][2]); if (d2 < best) best = d2; }
-    // inside test: count crossings of the ray p + s*dir (Moller Trumbore)
-    let hits = 0;
-    for (let q = 0; q < nt; q++) {
-      const a = tri[q][0], b = tri[q][1], c = tri[q][2];
-      const e1x = b[0] - a[0], e1y = b[1] - a[1], e1z = b[2] - a[2], e2x = c[0] - a[0], e2y = c[1] - a[1], e2z = c[2] - a[2];
-      const hx = dir[1] * e2z - dir[2] * e2y, hy = dir[2] * e2x - dir[0] * e2z, hz = dir[0] * e2y - dir[1] * e2x;
-      const det = e1x * hx + e1y * hy + e1z * hz; if (Math.abs(det) < 1e-12) continue;
-      const inv = 1 / det, sx = px - a[0], sy = py - a[1], sz = pz - a[2];
-      const u = inv * (sx * hx + sy * hy + sz * hz); if (u < 0 || u > 1) continue;
-      const qx = sy * e1z - sz * e1y, qy = sz * e1x - sx * e1z, qz = sx * e1y - sy * e1x;
-      const v = inv * (dir[0] * qx + dir[1] * qy + dir[2] * qz); if (v < 0 || u + v > 1) continue;
-      if (inv * (e2x * qx + e2y * qy + e2z * qz) > 0) hits++;
+  const data = new Float32Array(N).fill(1e30);
+  const B = 2.5 * cell, B2 = B * B;
+  for (let q = 0; q < nt; q++) {
+    const a = V[t[q * 3]], b = V[t[q * 3 + 1]], c = V[t[q * 3 + 2]];
+    const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+    let px = uy * vz - uz * vy, py = uz * vx - ux * vz, pz = ux * vy - uy * vx; const pl = Math.hypot(px, py, pz); if (pl > 0) { px /= pl; py /= pl; pz /= pl; }
+    const r = (k, f) => Math.max(0, Math.min(dims[k] - 1, f((Math[f === Math.floor ? 'min' : 'max'](a[k], b[k], c[k]) + (f === Math.floor ? -B : B) - lo[k]) * ic)));
+    const i0 = r(0, Math.floor), i1 = r(0, Math.ceil), j0 = r(1, Math.floor), j1 = r(1, Math.ceil), k0 = r(2, Math.floor), k1 = r(2, Math.ceil);
+    for (let k = k0; k <= k1; k++) {
+      const z = lo[2] + k * cell;
+      for (let j = j0; j <= j1; j++) {
+        const y = lo[1] + j * cell, base = j * nx + k * nxy;
+        for (let i = i0; i <= i1; i++) {
+          const x = lo[0] + i * cell;
+          if (pl > 0) { const e = (x - a[0]) * px + (y - a[1]) * py + (z - a[2]) * pz; if (e * e > B2) continue; }   // too far from the triangle's plane
+          const d2 = ptTriDist2(x, y, z, a, b, c), idx = base + i;
+          if (d2 < data[idx]) data[idx] = d2;
+        }
+      }
     }
-    const d = Math.sqrt(best); data[idx] = hits & 1 ? -d : d;
+  }
+  for (let i = 0; i < N; i++) if (data[i] < 1e29) data[i] = Math.sqrt(data[i]);
+  // sweep: forward over the 13 neighbours already passed, then backward over the other 13 (no bounds checks away from the edges)
+  const oi = new Int32Array(13), oj = new Int32Array(13), ok = new Int32Array(13), od = new Int32Array(13), ow = new Float32Array(13);
+  { let o = 0; for (let dk = -1; dk <= 0; dk++) for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) if (dk < 0 || dj < 0 || (dj === 0 && di < 0)) { oi[o] = di; oj[o] = dj; ok[o] = dk; od[o] = di + dj * nx + dk * nxy; ow[o] = cell * Math.hypot(di, dj, dk); o++; } }
+  for (let pass = 0; pass < 2; pass++) {
+    const sg = pass ? -1 : 1;
+    for (let kk = 0; kk < nz; kk++) {
+      const k = pass ? nz - 1 - kk : kk, kIn = k > 0 && k < nz - 1;
+      for (let jj = 0; jj < ny; jj++) {
+        const j = pass ? ny - 1 - jj : jj, jkIn = kIn && j > 0 && j < ny - 1, rowBase = j * nx + k * nxy;
+        for (let ii = 0; ii < nx; ii++) {
+          const i = pass ? nx - 1 - ii : ii, idx = rowBase + i;
+          let v = data[idx]; if (v <= B) continue;   // exact already
+          if (jkIn && i > 0 && i < nx - 1) {
+            for (let o = 0; o < 13; o++) { const c2 = data[idx + sg * od[o]] + ow[o]; if (c2 < v) v = c2; }
+          } else {
+            for (let o = 0; o < 13; o++) {
+              const ni = i + sg * oi[o], nj = j + sg * oj[o], nk = k + sg * ok[o];
+              if (ni < 0 || nj < 0 || nk < 0 || ni >= nx || nj >= ny || nk >= nz) continue;
+              const c2 = data[idx + sg * od[o]] + ow[o]; if (c2 < v) v = c2;
+            }
+          }
+          data[idx] = v;
+        }
+      }
+    }
+  }
+  // inside or outside: crossings of each line along x (nudged off the grid so it does not run exactly through an edge or corner)
+  const ey = 0.000137 * cell, ez = 0.000271 * cell, rows = new Array(ny * nz);
+  for (let q = 0; q < nt; q++) {
+    const a = V[t[q * 3]], b = V[t[q * 3 + 1]], c = V[t[q * 3 + 2]];
+    const area = (b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1]); if (Math.abs(area) < 1e-14) continue;   // edge-on to the lines
+    const jlo = Math.max(0, Math.ceil((Math.min(a[1], b[1], c[1]) - lo[1] - ey) * ic)), jhi = Math.min(ny - 1, Math.floor((Math.max(a[1], b[1], c[1]) - lo[1] - ey) * ic));
+    const klo = Math.max(0, Math.ceil((Math.min(a[2], b[2], c[2]) - lo[2] - ez) * ic)), khi = Math.min(nz - 1, Math.floor((Math.max(a[2], b[2], c[2]) - lo[2] - ez) * ic));
+    for (let k = klo; k <= khi; k++) {
+      const z = lo[2] + k * cell + ez;
+      for (let j = jlo; j <= jhi; j++) {
+        const y = lo[1] + j * cell + ey;
+        const w0 = ((c[1] - b[1]) * (z - b[2]) - (c[2] - b[2]) * (y - b[1])) / area, w1 = ((a[1] - c[1]) * (z - c[2]) - (a[2] - c[2]) * (y - c[1])) / area, w2 = 1 - w0 - w1;
+        if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+        const row = j + ny * k; (rows[row] || (rows[row] = [])).push(w0 * a[0] + w1 * b[0] + w2 * c[0]);
+      }
+    }
+  }
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) {
+    const xs = rows[j + ny * k]; if (!xs) continue;
+    xs.sort((p, q) => p - q);
+    let m = 0; const base = j * nx + k * nxy;
+    for (let i = 0; i < nx; i++) { const x = lo[0] + i * cell; while (m < xs.length && xs[m] < x) m++; if (m & 1) data[base + i] = -data[base + i]; }
   }
   return { id: SDF_ID++, dims, origin: lo, cell, data };
 }
