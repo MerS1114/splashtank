@@ -5,20 +5,23 @@
     if (benching || S.baking) return;
     if (S.engine !== 'flip') { bout.value = 'The benchmark times the FLIP solver. Pick FLIP in the Live solver panel first.'; return; }
     benching = true; const wasPlaying = S.playing, endMode = S.tl.end, opt0 = Object.assign({}, sim.opt), sub0 = [S.subMin, S.subMax];
+    // the moment measured: the playhead, so the timeline can be put just before the action (a meteor's impact); at the start, 2.5 s in
+    const atHead = S.tl.t > 0.05, W = atHead ? Math.round(S.tl.t * 60) : (window.__benchW || 150);
     S.subMin = 1; S.subMax = 1;   // one solver step per measured step
     setPlaying(false); S.tl.end = 'hold';
     const lines = [], say = (t) => { lines.push(t); bout.value = lines.join('\n'); bout.scrollTop = bout.scrollHeight; };
     const settle = () => sim.dev.queue.onSubmittedWorkDone();
     try {
-      say('Warming up, this fills the scene with water first...');
-      await sim.whenReady; resetSim(0);
-      for (let i = 0, W = window.__benchW || 150; i < W; i++) { stepOnce(); if (i % 10 === 9) await settle(); }
-      await settle();
+      // every run starts again from the start and simulates up to the measured moment, so each variant times the same part of the scene
+      const warmTo = async () => { resetSim(0); for (let i = 0; i < W; i++) { stepOnce(); if (i % 10 === 9) await settle(); } await settle(); };
+      say('Simulating up to ' + (W / 60).toFixed(2) + ' s, the moment to measure' + (atHead ? ' (the playhead)' : '') + '...');
+      await sim.whenReady; await warmTo();
       const N = sim.N, M = window.__benchM || 24, ST = ['sort', 'blocks', 'clear', 'p2g', 'classify', 'normFaces', 'divergence', 'pressure', 'project', 'g2p', 'spray'];
       const f1 = (v) => v.toFixed(2), mb = (v) => Math.round(v / 1048576);
       const BASE = { noFoam: false, noCull: false, noSolidCache: false, fastAir: false, sort: true, sortEvery: 16, iters: 0 };
       let lastSum = null;
       const measure = async (label, opt, quiet) => {
+        Object.assign(sim.opt, BASE); await warmTo();
         const { noDraw: nd, ...so } = opt; Object.assign(sim.opt, BASE, so); noDraw = !!nd;
         const sum = {}; lastSum = sum; let cpu = 0, tot = 0, onGpu = false;
         for (let r = 0; r < M; r++) {
@@ -26,6 +29,7 @@
           const t0 = performance.now(); stepOnce(); cpu += performance.now() - t0; delete sim.step;
           const t = await sim.stepTimed(cap.dt, cap.o); onGpu = !!t.gpu; for (const k in t) if (k !== 'gpu') sum[k] = (sum[k] || 0) + t[k];
         }
+        sim.gpuSteps = []; sim.gpuMs = 0;   // GPU busy time of the timed steps only, not the run up to the moment
         for (let r = 0; r < M; r++) { const t0 = performance.now(); stepOnce(); await settle(); tot += performance.now() - t0; }
         noDraw = false;
         if (quiet) return tot / M;
@@ -41,6 +45,7 @@
       const denseF = (sim.nx + 1) * sim.ny * sim.nz + sim.nx * (sim.ny + 1) * sim.nz + sim.nx * sim.ny * (sim.nz + 1);
       say('SplashTank benchmark');
       say('GPU: ' + (S.gpu && S.gpu.name) + '   Browser: ' + navigator.userAgent.replace(/^Mozilla\/5.0 /, '').slice(0, 90));
+      say('Measured from ' + (W / 60).toFixed(2) + ' s to ' + ((W + 2 * M) / 60).toFixed(2) + ' s of the scene' + (atHead || W !== 150 ? '' : ' (put the playhead just before the moment you want measured, then run it again)') + '; every run below starts again from the beginning, so they all time the same moment.');
       say('FLIP, ' + N + ' particles, spacing ' + sim.d.toFixed(3) + ', grid cell ' + sim.ratio.toFixed(1) + '× spacing');
       say('Box ' + sim.nx + ' × ' + sim.ny + ' × ' + sim.nz + ' = ' + sim.ncell + ' cells, ' + active + ' hold water (' + (100 * active / sim.ncell).toFixed(1) + '%)');
       { const gridMB = sim.scap * (512 * 40 + 12) / 1048576; say('Sparse grid: ' + sim.blocksUsed + ' blocks of 8×8×8 in use (' + (100 * sim.blocksUsed * 512 / sim.ncell).toFixed(1) + '% of the box), room for ' + sim.scap + ' = ' + gridMB.toFixed(gridMB < 10 ? 1 : 0) + ' MB. As a full grid it would be ' + mb(denseF * 8 + sim.ncell * 24) + ' MB. Everything on the GPU: about ' + mb(sim.memBytes()) + ' MB'); }
