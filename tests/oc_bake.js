@@ -1,0 +1,21 @@
+const {PAGE, OUT} = require('./paths');
+const chromium=require('@sparticuz/chromium').default; const puppeteer=require('puppeteer-core');
+const wait=(ms)=>new Promise(r=>setTimeout(r,ms));
+(async()=>{ const exe=await chromium.executablePath();
+ const br=await puppeteer.launch({executablePath:exe,args:[...chromium.args,'--enable-unsafe-webgpu','--enable-features=Vulkan,WebGPU','--use-webgpu-adapter=swiftshader','--use-angle=swiftshader','--ignore-gpu-blocklist','--allow-file-access-from-files'],headless:'shell'});
+ const pg=await br.newPage(); await pg.setViewport({width:1400,height:900}); const errs=[]; pg.on('console',m=>{const t=m.text(); if(/rror|nvalid|WGSL/i.test(t)) errs.push(t.slice(0,300));}); pg.on('pageerror',e=>errs.push(e.message));
+ await pg.goto('file://'+PAGE); await wait(5000);
+ await pg.select('#scene', 'Ocean'); await wait(2500);
+ await pg.evaluate(()=>document.querySelector('#s-res').closest('.row')._st.commit(0.08)); await wait(1000);
+ await pg.click('#seg-mode button[data-v=bake]'); await wait(300);
+ await pg.evaluate(()=>{ const s=document.querySelector('#b-dur'); s.value=1.5; s.dispatchEvent(new Event('input',{bubbles:true})); });
+ console.log('bake res', await pg.evaluate(()=>document.querySelector('#bake-res').textContent));
+ await pg.click('#btn-bake'); const t0=Date.now(); let st='';
+ while(Date.now()-t0<600000){ await wait(3000); st=await pg.evaluate(()=>document.querySelector('#bake-status').textContent); if(/Baked|failed|cancel/.test(st)) break; }
+ console.log('bake', st);
+ const info = await pg.evaluate(()=>{ const c=window.__splash.S.cache; return { F:c.frames.length, n0:c.frames[0].n, nL:c.frames[c.frames.length-1].n, ocean: c.desc && c.desc.ocean, nb: c.desc && c.desc.nb, d:c.d }; });
+ console.log('cache', JSON.stringify(info));
+ await pg.evaluate(()=>{ window.__splash.S.ct = 30; }); await wait(1500);
+ await pg.screenshot({path:OUT+'/oc_bake.png'});
+ console.log('errs', JSON.stringify(errs.slice(0,6)));
+ await br.close(); })().catch(async e=>{console.log('ERR',e.stack); process.exit(1);});

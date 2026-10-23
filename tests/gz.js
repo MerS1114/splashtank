@@ -1,0 +1,12 @@
+const {PAGE, OUT} = require('./paths');
+const chromium=require('@sparticuz/chromium').default; const puppeteer=require('puppeteer-core');
+const wait=(ms)=>new Promise(r=>setTimeout(r,ms));
+(async()=>{ const exe=await chromium.executablePath();
+ const br=await puppeteer.launch({executablePath:exe,args:[...chromium.args,'--enable-unsafe-webgpu','--enable-features=Vulkan,WebGPU','--use-webgpu-adapter=swiftshader','--use-angle=swiftshader','--ignore-gpu-blocklist','--allow-file-access-from-files'],headless:'shell'});
+ const pg=await br.newPage(); await pg.setViewport({width:1400,height:900});
+ await pg.goto('file://'+PAGE); await wait(5000);
+ const r = await pg.evaluate(()=>{ const e=document.querySelector('#c-gizmo'); const b=e.getBoundingClientRect(); const g=e.closest('.group'); return {x:b.x,y:b.y,w:b.width, closed:g.className, vis: !!e.offsetParent}; });
+ console.log(JSON.stringify(r));
+ await pg.click('#c-gizmo'); await wait(300);
+ console.log('after click', await pg.evaluate(()=>[window.__splash.S.gizmo, document.querySelector('#c-gizmo').checked, document.elementFromPoint(...(()=>{const b=document.querySelector('#c-gizmo').getBoundingClientRect(); return [b.x+b.width/2,b.y+b.height/2];})()).outerHTML.slice(0,120)]));
+ await br.close(); })();

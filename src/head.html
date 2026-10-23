@@ -1,0 +1,616 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Splash Tank</title>
+<style>
+/* Layout, Blender style: top bar with menus and the Live / Bake workspaces; tool shelf, viewport (with its header) and timeline in the middle;
+   outliner and the properties editor (vertical tabs) on the right. The right column, the outliner and the timeline can be resized by dragging the splitters. */
+:root {
+  --bg: #1d1d1d;
+  --top: #232323;
+  --hdr: #2c2c2c;
+  --panel: #2a2a2a;
+  --panel-2: #232323;
+  --sub: #303030;
+  --ph: #343434;
+  --line: #161616;
+  --line-2: #3a3a3a;
+  --fg: #e0e0e0;
+  --fg-2: #b3b3b3;
+  --dim: #8e8e8e;
+  --field: #545454;
+  --field-h: #5e5e5e;
+  --fill: #4772b3;
+  --blue: #4772b3;
+  --sel: #3b4b66;
+  --accent: #e9a43a;
+  --accent-ink: #1b1b1b;
+  --water: #5fc3f0;
+  --emit: #35d07f;
+  --warn: #ffb3a8;
+  --font-ui: Inter, 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: Consolas, 'Cascadia Mono', ui-monospace, monospace;
+  --rw: 360px; --oh: 190px; --kfh: 96px;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 400 12px var(--font-ui); overflow: hidden; }
+* { box-sizing: border-box; }
+svg { flex-shrink: 0; }
+.app { height: 100%; display: grid; grid-template-rows: 32px minmax(0, 1fr) 24px; }
+
+/* ---------- top bar ---------- */
+.topbar { display: flex; align-items: center; gap: 2px; padding: 0 8px; background: var(--top); border-bottom: 1px solid var(--line); min-width: 0; }
+.brand { display: flex; align-items: center; gap: 7px; padding-right: 10px; font-weight: 700; color: #f0f0f0; white-space: nowrap; }
+.brand small { font: 400 10.5px var(--font-mono); color: var(--dim); }
+.mn { background: transparent; border: 0; color: #d8d8d8; font: inherit; padding: 4px 8px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+.mn:hover, .mn[aria-expanded=true] { background: #3d3d3d; color: #fff; }
+.ws { flex: 1; display: flex; justify-content: center; gap: 2px; min-width: 0; }
+.ws button { height: 24px; padding: 0 14px; border-radius: 5px; border: 0; font: 500 12px var(--font-ui); background: transparent; color: #bdbdbd; cursor: pointer; }
+.ws button:hover { color: #fff; background: #2f2f2f; }
+.ws button[aria-pressed=true] { background: #3d3d3d; color: #fff; }
+.ws button:disabled { opacity: 0.45; cursor: default; }
+.tb-right { display: flex; align-items: center; gap: 6px; }
+.chip-live { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 11px; background: #2c3a2c; color: #a9dca9; font-size: 11px; white-space: nowrap; }
+.chip-live i { width: 7px; height: 7px; border-radius: 4px; background: #6fd36f; }
+
+/* ---------- buttons and fields ---------- */
+.btn {
+  font: 500 12px var(--font-ui); color: var(--fg); background: #3d3d3d;
+  border: 1px solid #2a2a2a; border-radius: 4px; padding: 3px 10px; min-height: 24px;
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap;
+}
+.btn:hover { background: #474747; }
+.btn:disabled { opacity: 0.45; cursor: default; }
+.btn:focus-visible, select:focus-visible, input:focus-visible, .seg button:focus-visible, .ib:focus-visible, .mn:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+.btn.primary:hover { background: #f2b252; }
+.btn.primary:disabled { background: #6b5a35; }
+svg[hidden] { display: none; }
+.btn svg { width: 11px; height: 11px; fill: currentColor; }
+.ib { width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; border-radius: 5px; border: 0; background: transparent; color: #cdcdcd; padding: 0; cursor: pointer; }
+.ib:hover { background: #3d3d3d; color: #fff; }
+.ib.on, .ib[aria-pressed=true] { background: #4f4f4f; color: #fff; }
+.ib.blue[aria-pressed=true] { background: var(--blue); }
+.ib:disabled { opacity: 0.4; cursor: default; }
+.ib svg { width: 15px; height: 15px; }
+.dd { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 6px; border-radius: 4px; background: #3a3a3a; border: 1px solid #474747; color: #e2e2e2; font: 12px var(--font-ui); cursor: pointer; }
+select.dd { padding: 0 4px; }
+select.dd option, select option { background: #2b2b2b; color: #e2e2e2; }
+.sel { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); }
+.sel select { font: 12px var(--font-ui); color: var(--fg); background: #3a3a3a; border: 1px solid #474747; border-radius: 4px; height: 22px; padding: 0 4px; cursor: pointer; }
+.tag { font: 400 11px var(--font-mono); color: var(--fg); background: #2f2f2f; border: 1px solid var(--line-2); border-radius: 4px; padding: 3px 8px; }
+.vsep { width: 1px; height: 18px; background: #444; margin: 0 4px; flex-shrink: 0; }
+
+/* ---------- main area ---------- */
+.main { display: flex; min-height: 0; min-width: 0; }
+.shelf { width: 40px; flex-shrink: 0; background: #282828; border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; gap: 3px; padding-top: 36px; overflow-y: auto; }
+.shelf .ib { width: 30px; height: 30px; }
+.shelf hr { width: 22px; border: 0; border-top: 1px solid #3a3a3a; margin: 4px 0; }
+.viewcol { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.vhead { height: 30px; flex-shrink: 0; display: flex; align-items: center; gap: 3px; padding: 0 6px; background: var(--hdr); border-bottom: 1px solid #1a1a1a; overflow: hidden; white-space: nowrap; }
+.vhead .grow { flex: 1; }
+.vhead .lbl { color: #9c9c9c; margin: 0 2px 0 4px; }
+.stage { position: relative; flex: 1; min-width: 0; min-height: 0; background: linear-gradient(180deg, #454545 0%, #333 100%); overflow: hidden; }
+.stage.black { background: linear-gradient(180deg, #08090a 0%, #181b1e 100%); }
+.stage.light { background: linear-gradient(180deg, #a2acb6 0%, #6c7780 100%); }
+#gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+.vp-info { position: absolute; left: 12px; top: 8px; line-height: 17px; color: #ececec; text-shadow: 0 1px 2px #000; pointer-events: none; }
+.vp-info div + div { color: #c9c9c9; }
+.hud { position: absolute; left: 12px; top: 46px; max-width: calc(100% - 180px); pointer-events: none; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.hud span { font: 400 11.5px var(--font-mono); color: var(--fg); background: rgba(24, 24, 24, 0.82); border: 1px solid #444; border-radius: 4px; padding: 3px 8px; }
+.hud span:empty { display: none; }
+.hud.editing #hud-mode { border-color: var(--accent); color: var(--accent); }
+.axisgiz { position: absolute; top: 8px; right: 14px; width: 96px; height: 96px; z-index: 3; touch-action: none; }
+.camtools { position: absolute; top: 110px; right: 48px; display: flex; flex-direction: column; gap: 6px; z-index: 3; }
+.camtools .ib { width: 28px; height: 28px; border-radius: 14px; background: rgba(0, 0, 0, 0.28); }
+.camtools .ib:hover { background: rgba(255, 255, 255, 0.16); }
+.camtools .pad { cursor: grab; touch-action: none; user-select: none; }
+.camtools .pad.on { background: rgba(255, 255, 255, 0.24); cursor: grabbing; }
+.vp-stats { position: absolute; right: 12px; bottom: 10px; display: flex; gap: 12px; align-items: center; font: 400 11px var(--font-mono); color: #c8c8c8; text-shadow: 0 1px 2px #000; pointer-events: none; }
+.vp-stats b { color: #f2f2f2; font-weight: 500; }
+.meter { width: 90px; height: 5px; background: rgba(0, 0, 0, 0.4); border-radius: 3px; overflow: hidden; }
+.meter i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #2160d6, #2aa0ea 60%, #fff); }
+.legend { position: absolute; left: 12px; bottom: 12px; padding: 7px 10px; border-radius: 6px; background: rgba(20, 20, 20, 0.62); display: flex; flex-direction: column; gap: 4px; pointer-events: none; }
+.legend b { font-weight: 600; color: #ececec; }
+.legend span { display: flex; align-items: center; gap: 7px; color: #d0d0d0; }
+.legend i { width: 9px; height: 9px; border-radius: 50%; }
+.boxsel { position: absolute; border: 1px dashed #ddd; background: rgba(255, 255, 255, 0.06); pointer-events: none; }
+.bar { display: flex; align-items: center; gap: 6px; }
+.stat { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* splitters */
+.split { flex-shrink: 0; background: var(--line); position: relative; z-index: 4; }
+.split.v { width: 4px; cursor: col-resize; }
+.split.h { height: 4px; cursor: row-resize; }
+.split:hover, .split.on { background: #4a4a4a; }
+
+/* ---------- timeline ---------- */
+.kf { flex-shrink: 0; background: #262626; font: 400 11px var(--font-mono); color: var(--dim); user-select: none; }
+.kf-head { display: flex; align-items: center; gap: 4px; height: 30px; padding: 0 8px; border-bottom: 1px solid #1c1c1c; font-family: var(--font-ui); overflow: hidden; white-space: nowrap; }
+.kf-head .grow { flex: 1; }
+.kf-head .ib { width: 24px; height: 24px; }
+.kf-head .ib svg { width: 12px; height: 12px; }
+.kf-head .seg button { height: 22px; padding: 0 8px; font-size: 11.5px; }
+.tog { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px; border-radius: 4px; background: #3a3a3a; border: 1px solid #474747; color: #e2e2e2; cursor: pointer; font: 12px var(--font-ui); }
+.tog input { position: absolute; opacity: 0; width: 0; height: 0; }
+.tog i { width: 8px; height: 8px; border-radius: 4px; background: #6a6a6a; }
+.tog:has(input:checked) i { background: #e0494f; }
+.tog:has(input:focus-visible) { outline: 2px solid var(--blue); }
+.kf-dur { display: inline-flex; align-items: center; gap: 5px; color: #9c9c9c; }
+.kf-dur input[type=number] { width: 56px; height: 22px; font: 400 11.5px var(--font-mono); color: var(--fg); background: #3d3d3d; border: 1px solid #4a4a4a; border-radius: 4px; padding: 0 5px; text-align: center; }
+#kf-time { color: #cfcfcf; margin: 0 6px; }
+.kf-body { display: grid; grid-template-columns: 96px minmax(0, 1fr); height: var(--kfh); overflow-y: auto; }
+.kf.collapsed .kf-body { display: none; }
+.kf-names > div { height: 22px; line-height: 22px; padding-left: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c2c2c2; cursor: pointer; font-family: var(--font-ui); }
+.kf-names > div.spacer { height: 18px; cursor: default; }
+.kf-names > div.cur { color: #f2c06e; }
+.kf-names > div.spacer.c { height: 11px; }
+.kf-tracks { position: relative; margin: 0 14px 0 6px; }
+.kf-ruler { height: 18px; position: relative; border-bottom: 1px solid #333; cursor: ew-resize; }
+.kf-ruler span { position: absolute; top: 3px; transform: translateX(-50%); font-size: 10px; color: #9a9a9a; pointer-events: none; }
+.kf-ruler i { position: absolute; bottom: 0; width: 1px; height: 4px; background: #666; pointer-events: none; }
+.kf-row { height: 22px; position: relative; border-bottom: 1px solid #2e2e2e; background: #2c2c2c; cursor: ew-resize; }
+.kf-row.cur { background: #33302a; }
+.kf-key { position: absolute; top: 6px; width: 10px; height: 10px; margin-left: -5px; transform: rotate(45deg); background: #c8c8c8; border: 1px solid #111; cursor: ew-resize; }
+.kf-key.emitter { background: #35d07f; }
+.kf-key.cur { background: var(--accent); border-color: #fff; }
+.kf-cache { position: relative; height: 11px; border-bottom: 1px solid #333; cursor: ew-resize; }
+.kf-cache i { position: absolute; left: 0; width: 0; border-radius: 1px; }
+.kf-cache i[hidden] { display: none; }
+#bk-bar, #bk-prog { top: 1px; height: 3px; }
+#bk-bar { background: #9b7be0; cursor: pointer; }
+#bk-prog { background: repeating-linear-gradient(135deg, #e9a43a 0 5px, #9c6514 5px 10px); }
+#lc-bar, #lc-stale { top: 5px; height: 4px; pointer-events: none; }
+#lc-bar { background: #3f86d9; }
+#lc-stale { background: #c27a2c; }
+.kf-ph { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--accent); pointer-events: none; z-index: 2; }
+.tl-cache { flex-shrink: 0; display: flex; align-items: center; gap: 12px; padding: 6px 12px; background: #262626; font: 400 11px var(--font-mono); color: var(--dim); }
+.tl-cache b { color: var(--fg); font-weight: 500; }
+.scrub { position: relative; flex: 1 1 220px; min-width: 120px; padding-bottom: 15px; }
+.scrub input { width: 100%; display: block; accent-color: var(--accent); }
+.ticks { position: absolute; left: 8px; right: 8px; bottom: 0; height: 14px; pointer-events: none; }
+.ticks span { position: absolute; top: 0; transform: translateX(-50%); font: 400 10px var(--font-mono); color: var(--dim); }
+.ticks span::before { content: ""; position: absolute; left: 50%; top: -3px; width: 1px; height: 3px; background: var(--dim); }
+
+/* ---------- right column: outliner and properties ---------- */
+.rightcol { width: var(--rw); flex-shrink: 0; display: flex; flex-direction: column; background: var(--panel); min-height: 0; }
+.outliner { height: var(--oh); flex-shrink: 0; display: flex; flex-direction: column; min-height: 0; }
+.ol-head { height: 30px; flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding: 0 6px 0 10px; background: var(--hdr); }
+.ol-head b { font-weight: 600; color: #e6e6e6; }
+.ol-list { flex: 1; overflow-y: auto; padding: 4px; display: flex; flex-direction: column; gap: 1px; }
+.orow { display: flex; align-items: center; gap: 6px; height: 22px; padding: 0 6px; border-radius: 3px; color: #e6e6e6; cursor: pointer; border: 0; background: transparent; font: 12px var(--font-ui); text-align: left; width: 100%; min-width: 0; }
+.orow:hover { background: #333; }
+.orow[aria-pressed=true] { background: var(--sel); }
+.orow.active .nm { color: #ffd28a; font-weight: 600; }
+.orow .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.orow .sub { color: #8f8f8f; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+.orow[aria-pressed=true] .sub { color: #c4cbd6; }
+.orow.ind { padding-left: 24px; }
+.orow.ind2 { padding-left: 40px; cursor: default; }
+.orow.ind2:hover { background: transparent; }
+.orow .num2 { font: 11px var(--font-mono); color: #9fb6d6; }
+.orow .eye { width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; border-radius: 3px; color: #bbb; }
+.orow .eye:hover { background: #4a4a4a; }
+.orow.hid .nm, .orow.hid .sub { opacity: 0.45; }
+.orow input.rename { font: 12px var(--font-ui); color: #fff; background: #1e1e1e; border: 1px solid var(--blue); border-radius: 3px; padding: 0 4px; height: 18px; width: 110px; }
+.props { flex: 1; display: flex; min-height: 0; }
+.ptabs { width: 34px; flex-shrink: 0; background: #232323; display: flex; flex-direction: column; align-items: center; gap: 4px; padding-top: 8px; }
+.ptabs .ib { width: 28px; height: 28px; }
+.ptabs .ib[aria-pressed=true] { background: #3e3e3e; color: var(--water); }
+
+.panel { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; background: var(--panel); padding: 8px 8px 24px; display: flex; flex-direction: column; gap: 6px; }
+.panel > * { flex-shrink: 0; }
+.crumb { display: flex; align-items: center; gap: 6px; color: #bdbdbd; min-height: 22px; }
+.crumb b { color: #ececec; font-weight: 600; }
+.crumb i { color: #6f6f6f; font-style: normal; }
+.crumb .grow { flex: 1; }
+.panel > .psearch { position: sticky; top: -8px; z-index: 3; background: var(--panel); padding: 4px 0 2px; margin-top: -4px; }
+.psearch input { width: 100%; font: 12px var(--font-ui); color: var(--fg); background: #1f1f1f; border: 1px solid var(--line-2); border-radius: 11px; height: 22px; padding: 0 10px; }
+.psearch input:focus { border-color: var(--blue); outline: none; }
+.panel:not(.searching) .group:not([data-ptab~=all]) { display: none; }
+.panel:not(.searching)[data-ptab=scene] .group[data-ptab~=scene],
+.panel:not(.searching)[data-ptab=object] .group[data-ptab~=object],
+.panel:not(.searching)[data-ptab=sim] .group[data-ptab~=sim],
+.panel:not(.searching)[data-ptab=bake] .group[data-ptab~=bake],
+.panel:not(.searching)[data-ptab=display] .group[data-ptab~=display],
+.panel:not(.searching)[data-ptab=perf] .group[data-ptab~=perf],
+.panel:not(.searching)[data-ptab=help] .group[data-ptab~=help] { display: flex; }
+.tab { display: flex; flex-direction: column; gap: 6px; }
+.group { display: flex; flex-direction: column; gap: 5px; border-radius: 4px; background: var(--sub); padding: 0 0 8px; }
+.group > h2 { margin: 0; display: flex; align-items: center; gap: 7px; height: 26px; padding: 0 8px; background: var(--ph); border-radius: 4px 4px 0 0; font: 600 12px var(--font-ui); color: #ececec; cursor: pointer; user-select: none; }
+.group > h2::before { content: ""; width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #ccc; transition: transform 0.12s; }
+.group.closed > h2::before { transform: rotate(-90deg); }
+.group.closed > :not(h2) { display: none !important; }
+.group.closed { gap: 0; padding-bottom: 0; }
+.group.closed > h2 { border-radius: 4px; background: #2f2f2f; color: #c9c9c9; font-weight: 500; }
+.group > h2:hover { background: #3b3b3b; }
+.group > :not(h2) { margin-left: 8px; margin-right: 8px; }
+.group > h2 + * { margin-top: 4px; }
+.row { display: grid; grid-template-columns: minmax(60px, 34%) minmax(0, 1fr); align-items: center; column-gap: 8px; min-height: 22px; }
+.row > label { color: var(--fg-2); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row.nd > label { font-weight: 600; color: #f6f6f6; }
+/* Blender style number field: a dark box with the value in the middle and a blue fill for where it sits in its range. Drag sideways to change it, click to type. */
+.num { position: relative; height: 22px; min-width: 0; border-radius: 4px; background: var(--field); overflow: hidden; cursor: ew-resize; }
+.num:hover { background: var(--field-h); }
+.num input[type=range] { -webkit-appearance: none; appearance: none; position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; background: linear-gradient(90deg, var(--fill) 0 var(--p, 0%), transparent var(--p, 0%)); cursor: ew-resize; touch-action: none; }
+.num input[type=range]::-webkit-slider-runnable-track { height: 100%; background: transparent; border: 0; }
+.num input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 1px; height: 22px; background: transparent; border: 0; }
+.num input[type=range]::-moz-range-track { height: 100%; background: transparent; border: 0; }
+.num input[type=range]::-moz-range-thumb { width: 1px; height: 22px; background: transparent; border: 0; }
+.num input[type=range]:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.num output { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font: 400 11.5px var(--font-mono); color: #f2f2f2; pointer-events: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.num.dragging { background: var(--field-h); }
+input.typed { position: absolute; inset: 0; width: 100%; height: 100%; font: 400 11.5px var(--font-mono); background: #1e1e1e; color: #fff; border: 1px solid #7a9cc9; border-radius: 4px; padding: 0 8px; text-align: left; z-index: 2; }
+input[type=range] { accent-color: var(--blue); }
+.row.plain { grid-template-columns: minmax(60px, 34%) minmax(0, 1fr); }
+.row.plain > input[type=checkbox] { justify-self: start; }
+input[type=checkbox] { -webkit-appearance: none; appearance: none; width: 14px; height: 14px; margin: 0; border-radius: 3px; background: #545454; border: 1px solid #3a3a3a; cursor: pointer; display: inline-grid; place-content: center; flex-shrink: 0; }
+input[type=checkbox]:checked { background: var(--blue); border-color: var(--blue); }
+input[type=checkbox]:checked::after { content: ""; width: 7px; height: 4px; border-left: 2px solid #fff; border-bottom: 2px solid #fff; transform: translateY(-1px) rotate(-45deg); }
+input[type=checkbox]:disabled { opacity: 0.5; cursor: default; }
+.row.sel select { font: 12px var(--font-ui); color: var(--fg); background: #3d3d3d; border: 1px solid #4a4a4a; border-radius: 4px; height: 22px; padding: 0 4px; min-width: 0; }
+.seg { display: inline-flex; border-radius: 4px; overflow: hidden; gap: 1px; background: #262626; }
+.seg.wide { display: flex; }
+.seg.wide button { flex: 1; }
+.seg button { font: 400 12px var(--font-ui); color: #dcdcdc; background: #545454; border: 0; padding: 0 9px; cursor: pointer; height: 22px; white-space: nowrap; }
+.seg button:hover { background: #5e5e5e; }
+.seg button[aria-pressed=true] { background: var(--blue); color: #fff; }
+.seg button:disabled { opacity: 0.5; cursor: default; }
+.row > .seg, .sub-body .row > .seg { display: flex; min-width: 0; }
+.row > .seg > button { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; padding: 0 4px; font-size: 11.5px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.adders { display: flex; flex-wrap: wrap; gap: 6px; }
+.pos { font: 400 11px var(--font-mono); color: #9aa4b0; line-height: 1.5; }
+.pos b { color: var(--fg); font-weight: 400; }
+.pos.warn { color: var(--warn); }
+.params { display: flex; flex-direction: column; gap: 5px; }
+.check { display: flex; align-items: center; gap: 8px; cursor: pointer; color: var(--fg); }
+.danger { color: var(--warn); }
+.hint { color: var(--dim); font-size: 12px; line-height: 1.45; margin: 0; max-width: 60ch; }
+.scene-text { width: 100%; font: 400 11px var(--font-mono); background: #1f1f1f; color: var(--fg); border: 1px solid var(--line-2); border-radius: 4px; padding: 8px; resize: vertical; }
+.progress { height: 6px; background: #1a1a1a; border-radius: 3px; overflow: hidden; }
+.progress i { display: block; height: 100%; width: 0; background: var(--accent); }
+.btnrow { display: flex; flex-wrap: wrap; gap: 4px; }
+.panel .btn.flat { background: #3d3d3d; }
+.panel .btn.flat:hover { background: #474747; }
+.group textarea { width: 100%; font: 400 11px var(--font-mono); color: var(--fg); background: #1f1f1f; border: 1px solid var(--line-2); border-radius: 4px; padding: 6px; margin-top: 4px; resize: vertical; }
+.row.face { grid-template-columns: 70px minmax(0, 1fr) auto; }
+.row.face input[type=number], .row.vec input { width: 100%; min-width: 0; height: 22px; font: 400 11.5px var(--font-mono); color: #f2f2f2; background: var(--field); border: 0; border-radius: 4px; padding: 0 6px; text-align: center; }
+.row.vec { grid-template-columns: 70px repeat(3, minmax(0, 1fr)); column-gap: 3px; }
+.row.vec > label { text-align: right; padding-right: 5px; }
+details.sub { border-radius: 4px; background: rgba(0, 0, 0, 0.1); }
+details.sub > summary { list-style: none; cursor: pointer; user-select: none; display: flex; align-items: center; gap: 7px; height: 24px; padding: 0 8px; font-weight: 500; font-size: 12px; color: #d6d6d6; border-radius: 4px; background: #383838; }
+details.sub[open] > summary { font-weight: 600; color: #ececec; border-radius: 4px 4px 0 0; }
+details.sub > summary::-webkit-details-marker { display: none; }
+details.sub > summary::before { content: ""; width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #bbb; transform: rotate(-90deg); transition: transform 0.12s; }
+details.sub[open] > summary::before { transform: none; }
+details.sub > summary:hover { background: #404040; }
+.sub-body { display: flex; flex-direction: column; gap: 5px; padding: 7px 6px 8px 6px; }
+.addmenu { position: fixed; z-index: 20; display: flex; flex-direction: column; background: #191919; border: 1px solid #444; border-radius: 6px; min-width: 190px; padding: 4px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+.addmenu .mi { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 2px; }
+.addmenu .mi.water { background: var(--water); border-radius: 50% 50% 50% 0; transform: rotate(-45deg); }
+.addmenu .mi.emit { background: var(--emit); border-radius: 50%; }
+.addmenu .mi.col { background: #9ba1a7; }
+.addmenu .btn { border: 0; border-radius: 4px; background: transparent; min-height: 24px; justify-content: flex-start; font-weight: 400; }
+.addmenu .btn:hover, .addmenu .btn:focus-visible { background: var(--sel); outline: none; }
+.addmenu b { font: 600 10.5px var(--font-ui); text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); padding: 6px 10px 2px; }
+kbd { font: 500 10px var(--font-mono); color: #e8e8e8; background: #3c3c3c; border: 1px solid #545454; border-radius: 3px; padding: 0 4px; }
+.keys { font: 400 11.5px var(--font-ui); color: #c2c2c2; line-height: 1.75; margin: 0; padding: 0 2px; list-style: none; }
+[data-tip] { cursor: help; }
+.row label[data-tip], .group > h2[data-tip], .btn[data-tip], label.btn[data-tip] { cursor: pointer; }
+.row label[for][data-tip] { cursor: default; }
+.tip { position: fixed; z-index: 30; max-width: 320px; padding: 9px 11px; border-radius: 6px; background: #191919; border: 1px solid #444; box-shadow: 0 6px 20px rgba(0,0,0,0.5); font: 400 12px/1.45 var(--font-ui); color: #c8c8c8; pointer-events: none; display: flex; flex-direction: column; gap: 5px; }
+.tip b { color: #f2f2f2; font-weight: 600; }
+.tip .tk { font: 400 10.5px var(--font-mono); color: #9a9a9a; }
+.ctx, .menu { position: fixed; z-index: 30; min-width: 220px; padding: 4px; border-radius: 6px; background: #191919; border: 1px solid #444; box-shadow: 0 6px 20px rgba(0,0,0,0.5); display: flex; flex-direction: column; }
+.ctx button, .menu button { display: flex; justify-content: space-between; align-items: center; gap: 18px; font: 400 12px var(--font-ui); color: #e2e2e2; background: transparent; border: 0; border-radius: 4px; height: 24px; padding: 0 10px; cursor: pointer; text-align: left; white-space: nowrap; }
+.ctx button:hover:not(:disabled), .ctx button:focus-visible, .menu button:hover:not(:disabled), .menu button:focus-visible { background: var(--sel); outline: none; }
+.ctx button:disabled, .menu button:disabled { color: #636363; cursor: default; }
+.ctx button span, .menu button span { font: 400 10.5px var(--font-mono); color: #9a9a9a; }
+.ctx hr, .menu hr { border: 0; border-top: 1px solid #333; margin: 3px 2px; width: auto; }
+.menu .mh { font: 600 10.5px var(--font-ui); text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); padding: 5px 10px 2px; }
+.status { display: flex; align-items: center; gap: 14px; padding: 0 10px; background: var(--top); border-top: 1px solid var(--line); font: 400 11px var(--font-ui); color: #b9b9b9; white-space: nowrap; overflow: hidden; }
+.status .grow { flex: 1; }
+.status .h { display: inline-flex; align-items: center; gap: 5px; }
+#st-right { font: 400 10.5px var(--font-mono); color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
+#st-right .stale { color: #e0a060; }
+.panel.searching .group .pos, .panel.searching .group .btnrow, .panel.searching .group .chips, .panel.searching .group .adders, .panel.searching .group textarea, .panel.searching .group h3 { display: none !important; }
+.sx { display: none !important; }
+.psearch-none { font: 400 11px var(--font-mono); color: var(--dim); }
+#g-file { flex-direction: row; flex-wrap: wrap; padding: 8px; gap: 4px; }
+
+@media (max-width: 860px) {
+  .app { grid-template-rows: 32px minmax(0, 1fr) 0; }
+  .main { flex-direction: column; }
+  .shelf, .split.v, .menus, .brand small, .chip-live { display: none; }
+  .rightcol { width: auto; height: 46%; flex-shrink: 0; }
+  .outliner { height: 110px; }
+  .vhead .hide-narrow { display: none; }
+  .status { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="app">
+  <header class="topbar">
+    <div class="brand"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#e9a43a" stroke-width="1.6" aria-hidden="true"><path d="M8 1.8c2.4 3 4.4 5.3 4.4 7.6A4.4 4.4 0 0 1 3.6 9.4C3.6 7.1 5.6 4.8 8 1.8z"/></svg>SplashTank <small id="subtitle">FLIP · GPU</small></div>
+    <nav class="menus" aria-label="Menus">
+      <button class="mn" type="button" data-menu="file" aria-haspopup="menu">File</button>
+      <button class="mn" type="button" data-menu="edit" aria-haspopup="menu">Edit</button>
+      <button class="mn" type="button" data-menu="add" aria-haspopup="menu">Add</button>
+      <button class="mn" type="button" data-menu="view" aria-haspopup="menu">View</button>
+      <button class="mn" type="button" data-menu="help" aria-haspopup="menu">Help</button>
+    </nav>
+    <div class="ws" id="seg-mode" role="group" aria-label="Workspace">
+      <button type="button" data-v="live" aria-pressed="true" data-tip="Live: simulate and set up the scene in real time.">Live</button>
+      <button type="button" data-v="bake" aria-pressed="false" data-tip="Bake: run the whole shot at full quality into a cache, then play it back.">Bake</button>
+    </div>
+    <div class="tb-right">
+      <span class="chip-live" id="chip-live"><i></i><span id="chip-live-t">Live</span></span>
+      <div class="bar" id="bar-live">
+        <label class="sel" for="scene"><span>Scene</span>
+          <select id="scene">
+            <option>Wave tank</option>
+            <option>Dam break</option>
+            <option>Waterfall</option>
+            <option>Cascade</option>
+            <option>Meteor lake</option>
+            <option>Ocean</option>
+            <option>Fountain</option>
+          </select>
+        </label>
+        <button class="btn primary" id="btn-play" type="button" aria-pressed="true" data-tip="Run or stop the live simulation (Space).">
+          <svg id="ico-pause" viewBox="0 0 14 14" aria-hidden="true"><rect x="2" y="1" width="3.6" height="12"/><rect x="8.4" y="1" width="3.6" height="12"/></svg>
+          <svg id="ico-play" viewBox="0 0 14 14" aria-hidden="true" hidden><path d="M2 1 L13 7 L2 13 Z"/></svg>
+          <span id="play-label">Stop</span>
+        </button>
+        <button class="ib" id="btn-reset" type="button" aria-label="Reset" data-tip="Reset: back to the start of the shot with fresh particles.">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 8a5 5 0 1 0 1.6-3.7M3 2.5v2.8h2.8"/></svg>
+        </button>
+      </div>
+      <div class="bar" id="bar-cache" hidden>
+        <span class="tag" id="cache-tag">baked cache</span>
+        <button class="btn primary" id="btn-cplay" type="button" aria-pressed="true">
+          <svg id="ico-cpause" viewBox="0 0 14 14" aria-hidden="true"><rect x="2" y="1" width="3.6" height="12"/><rect x="8.4" y="1" width="3.6" height="12"/></svg>
+          <svg id="ico-cplay" viewBox="0 0 14 14" aria-hidden="true" hidden><path d="M2 1 L13 7 L2 13 Z"/></svg>
+          <span id="cplay-label">Pause</span>
+        </button>
+        <button class="ib" id="btn-crewind" type="button" aria-label="Rewind the cache"><svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M2 2h1.6v10H2zM12 2v10L4.5 7z"/></svg></button>
+      </div>
+    </div>
+  </header>
+
+  <div class="main" id="main">
+    <div class="shelf" id="shelf" role="toolbar" aria-label="Tools">
+      <button class="ib" type="button" data-tool="select" aria-pressed="true" data-tip="Select box: click to select, drag to box select. Moving is done with G, R, S or one of the transform tools." aria-label="Select box"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M3.5 2l9 5.2-4 1-2 4.3z"/></svg></button>
+      <button class="ib" type="button" data-tool="move" aria-pressed="false" data-tip="Move tool: arrows on the selection move it along an axis, the centre moves it freely." aria-label="Move tool"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M8 1.5v13M1.5 8h13M8 1.5l-2 2M8 1.5l2 2M8 14.5l-2-2M8 14.5l2-2M1.5 8l2-2M1.5 8l2 2M14.5 8l-2-2M14.5 8l-2 2"/></svg></button>
+      <button class="ib" type="button" data-tool="rotate" aria-pressed="false" data-tip="Rotate tool: drag a ring to turn the selection about that axis." aria-label="Rotate tool"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5v2.5h-2.5"/></svg></button>
+      <button class="ib" type="button" data-tool="scale" aria-pressed="false" data-tip="Scale tool: drag a small cube to stretch along that axis." aria-label="Scale tool"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="2" y="7" width="7" height="7"/><path d="M8 8l6-6M10 2h4v4"/></svg></button>
+      <button class="ib" type="button" data-tool="transform" aria-pressed="false" data-tip="Transform tool: arrows, rings and cubes together." aria-label="Transform tool"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v11M2.5 8h11"/></svg></button>
+      <hr>
+      <button class="ib" type="button" id="sh-water" data-tip="Add water: a box of water (more in Shift+A)." aria-label="Add water"><svg viewBox="0 0 16 16" fill="none" stroke="#5fc3f0" stroke-width="1.4" aria-hidden="true"><path d="M7 2c2 2.6 3.6 4.4 3.6 6.3a3.6 3.6 0 0 1-7.2 0C3.4 6.4 5 4.6 7 2zM13 10v4M11 12h4"/></svg></button>
+      <button class="ib" type="button" id="sh-emitter" data-tip="Add a source that pours water." aria-label="Add source"><svg viewBox="0 0 16 16" fill="none" stroke="#5fc3f0" stroke-width="1.4" aria-hidden="true"><circle cx="4" cy="8" r="2.2"/><path d="M7.5 8h7M11.5 5l3 3-3 3"/></svg></button>
+      <button class="ib" type="button" id="sh-collider" data-tip="Add a collider cube." aria-label="Add collider"><svg viewBox="0 0 16 16" fill="none" stroke="#bdbdbd" stroke-width="1.4" aria-hidden="true"><path d="M8 1.8l5.5 3v6.4L8 14.2l-5.5-3V4.8zM8 8l5.5-3.2M8 8v6.2M8 8L2.5 4.8"/></svg></button>
+      <button class="ib" type="button" id="btn-drop" data-tip="Drop a blob of water from above." aria-label="Drop blob"><svg viewBox="0 0 16 16" fill="none" stroke="#5fc3f0" stroke-width="1.4" aria-hidden="true"><path d="M8 1.5v4M6 4l2 2 2-2"/><circle cx="8" cy="11" r="3.2"/></svg></button>
+    </div>
+
+    <div class="viewcol" id="viewcol">
+      <div class="vhead" id="vhead">
+        <select class="dd" id="vh-mode" aria-label="Interaction mode" data-tip="Object Mode moves whole objects. Edit Mode (Tab) edits the shape of a collider."><option value="object">Object Mode</option><option value="edit">Edit Mode</option></select>
+        <button class="mn" type="button" data-menu="view" aria-haspopup="menu">View</button>
+        <button class="mn" type="button" data-menu="select" aria-haspopup="menu">Select</button>
+        <button class="mn" type="button" data-menu="add" aria-haspopup="menu">Add</button>
+        <button class="mn" type="button" data-menu="object" aria-haspopup="menu">Object</button>
+        <span class="grow"></span>
+        <select class="dd hide-narrow" id="vh-orient" aria-label="Transform orientation" data-tip="Transform orientation. Global: X, Y and Z are the scene's axes. Local: the selected object's own axes, so moving, rotating and scaling follow how it is turned. Pressing an axis key twice while moving switches to the other one."><option value="global">Global</option><option value="local">Local</option></select>
+        <button class="ib blue" type="button" id="vh-snap" aria-pressed="false" aria-label="Snap" data-tip="Snapping (Shift+Tab). Holding Ctrl while moving flips it for the moment."><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M3 2v6a5 5 0 0 0 10 0V2h-3v6a2 2 0 0 1-4 0V2zM3 5h3M10 5h3"/></svg></button>
+        <select class="dd hide-narrow" id="vh-snapto" aria-label="Snap to" data-tip="What snapping goes to: Increment rounds to 0.1 m (5°, 0.1×); Vertex, Edge centre and Face centre land the closest moving point exactly on the nearest one under the mouse."><option value="increment">Increment</option><option value="vertex">Vertex</option><option value="edge">Edge centre</option><option value="face">Face centre</option></select>
+        <span class="vsep"></span>
+        <span class="lbl hide-narrow">Colour by</span>
+        <select class="dd" id="vh-colby" aria-label="Colour by"><option value="speed">Speed</option><option value="type">Type</option></select>
+        <button class="ib on" type="button" id="vh-spray" aria-pressed="true" aria-label="Show spray" data-tip="Show spray and mist."><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="4" cy="10" r="1.3"/><circle cx="8" cy="5" r="1.3"/><circle cx="12" cy="9" r="1.3"/><circle cx="7" cy="12" r="1"/><circle cx="11" cy="3" r="1"/></svg></button>
+        <button class="ib on" type="button" id="vh-handles" aria-pressed="true" aria-label="Box handles" data-tip="Show the arrows on the box faces, for resizing the box by dragging."><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M2 5l6-3 6 3v6l-6 3-6-3zM8 8v6M8 8l6-3M8 8L2 5"/></svg></button>
+      </div>
+      <section class="stage" id="stage">
+        <canvas id="gl" aria-label="3D fluid viewport"></canvas>
+        <div class="vp-info" id="vp-info"><div id="vp-view">User Perspective</div><div id="vp-sub"></div></div>
+        <canvas class="axisgiz" id="axisgiz" title="Click an axis to look along it (orthographic). Click the middle to switch perspective and orthographic."></canvas>
+        <div class="camtools" id="camtools" aria-label="Camera tools">
+          <button class="ib pad" type="button" data-pad="zoom" title="Drag up or down to zoom" aria-label="Zoom"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5l4 4"/></svg></button>
+          <button class="ib pad" type="button" data-pad="pan" title="Drag to pan" aria-label="Pan"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M5 9V4.5a1 1 0 0 1 2 0V8M7 8V3a1 1 0 0 1 2 0v5M9 8V4a1 1 0 0 1 2 0v5M11 9V6a1 1 0 0 1 2 0v4c0 3-2 4.5-4.5 4.5S5 13 4 11.5L2.6 9a1 1 0 0 1 1.7-1L5 9"/></svg></button>
+          <button class="ib pad" type="button" data-pad="orbit" title="Drag to orbit" aria-label="Orbit"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><ellipse cx="8" cy="8" rx="6.5" ry="3"/><circle cx="8" cy="8" r="1.6"/></svg></button>
+          <button class="ib" type="button" data-act="ortho" title="Perspective or orthographic (numpad 5)" aria-label="Toggle orthographic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M2 2h12v12H2zM2 6h12M2 10h12M6 2v12M10 2v12"/></svg></button>
+          <button class="ib" type="button" data-act="focus" title="Frame the selection (F or numpad .)" aria-label="Focus the selection"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3"/></svg></button>
+          <button class="ib" type="button" data-act="all" title="Frame the whole box (Home)" aria-label="Frame all"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg></button>
+        </div>
+        <div class="hud" id="hud"><span id="hud-mode"></span><span id="hud-op"></span></div>
+        <div class="boxsel" id="boxsel" hidden></div>
+        <div class="legend" id="legend" hidden><b>Type</b>
+          <span><i style="background:#2975f5"></i>Water</span><span><i style="background:#f7f7f7"></i>White water</span><span><i style="background:#ff9929"></i>Spray</span><span><i style="background:#db8fff"></i>Mist</span><span><i style="background:#123385"></i>Deep water (narrow band)</span>
+        </div>
+        <div class="vp-stats" id="tl-live">
+          <span>Frame <b id="frame">0001</b></span>
+          <span class="stat"><b id="count">0</b> / <span id="capshow">6000</span> pts</span>
+          <div class="meter" aria-hidden="true"><i id="meter"></i></div>
+          <span class="stat">solve <b id="ms">0.0</b> ms</span>
+          <span class="stat"><b id="fps">0</b> fps</span>
+        </div>
+      </section>
+      <div class="split h" id="sp-tl" role="separator" aria-orientation="horizontal" aria-label="Resize the timeline" tabindex="0"></div>
+      <div class="kf" id="kf">
+        <div class="kf-head">
+          <button class="ib" id="kf-rewind" type="button" title="Back to the start and clear the particles" aria-label="Back to the start"><svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M2 2h1.6v10H2zM12 2v10L4.5 7z"/></svg></button>
+          <button class="ib" id="kf-prev" type="button" title="Previous key (Down arrow)" aria-label="Previous key"><svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M10 2v10L3 7z"/></svg></button>
+          <button class="ib" id="kf-play" type="button" title="Play or stop (Space)" aria-label="Play or stop"><svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M3 1.5l9 5.5-9 5.5z"/></svg></button>
+          <button class="ib" id="kf-next" type="button" title="Next key (Up arrow)" aria-label="Next key"><svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M4 2v10l7-5z"/></svg></button>
+          <span class="stat" id="kf-time">0.00 s</span>
+          <span class="vsep"></span>
+          <button class="ib" id="kf-add" type="button" title="Key the selected object at the playhead (I)" aria-label="Add key"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M7 2l5 5-5 5-5-5z"/><path d="M7 5v4M5 7h4"/></svg></button>
+          <button class="ib" id="kf-del" type="button" title="Delete the selected key (Delete)" aria-label="Delete key"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M7 2l5 5-5 5-5-5z"/><path d="M5 7h4"/></svg></button>
+          <label class="tog" title="Auto-key: moving a keyed object changes its key at the playhead"><input type="checkbox" id="kf-auto" checked><i></i><span>Auto key</span></label>
+          <span class="grow"></span>
+          <span class="seg" id="kf-interp" role="group" aria-label="Interpolation"><button type="button" data-v="smooth" aria-pressed="true">Smooth</button><button type="button" data-v="linear" aria-pressed="false">Linear</button></span>
+          <span class="seg" id="kf-end" role="group" aria-label="At the end"><button type="button" data-v="hold" aria-pressed="true">Hold</button><button type="button" data-v="stop" aria-pressed="false">Stop</button><button type="button" data-v="loop" aria-pressed="false">Loop</button></span>
+          <span class="kf-dur"><label for="kf-dur">End</label><input type="number" id="kf-dur" min="1" max="60" step="0.5" value="5"><span>s</span></span>
+          <button class="ib" id="kf-toggle" type="button" aria-expanded="true" aria-label="Hide the key tracks" title="Hide or show the key tracks"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 5l4 4 4-4"/></svg></button>
+        </div>
+        <div class="kf-body" id="kf-body">
+          <div class="kf-names" id="kf-names"></div>
+          <div class="kf-tracks" id="kf-tracks"></div>
+        </div>
+      </div>
+      <div class="tl-cache" id="tl-cache" hidden>
+        <span class="stat">Frame <b id="c-frame">0001</b> / <span id="c-total">0</span></span>
+        <div class="scrub">
+          <input type="range" id="scrub" min="0" max="1" step="1" value="0" aria-label="Playback frame">
+          <div class="ticks" id="ticks"></div>
+        </div>
+        <span class="stat"><b id="c-count">0</b> pts</span>
+        <span class="stat"><b id="c-fps">0</b> fps</span>
+      </div>
+    </div>
+
+    <div class="split v" id="sp-right" role="separator" aria-orientation="vertical" aria-label="Resize the side panels" tabindex="0"></div>
+    <div class="rightcol" id="rightcol">
+      <div class="outliner" id="outliner">
+        <div class="ol-head"><b>Outliner</b><span style="flex:1"></span>
+          <button class="ib" id="btn-add" type="button" aria-haspopup="menu" aria-label="Add" data-tip="Add water, a source or a collider (Shift+A)."><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></button>
+        </div>
+        <div class="ol-list" id="ol-list">
+          <button class="orow" type="button" id="ol-tank" data-tip="The tank: the box the water lives in. Its size and open sides are in the Scene tab."><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#aeb6bd" stroke-width="1.4" aria-hidden="true"><path d="M2 5l6-3 6 3v6l-6 3-6-3z"/></svg><span class="nm">Tank</span><span class="sub" id="ol-tank-sub">domain</span></button>
+          <div class="chips" id="objlist" role="group" aria-label="Scene objects" style="flex-direction:column;gap:1px"></div>
+          <div class="orow" id="ol-sim"><svg width="13" height="13" viewBox="0 0 16 16" fill="#e9a43a" aria-hidden="true"><circle cx="4" cy="10" r="1.6"/><circle cx="8" cy="5" r="1.6"/><circle cx="12" cy="9" r="1.6"/></svg><span class="nm">Simulation</span><span class="sub" id="ol-sim-sub"></span></div>
+        </div>
+      </div>
+      <div class="split h" id="sp-out" role="separator" aria-orientation="horizontal" aria-label="Resize the outliner" tabindex="0"></div>
+      <div class="props">
+        <div class="ptabs" id="ptabs" role="tablist" aria-label="Properties">
+          <button class="ib" type="button" data-ptab="scene" aria-label="Scene" data-tip="Scene: the tank, saving and loading."><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2 13l6-10 6 10z"/></svg></button>
+          <button class="ib" type="button" data-ptab="object" aria-label="Object" data-tip="Object: the selected object and recorded motion."><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1"/></svg></button>
+          <button class="ib" type="button" data-ptab="sim" aria-label="Simulation" data-tip="Simulation: the solver, spray, narrow band and ocean."><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 2c2.2 2.8 4 4.8 4 6.8a4 4 0 0 1-8 0C4 6.8 5.8 4.8 8 2z"/></svg></button>
+          <button class="ib" type="button" data-ptab="bake" aria-label="Bake and cache" data-tip="Bake and cache (switches to the Bake workspace)."><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><ellipse cx="8" cy="4" rx="5" ry="2"/><path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/></svg></button>
+          <button class="ib" type="button" data-ptab="display" aria-label="Display" data-tip="Display: how the water is drawn."><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/></svg></button>
+          <button class="ib" type="button" data-ptab="perf" aria-label="Performance" data-tip="Performance: benchmark."><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2 12a6 6 0 1 1 12 0M8 12l3-4"/></svg></button>
+          <button class="ib" type="button" data-ptab="help" aria-label="Hotkeys" data-tip="Hotkeys."><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="6.5"/><path d="M6.2 6.2a1.9 1.9 0 1 1 2.6 1.8c-.6.3-.8.7-.8 1.3M8 11.5v.5"/></svg></button>
+        </div>
+        <aside class="panel" id="panel" data-ptab="sim">
+          <div class="crumb"><span id="crumb-scene">Scene</span><i>›</i><b id="crumb-tab">Simulation</b><span class="grow"></span></div>
+          <div class="psearch"><input id="psearch" type="search" placeholder="Search settings (F3)" aria-label="Search settings" autocomplete="off" spellcheck="false"></div>
+
+          <div class="group" id="g-file" data-ptab="scene"><button class="btn flat" id="btn-save-scene" type="button" title="Saves objects, keyframes, box and solver settings. Baked caches are not included.">Save scene (Ctrl+S)</button>
+            <label class="btn flat" for="scene-file" title="Open a scene saved earlier">Load scene</label><input type="file" id="scene-file" accept=".json,application/json" hidden></div>
+
+          <div class="tab" id="tab-live">
+            <div class="group" id="g-objects" data-ptab="object">
+              <h2>Object</h2>
+              <div class="params" id="params"></div>
+            </div>
+            <div class="group" id="g-motion" data-ptab="object">
+              <h2>Motion for baking</h2>
+              <label class="check"><input type="checkbox" id="rec"><span>Record object motion</span></label>
+              <div class="pos" id="rec-info">Nothing recorded. Turn this on, then drag objects while the sim runs.</div>
+              <div class="btnrow"><button class="btn flat" id="rec-clear" type="button">Clear motion</button></div>
+            </div>
+            <div class="group" id="g-box" data-ptab="scene"><h2>Tank</h2></div>
+          </div>
+
+          <div class="tab" id="tab-bake" hidden>
+            <div class="group" id="g-bake" data-ptab="bake">
+              <h2>Bake settings</h2>
+              <div class="pos" id="bake-note">Uses the Simulation settings, the keyframes and any recorded motion.</div>
+              <div class="pos" id="bake-est"></div>
+              <div class="btnrow">
+                <button class="btn primary" id="btn-bake" type="button">Bake simulation</button>
+                <button class="btn flat" id="btn-cancel" type="button" hidden>Cancel</button>
+              </div>
+              <div class="progress" id="bake-progress" hidden><i id="bake-prog"></i></div>
+              <div class="pos" id="bake-status"></div>
+            </div>
+            <div class="group" id="g-cache" data-ptab="bake">
+              <h2>Cache playback</h2>
+              <div class="pos" id="cache-info">No cache yet.</div>
+              <label class="check"><input type="checkbox" id="c-loop" checked><span>Loop</span></label>
+              <div class="row plain"><label>Speed</label>
+                <div class="seg" id="seg-cspeed" role="group" aria-label="Playback speed">
+                  <button type="button" data-v="0.25" aria-pressed="false">0.25×</button>
+                  <button type="button" data-v="0.5" aria-pressed="false">0.5×</button>
+                  <button type="button" data-v="1" aria-pressed="true">1×</button>
+                  <button type="button" data-v="2" aria-pressed="false">2×</button>
+                </div>
+              </div>
+              <div class="btnrow"><button class="btn flat" id="c-save" type="button" data-tip="Keeps the bake, the scene it came from and its settings, so it reopens here exactly.">Save cache (.splc)</button><button class="btn flat" id="c-report" type="button" data-tip="A small file for troubleshooting: what every frame measured, where the water went, and samples of the points. Attach it in the chat.">Bake report</button></div>
+              <div class="btnrow"><button class="btn flat danger" id="c-clear" type="button">Clear cache</button></div>
+            </div>
+            <div class="group" id="g-native" data-ptab="bake">
+              <h2>Load a cache file</h2>
+              <div class="btnrow"><label class="btn flat" for="cache-file" data-tip="Open a .splc cache saved from here. The scene it was baked from comes back with it.">Load cache file</label><input type="file" id="cache-file" accept=".splc" hidden></div>
+              <div class="pos" id="load-status"></div>
+            </div>
+          </div>
+
+          <div class="group" id="g-sim" data-ptab="sim bake"><h2 data-tip="One set of settings for both the live view and the bake. Changing them clears the live cache.">Simulation</h2></div>
+          <div class="group" id="g-perf" data-ptab="perf"><h2>Performance</h2>
+            <div class="btnrow"><button class="btn flat" id="btn-bench" type="button" data-tip="Times every stage of the FLIP solver on your GPU, with and without the speed-ups, on whatever is in the scene. It takes about 20 seconds.">Run benchmark</button><button class="btn flat" id="btn-bench-copy" type="button">Copy results</button></div>
+            <textarea id="bench-out" readonly rows="14" spellcheck="false" aria-label="Benchmark results"></textarea>
+          </div>
+
+          <div class="group" id="g-disp" data-ptab="display"><h2>Display</h2>
+            <div class="row plain"><label>Background</label>
+              <div class="seg" id="seg-bg" role="group" aria-label="Background">
+                <button type="button" data-v="grey" aria-pressed="true">Grey</button>
+                <button type="button" data-v="light" aria-pressed="false">Light</button>
+                <button type="button" data-v="black" aria-pressed="false">Black</button>
+              </div>
+            </div>
+            <div class="row plain"><label data-tip="Draws extra points around every simulated point. They only change how it looks, not how the water moves, so they cost almost nothing to simulate.">Look-only points</label>
+              <div class="seg" id="seg-detail" role="group" aria-label="Look-only points">
+                <button type="button" data-v="0" aria-pressed="true">Off</button>
+                <button type="button" data-v="1" aria-pressed="false">×2</button>
+                <button type="button" data-v="3" aria-pressed="false">×4</button>
+                <button type="button" data-v="7" aria-pressed="false">×8</button>
+              </div>
+            </div>
+          </div>
+          <div class="group" id="g-help" data-ptab="help">
+            <h2>Hotkeys, Blender style</h2>
+            <ul class="keys">
+              <li><kbd>G</kbd> move &nbsp; <kbd>R</kbd> rotate &nbsp; <kbd>S</kbd> scale</li>
+              <li>then <kbd>X</kbd> <kbd>Y</kbd> <kbd>Z</kbd> locks an axis (in the Global or Local orientation set in the header), press it again for the other one; <kbd>Shift</kbd>+axis locks a plane</li>
+              <li>type a number for exact values; <kbd>Ctrl</kbd> held flips snapping; <kbd>Shift</kbd>+<kbd>Tab</kbd> turns snapping on or off; <kbd>V</kbd> held snaps to points</li>
+              <li>click or <kbd>Enter</kbd> confirms, right click or <kbd>Esc</kbd> cancels</li>
+              <li>click selects, <kbd>Shift</kbd>+click adds to the selection, drag for box select</li>
+              <li><kbd>A</kbd> select all, <kbd>Alt</kbd>+<kbd>A</kbd> none</li>
+              <li><kbd>Shift</kbd>+<kbd>A</kbd> add, <kbd>Shift</kbd>+<kbd>D</kbd> duplicate, <kbd>X</kbd> delete, <kbd>H</kbd> hide, <kbd>Alt</kbd>+<kbd>H</kbd> show all</li>
+              <li><kbd>I</kbd> key the selection at the playhead; double-click a key to go to its frame and edit it</li>
+              <li><kbd>Tab</kbd> edit the shape of a collider; <kbd>1</kbd> points <kbd>2</kbd> edges <kbd>3</kbd> faces, <kbd>E</kbd> extrude</li>
+              <li><kbd>Ctrl</kbd>+<kbd>Z</kbd> undo, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> redo</li>
+              <li><kbd>F3</kbd> search the settings; over a setting: <kbd>Backspace</kbd> resets it, <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>Ctrl</kbd>+<kbd>V</kbd> copy and paste, right-click for more; drag a value sideways to change it, click it to type</li>
+              <li>orbit: middle mouse, right drag or <kbd>Alt</kbd>+drag; pan: <kbd>Shift</kbd>+middle; zoom: wheel or <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+drag</li>
+              <li><kbd>F</kbd> or numpad <kbd>.</kbd> focus the selection, <kbd>Home</kbd> frame all; numpad <kbd>1</kbd> <kbd>3</kbd> <kbd>7</kbd> front, side, top; numpad <kbd>5</kbd> orthographic</li>
+              <li>drag the thin bars between the panels to resize them</li>
+            </ul>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+  <footer class="status" id="status"><span id="st-hints"></span><span class="grow"></span><span id="st-right"></span></footer>
+</div>
+<div class="addmenu" id="addmenu" role="menu" hidden>
+  <b>Water</b>
+  <button class="btn" type="button" role="menuitem" data-v="cube" data-water="1"><i class="mi water"></i>Water box</button>
+  <button class="btn" type="button" role="menuitem" data-v="sphere" data-water="1"><i class="mi water"></i>Water sphere</button>
+  <button class="btn" type="button" role="menuitem" data-v="emitter"><i class="mi emit"></i>Source</button>
+  <button class="btn" type="button" role="menuitem" data-v="blob"><i class="mi water"></i>Drop a blob</button>
+  <b>Colliders</b>
+  <button class="btn" type="button" role="menuitem" data-v="cube"><i class="mi col"></i>Cube</button>
+  <button class="btn" type="button" role="menuitem" data-v="sphere"><i class="mi col"></i>Sphere</button>
+  <button class="btn" type="button" role="menuitem" data-v="cylinder"><i class="mi col"></i>Cylinder</button>
+</div>
+<div class="tip" id="tip" role="tooltip" hidden></div>
+<div class="ctx" id="ctx" role="menu" hidden></div>
+<div class="menu" id="menu" role="menu" hidden></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>

@@ -1,0 +1,14 @@
+const {PAGE, OUT} = require('./paths');
+const chromium=require('@sparticuz/chromium').default; const puppeteer=require('puppeteer-core');
+const wait=(ms)=>new Promise(r=>setTimeout(r,ms));
+(async()=>{ const exe=await chromium.executablePath();
+ const br=await puppeteer.launch({executablePath:exe,args:[...chromium.args,'--enable-unsafe-webgpu','--enable-features=Vulkan,WebGPU','--use-webgpu-adapter=swiftshader','--use-angle=swiftshader','--ignore-gpu-blocklist','--allow-file-access-from-files'],headless:'shell'});
+ const pg=await br.newPage(); await pg.setViewport({width:1400,height:900}); const errs=[]; pg.on('pageerror',e=>errs.push(e.message));
+ await pg.goto('file://'+PAGE); await wait(5000);
+ await pg.evaluate(()=>window.__splash.snapView('front')); await wait(1500);
+ const r = await pg.evaluate(async()=>{ const s=window.__splash, o=s.objs.find(q=>q.kind==='mesh'); s.select(o); const B=s.b; const corner=new THREE.Vector3(B.x1,B.y0,B.z1); const sc=s.toScreen(corner);
+   s.lastM.x=sc.x-80; s.lastM.y=sc.y-60; s.startTf('g'); s.lastM.x=sc.x+3; s.lastM.y=sc.y-2; s.S.snapV=true; s.evalTf(); const t=s.tfState;
+   const out={d:[t.d.x,t.d.y,t.d.z].map(v=>+v.toFixed(3)), snapAt: t.snapAt && [t.snapAt.x,t.snapAt.y,t.snapAt.z], corner:[corner.x,corner.y,corner.z], target:[o.target.x,o.target.y,o.target.z], pos:[o.pos.x,o.pos.y,o.pos.z], gp:[o.group.position.x,o.group.position.y,o.group.position.z]};
+   o.group.updateMatrixWorld(true); let md=1e9; o.mesh.v.forEach(q=>{ const w=new THREE.Vector3(q[0],q[1],q[2]).applyMatrix4(o.group.matrixWorld); md=Math.min(md,w.distanceTo(corner)); }); out.md=+md.toFixed(5);
+   s.S.snapV=false; s.confirmTf(); return out; });
+ console.log(JSON.stringify(r)); console.log('errs', JSON.stringify(errs.slice(0,3))); await br.close(); })().catch(e=>console.log('ERR',e.stack));

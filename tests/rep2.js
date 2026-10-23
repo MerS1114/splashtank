@@ -1,0 +1,32 @@
+const {PAGE, OUT} = require('./paths');
+const chromium=require('@sparticuz/chromium').default; const puppeteer=require('puppeteer-core');
+const wait=(ms)=>new Promise(r=>setTimeout(r,ms)); const path=require('path'), fs=require('fs');
+const DL=path.resolve(OUT,'dl');
+(async()=>{ const exe=await chromium.executablePath();
+ const br=await puppeteer.launch({executablePath:exe,args:[...chromium.args,'--enable-unsafe-webgpu','--enable-features=Vulkan,WebGPU','--use-webgpu-adapter=swiftshader','--use-angle=swiftshader','--ignore-gpu-blocklist','--allow-file-access-from-files'],headless:'shell'});
+ const open=async()=>{ const pg=await br.newPage(); await pg.setViewport({width:1400,height:900}); const errs=[]; pg.on('console',m=>{const t=m.text(); if(/rror|nvalid/.test(t)) errs.push(t.slice(0,200));}); pg.on('pageerror',e=>errs.push(e.message));
+   const cdp=await pg.target().createCDPSession(); await cdp.send('Page.setDownloadBehavior',{behavior:'allow',downloadPath:DL}); await pg.goto('file://'+PAGE); await wait(5000); return {pg,errs}; };
+ let {pg,errs}=await open();
+ await pg.select('#scene','Meteor lake'); await wait(1500);
+ await pg.evaluate(()=>document.querySelector('#s-res').closest('.row')._st.commit(0.09)); await wait(1500);
+ await pg.click('#seg-mode button[data-v=bake]'); await wait(200);
+ await pg.evaluate(()=>{ const set=(id,v)=>{const i=document.querySelector(id); i.value=v; i.dispatchEvent(new Event('input',{bubbles:true})); i.dispatchEvent(new Event('change',{bubbles:true}));}; set('#b-dur',2); });
+ await pg.click('#btn-bake'); const t0=Date.now(); let st='';
+ while(Date.now()-t0<400000){await wait(3000); st=await pg.evaluate(()=>document.querySelector('#bake-status').textContent); if(/Baked|failed|cancel/.test(st))break;}
+ console.log('bake',st);
+ const a=await pg.evaluate(()=>{ const c=window.__splash.S.cache; const fr=c.frames[40]; return {F:c.frames.length, n40:fr.n, sp40:fr.sp?fr.sp.n:0, spSum:fr.sp?Array.from(fr.sp.pk.slice(0,50)).reduce((q,v)=>q+(v>>>21&511),0):0, scale:c.scale, diag:c.diag.length}; });
+ console.log('baked', JSON.stringify(a));
+ await pg.click('#c-save'); await pg.click('#c-report'); await wait(4000);
+ console.log('files', fs.readdirSync(DL).map(f=>f+' '+fs.statSync(path.join(DL,f)).size));
+ console.log('errs1', JSON.stringify(errs.slice(0,3))); await pg.close();
+ // reopen in a fresh page that has a different scene loaded
+ ({pg,errs}=await open());
+ const inp=await pg.$('#cache-file'); await inp.uploadFile(path.join(DL,'splashtank-bake.splc')); await wait(4000);
+ const b=await pg.evaluate(()=>{ const s=window.__splash, c=s.S.cache; const fr=c.frames[40]; return {F:c.frames.length, n40:fr.n, sp40:fr.sp?fr.sp.n:0, spSum:fr.sp?Array.from(fr.sp.pk.slice(0,50)).reduce((q,v)=>q+(v>>>21&511),0):0, scale:c.scale, diag:(c.diag||[]).length, objs:s.objs.length, scene:document.querySelector('#scene').value, status:document.querySelector('#load-status').textContent, b:c.b}; });
+ console.log('reopened', JSON.stringify(b));
+ await pg.evaluate(()=>{ window.__splash.S.cplay=false; window.__splash.S.ct=40; }); await wait(1500); await pg.screenshot({path:OUT+'/reopen.png'});
+ console.log('errs2', JSON.stringify(errs.slice(0,3)));
+ const rep=JSON.parse(fs.readFileSync(path.join(DL,'splashtank-bake-report.json'),'utf8'));
+ console.log('report keys', Object.keys(rep).join(','), 'perFrame', rep.perFrame.length, 'snap', rep.snapshots.length, rep.snapshots[5].sample.length);
+ console.log('frame 40', JSON.stringify(rep.perFrame[40]).slice(0,600));
+ await br.close(); })().catch(e=>console.log('ERR',e.stack));
