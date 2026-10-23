@@ -97,6 +97,11 @@ class FlipSim {
     device.queue.writeBuffer(this.bStack, 0, st);
     device.queue.writeBuffer(this.bCtl, 0, new Uint32Array([0, 0, this.scap - 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
     // the pipelines are shared by every FlipSim on this device and compiled once, in parallel; until they are ready the sim does not step
+    if (device.features && device.features.has('timestamp-query')) {   // GPU time of a step, one reading in flight (gpuMs: median of the last 31)
+      this.tsq = device.createQuerySet({ type: 'timestamp', count: 64 });
+      this.tsRes = device.createBuffer({ size: 512, usage: U.QUERY_RESOLVE | U.COPY_SRC });
+      this.tsRead = device.createBuffer({ size: 512, usage: U.MAP_READ | U.COPY_DST }); this.tsBusy = false;
+    }
     this.L = FLIP_L; this.pipes = {}; this.ready = false;
     const sh = flipPipes(device);
     this.dispAlloc();   // makes the bind groups once the pipelines are there
@@ -230,12 +235,20 @@ class FlipSim {
     this.airOnStep = !!(airo && ad); this.dripOnStep = !!(dr && this.ndrip > 0);
     this.dev.queue.writeBuffer(this.bParams, 0, this.pu);
     const iters = Math.max(1, (this.opt.iters || o.iters) | 0);
-    const enc = this.dev.createCommandEncoder();
-    const pass = enc.beginComputePass();
+    const enc = this.dev.createCommandEncoder(), ts = this.tsq && !this.tsBusy && !this.only;
+    const pass = enc.beginComputePass(ts ? { timestampWrites: { querySet: this.tsq, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } } : undefined);
     for (const st of this.stages(N, iters)) st.fn(pass);
     pass.end();
+    if (ts) { enc.resolveQuerySet(this.tsq, 0, 2, this.tsRes, 0); enc.copyBufferToBuffer(this.tsRes, 0, this.tsRead, 0, 16); }
     this.readStats(enc);
     this.dev.queue.submit([enc.finish()]);
+    if (ts) {
+      this.tsBusy = true;
+      this.tsRead.mapAsync(GPUMapMode.READ, 0, 16).then(() => {
+        const a = new BigUint64Array(this.tsRead.getMappedRange(0, 16)), ms = Number(a[1] - a[0]) / 1e6; this.tsRead.unmap(); this.tsBusy = false;
+        if (ms > 0 && ms < 1e4) { const r = this.gpuSteps || (this.gpuSteps = []); r.push(ms); if (r.length > 31) r.shift(); const s = r.slice().sort((x, y) => x - y); this.gpuMs = s[s.length >> 1]; }
+      }).catch(() => { this.tsBusy = false; });
+    }
     if (!this.only) { this.needRead = true; this.track(); }
     return nc;
   }
@@ -308,7 +321,8 @@ class FlipSim {
       } }] : [])
     ];
   }
-  // benchmark helper: run one real step, but submit every stage separately and wait for it, returning milliseconds per stage
+  // benchmark helper: run one real step stage by stage, returning milliseconds per stage. With timestamp queries every stage is timed
+  // on the GPU in one submission (out.gpu = true); without, each stage is submitted and waited for alone, which adds a fixed cost to each.
   async stepTimed(dt, o) {
     await this.whenReady;
     const N = this.N; if (N === 0) return null;
@@ -319,6 +333,22 @@ class FlipSim {
     this.stages = prev;
     const stages = this.stages(N, iters);
     const out = {};
+    if (this.tsq && stages.length <= 32) {
+      while (this.tsBusy) await new Promise((r) => setTimeout(r, 1));
+      this.tsBusy = true;
+      const enc = this.dev.createCommandEncoder();
+      stages.forEach((st, k) => { const ps = enc.beginComputePass({ timestampWrites: { querySet: this.tsq, beginningOfPassWriteIndex: 2 * k, endOfPassWriteIndex: 2 * k + 1 } }); st.fn(ps); ps.end(); });
+      enc.resolveQuerySet(this.tsq, 0, 2 * stages.length, this.tsRes, 0); enc.copyBufferToBuffer(this.tsRes, 0, this.tsRead, 0, 16 * stages.length);
+      this.dev.queue.submit([enc.finish()]);
+      try {
+        await this.tsRead.mapAsync(GPUMapMode.READ, 0, 16 * stages.length);
+        const a = new BigUint64Array(this.tsRead.getMappedRange(0, 16 * stages.length));
+        stages.forEach((st, k) => { out[st.name] = Math.max(0, Number(a[2 * k + 1] - a[2 * k])) / 1e6; });
+        this.tsRead.unmap();
+      } finally { this.tsBusy = false; }
+      out.gpu = true; this.needRead = true;
+      return out;
+    }
     for (const st of stages) {
       const t0 = performance.now();
       const enc = this.dev.createCommandEncoder(), ps = enc.beginComputePass(); st.fn(ps); ps.end();
@@ -495,6 +525,7 @@ class FlipSim {
   }
   destroy() {
     this.dead = true;
+    [this.tsq, this.tsRes, this.tsRead].forEach((x) => { try { x && x.destroy(); } catch (e) { /* ignore */ } });
     [this.bPos, this.bVel, this.bPid, this.bTpid, this.bSPos, this.bSVel, this.bSctl, this.sstage, this.bTmap, this.bNeed, this.bNew, this.bCols, this.bSortCnt, this.bTpos, this.bTvel, this.bSdf, this.bParams, this.stage, this.bList, this.bCtl, this.bGro, this.bArgs, this.bDisp, this.bStat, this.dstage, this.sctlStage, this.bSAux, this.bAir, this.bAir2, this.bAirAcc, this.bDrip, this.bPack, this.bPackU]
       .concat(this.slotBufs().map((k) => this[k])).forEach((x) => { try { x && x.destroy(); } catch (e) { /* ignore */ } });
     (this.rs || []).forEach((q) => q.buf.destroy());

@@ -88,8 +88,12 @@
       if (prep) { if (hudMsg !== PREP) flash(PREP); } else if (hudMsg === PREP) { hudMsg = ''; hud(); }
       if (S.playing && !S.baking && !prep) {
         if (isGpu()) {
+          // Steps stay queued until the browser reports them done, which can take far longer than the GPU work itself (seen on Mer's Intel
+          // UHD 730). So allow about 100 ms of GPU work in flight when the GPU's own step time is known (at least two frames' worth, at most
+          // eight), and up to three steps per drawn frame, so a slow report or a slow draw does not hold the sim back.
+          const sub = S.lastSub || 1, lim = Math.max(2 * sub, Math.min(8 * sub, sim.gpuMs ? Math.floor(100 / sim.gpuMs) : 0));
           acc = Math.min(acc + dt, 3 * DT);
-          if (acc >= DT && (sim.inflight || 0) < 2 * (S.lastSub || 1)) { acc -= DT; stepOnce(); }
+          for (let k = 0; k < 3 && acc >= DT && (sim.inflight || 0) < lim; k++) { acc -= DT; stepOnce(); sim.maxQ = Math.max(sim.maxQ || 0, sim.inflight || 0); }
         } else {
           acc += dt; let n = 0;
           while (acc >= DT && n < 2) { stepOnce(); acc -= DT; n++; }
@@ -130,7 +134,7 @@
     vpT += dt; if (vpT > 0.25) { vpT = 0; try { vpInfo(); } catch (e) { /* not ready */ } }
     placeHandles();
     oceanUpdate(mode);
-    const tr = performance.now(); renderer.render(scene, camera); perf.render = performance.now() - tr; perf.frame = performance.now() - fs;
+    const tr = performance.now(); if (!noDraw) renderer.render(scene, camera); perf.render = performance.now() - tr; perf.frame = performance.now() - fs;
     if (frameHook) frameHook(performance.now());
   }
 

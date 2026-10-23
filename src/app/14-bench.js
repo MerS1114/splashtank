@@ -19,20 +19,21 @@
       const BASE = { noFoam: false, noCull: false, noSolidCache: false, fastAir: false, sort: true, sortEvery: 16, iters: 0 };
       let lastSum = null;
       const measure = async (label, opt, quiet) => {
-        Object.assign(sim.opt, BASE, opt);
-        const sum = {}; lastSum = sum; let cpu = 0, tot = 0;
+        const { noDraw: nd, ...so } = opt; Object.assign(sim.opt, BASE, so); noDraw = !!nd;
+        const sum = {}; lastSum = sum; let cpu = 0, tot = 0, onGpu = false;
         for (let r = 0; r < M; r++) {
           let cap = null; sim.step = (dt, o) => { cap = { dt, o }; };
           const t0 = performance.now(); stepOnce(); cpu += performance.now() - t0; delete sim.step;
-          const t = await sim.stepTimed(cap.dt, cap.o); for (const k in t) sum[k] = (sum[k] || 0) + t[k];
+          const t = await sim.stepTimed(cap.dt, cap.o); onGpu = !!t.gpu; for (const k in t) if (k !== 'gpu') sum[k] = (sum[k] || 0) + t[k];
         }
         for (let r = 0; r < M; r++) { const t0 = performance.now(); stepOnce(); await settle(); tot += performance.now() - t0; }
+        noDraw = false;
         if (quiet) return tot / M;
         let s = 0; const parts = ST.filter((k) => sum[k] !== undefined).map((k) => { const v = (sum[k] || 0) / M; s += v; return k + ' ' + f1(v); });
         say('');
         say(label);
-        say('  whole step ' + f1(tot / M) + ' ms  (about ' + Math.round(1000 / (tot / M)) + ' steps/s), JS side ' + f1(cpu / M) + ' ms');
-        say('  stages, each timed alone: ' + parts.join(', ') + '  (sum ' + f1(s) + ')');
+        say('  whole step ' + f1(tot / M) + ' ms from start until the browser reports it done (about ' + Math.round(1000 / (tot / M)) + ' steps/s), JS side ' + f1(cpu / M) + ' ms' + (sim.gpuMs ? ', GPU busy ' + f1(sim.gpuMs) + ' ms of it' : ''));
+        say('  stages' + (onGpu ? ', timed on the GPU itself: ' : ', each timed alone: ') + parts.join(', ') + '  (sum ' + f1(s) + ')');
         return tot / M;
       };
       await settle();
@@ -45,7 +46,7 @@
       { const gridMB = sim.scap * (512 * 40 + 12) / 1048576; say('Sparse grid: ' + sim.blocksUsed + ' blocks of 8×8×8 in use (' + (100 * sim.blocksUsed * 512 / sim.ncell).toFixed(1) + '% of the box), room for ' + sim.scap + ' = ' + gridMB.toFixed(gridMB < 10 ? 1 : 0) + ' MB. As a full grid it would be ' + mb(denseF * 8 + sim.ncell * 24) + ' MB. Everything on the GPU: about ' + mb(sim.memBytes()) + ' MB'); }
       say('Pressure iterations ' + S.iters + ', wind ' + S.wind.speed + ', air drag ' + S.airDrag + ', air turbulence ' + S.gust + ', look-only points ×' + (S.detail + 1));
       await measure('', {}, true);   // warm-up, lets the GPU clock up before anything is timed
-      say('(stage times each include a fixed cost of a few ms for submitting and waiting on one stage alone)');
+      say(sim.tsq ? '(stage times and GPU busy times come from GPU timestamps, so they leave out the wait for the browser to report back)' : '(this GPU or browser gives no timestamps: stage times each include a fixed cost for submitting and waiting on one stage alone)');
       // The GPU can slow down during a long test, so every variant is measured right after a short rest, between two reference runs, and compared with their average.
       const rest = (ms) => new Promise((r) => setTimeout(r, ms));
       const trio = async (label, opt) => {
@@ -62,6 +63,7 @@
       const pi = S.iters > 20 ? 20 : 40;
       await trio('P. ' + pi + ' pressure iterations instead of ' + S.iters, { iters: pi });
       await trio('C. white water and air drag skipped (for comparison)', { noFoam: true });
+      await trio('D. viewport not drawn (is drawing the points taking GPU time from the solver?)', { noDraw: true });
       say('');
       say('Blocks: at most ' + (sim.peak || sim.blocksUsed) + ' in use during the test, room for ' + sim.scap + (sim.grew ? ', the pool grew ' + sim.grew + ' times' : ''));
       Object.assign(sim.opt, opt0);
@@ -74,11 +76,11 @@
       say('');
       say('Done. Press Copy results and paste it back.');
     } catch (e) { say('Benchmark failed: ' + (e && e.message || e)); }
-    delete sim.step; Object.assign(sim.opt, opt0); S.tl.end = endMode; S.subMin = sub0[0]; S.subMax = sub0[1]; resetSim(0); renderUI(); renderKF(); setPlaying(wasPlaying); benching = false;
+    noDraw = false; delete sim.step; Object.assign(sim.opt, opt0); S.tl.end = endMode; S.subMin = sub0[0]; S.subMax = sub0[1]; resetSim(0); renderUI(); renderKF(); setPlaying(wasPlaying); benching = false;
   }
   $('#btn-bench').addEventListener('click', (e) => { e.currentTarget.blur(); runBenchmark(); });
   // ---------- smoothness test: what Mer feels (hitches, slow playback), measured frame by frame on her computer ----------
-  let frameHook = null;
+  let frameHook = null, noDraw = false;   // noDraw: the benchmark's run without drawing the viewport
   async function runSmooth() {
     if (benching || S.baking || tf) return;
     benching = true;
@@ -117,12 +119,12 @@
         if (sh) say('GPU solver prepared (' + Object.keys(FLIP_L).length + ' shaders compiled at once, shared by every scene) in ' + f1(sh.ms / 1000) + ' s' + (performance.now() - t0 > 50 ? ', ' + f1((performance.now() - t0) / 1000) + ' s of it during this test' : ' when the page started') + '.');
       }
       await new Promise((r) => setTimeout(r, 400));
-      if (sim.stepMs) sim.stepMs.length = 0; sim.slowMs = 0;
+      if (sim.stepMs) sim.stepMs.length = 0; sim.slowMs = 0; sim.maxQ = 0;
       setPlaying(true);
       say(''); say('Live sim, ' + (window.__smoothSecs || 10) + ' seconds from the start:');
       const L = await record(window.__smoothSecs || 10); setPlaying(false);
       const simS = (S.frame - L.frame0) / 60;
-      say('  The sim got through ' + f1(simS) + ' s of its time (' + Math.round(100 * simS / L.secs) + '% of real time). ' + fmtN(sim.N) + ' particles now, solver step about ' + f1(sim.lastMs) + ' ms on the GPU (median of the last 31, slowest ' + f0(sim.slowMs) + ' ms)' + (S.lastSub > 1 ? ' with ' + S.lastSub + ' substeps a frame' : '') + ', ' + fmtN(shownN) + ' points drawn.');
+      say('  The sim got through ' + f1(simS) + ' s of its time (' + Math.round(100 * simS / L.secs) + '% of real time). ' + fmtN(sim.N) + ' particles now, solver step about ' + f1(sim.lastMs) + ' ms from start until the browser reports it done (median of the last 31, slowest ' + f0(sim.slowMs) + ' ms)' + (sim.gpuMs ? ', of which the GPU was busy ' + f1(sim.gpuMs) + ' ms' : '') + (sim.maxQ ? ', up to ' + sim.maxQ + ' steps queued' : '') + (S.lastSub > 1 ? ' with ' + S.lastSub + ' substeps a frame' : '') + ', ' + fmtN(shownN) + ' points drawn.');
       report(L);
       // 2. the bake, if there is one
       if (S.cache && S.cache.frames.length > 2) {

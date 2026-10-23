@@ -58,20 +58,23 @@ Tests are slow on SwiftShader (a few frames a second; bakes take minutes). Run t
 
 `window.__splash` exposes app internals for tests (S, objs, getSim, select, startTf, setTool, setPtab, slotLoad, perf, runSmooth and many more). Add to it (in 18-layout.js) rather than reaching into the DOM when a test needs state.
 
-GitHub Actions (`.github/workflows/pages.yml`) builds and publishes the page to GitHub Pages on every push to main and runs the smoke test. Check with `gh run list -R MerS1114/splashtank -L 1`.
+GitHub Actions (`.github/workflows/pages.yml`) builds and tests on every push to main or a claude/* branch. The site (tools/site.sh) has main at the root and the newest claude/* branch at /testing/ (orange label with branch and commit); claude/* pushes are published by testing-page.yml, which runs from main because only main may deploy to github-pages. Push work to the session branch first so Mer can try it at https://mers1114.github.io/splashtank/testing/, then merge to main when she says. Check with `gh run list -R MerS1114/splashtank -L 1`.
 
 ## Current work (update this when it changes)
 
 Mer's smoothness test on her Intel UHD 730 (Meteor lake preset, spacing 0.03, 219k particles live, bake up to 491k water points), before the fixes below: bake playback fine (44 frames a second, uploads 1.6 ms for 4.3 MB); live had one 23 s frame right after Start (first use of the compute pipelines), then 28 ms frames, and got through only 0.3 s of sim time in 10 s.
 
-Done since (waiting for her rerun of the Smoothness test and the solver benchmark):
+Done since (merged to main):
 - The 61 FLIP pipelines are made once per device (flipPipes in flip/sim.js, FLIP_L is the binding table) with createComputePipelineAsync, compiled in parallel and shared by every FlipSim. sim.ready / sim.whenReady: nothing steps until then (stepOnce returns, the viewport says "Preparing the GPU solver"); bakes and the benchmark await whenReady; tests/lib.js open() waits for it. The smoothness test reports how long the compile took.
 - sim.lastMs (track() in gpu.js) is the median of the last 31 steps; sim.slowMs is the slowest since the test started.
 - The live view and live cache alternate between slots 0 and 4 (liveLoad, liveI), so an upload never rewrites textures the last draw may still read. Bake slots are 1 to 3 (NBSLOT).
 - perf.frame is timed from the start of frame(), not from the rAF timestamp.
 - Speed colours: speed bytes are now 16ths of m/s instead of 16ths of a scene unit, so big-scale scenes (Meteor lake, 6.7 m per unit) get about 80 colour steps up to 5 m/s instead of 12. Encoders take vs (metres per unit): packDisp (PK.vs), packFrameBuf, packDeep, packCpuFrame, packFrame. New caches carry spdMs.
 - Her rerun with these fixes (sent as a file, Meteor lake 0.03): pipelines ready in 0.8 s, no start stall; page work 0.7 ms a frame; live uploads 0.7 ms for 2.3 MB (was 4.7); 32 frames a second drawn. The sim itself is the bottleneck: solver step about 150 ms (median, slowest 616), 15% of real time. Waiting for her Solver benchmark (stage times) on that scene.
-- Next, once her numbers are in: the real per-step cost of her scene. Her 4 million whitewater pool: once that many slots have been handed out, every whitewater kernel runs over all of them each substep.
+- Her Solver benchmark (old build, no timestamps): whole step 134 ms, but every stage timed alone took 15 to 80 ms (even 'clear'), varying 4x between runs; 20 instead of 30 pressure iterations, no sorting, no whitewater: all within a few %. So the time is not the solver's GPU work; it is the wait until the browser reports a submission done (and maybe drawing sharing the GPU). The live loop allowed only 2 steps in flight and 1 per drawn frame, so that wait capped the sim.
+- Since then (on the testing page): timestamp-query is requested when offered; FlipSim times each step on the GPU (sim.gpuMs, median of 31) and stepTimed times every stage with timestamps in one submission. The live loop allows about 100 ms of GPU work in flight (2 to 8 frames' worth, from gpuMs) and up to 3 steps per drawn frame. The benchmark has run D (viewport not drawn); the smoothness test prints GPU busy time and the most steps queued.
+- Next: her rerun of both tests on the testing page; check GPU busy vs whole step, and whether D is much faster (then drawing competes with the solver).
+ Her 4 million whitewater pool: once that many slots have been handed out, every whitewater kernel runs over all of them each substep.
 
 ## FLIP solver, in brief
 
