@@ -306,12 +306,12 @@ class FlipSim {
       } },
       { name: 'project', fn: (ps) => { indirect(ps, 'project', 64); if (nb) indirect(ps, 'saveVel', 64); } },
       { name: 'g2p', fn: (ps) => dispatch(ps, 'g2p', N) },
+      ...(this.sprayCap > 0 && this.airOnStep ? [{ name: 'air', fn: (ps) => {   // air field first, so the whitewater moves with this step's air
+        const na = this.airDims.n;
+        dispatch(ps, 'wwArgs', 1);
+        dispatch(ps, 'airClear', na); dispatch(ps, 'airSplatW', N); indirect(ps, 'airSplatS', 112); dispatch(ps, 'airUpdate', na); dispatch(ps, 'airCopy', na);
+      } }] : []),
       ...(this.sprayCap > 0 ? [{ name: 'spray', fn: (ps) => {
-        if (this.airOnStep) {   // air field first, so the whitewater moves with this step's air
-          const na = this.airDims.n;
-          dispatch(ps, 'wwArgs', 1);
-          dispatch(ps, 'airClear', na); dispatch(ps, 'airSplatW', N); indirect(ps, 'airSplatS', 112); dispatch(ps, 'airUpdate', na); dispatch(ps, 'airCopy', na);
-        }
         dispatch(ps, 'wwArgs', 1); indirect(ps, 'wwSample', 112); indirect(ps, 'sprayStep', 112);
         if (this.sprOnStep) dispatch(ps, 'sprayEmit', N);
         if (this.dripOnStep) dispatch(ps, 'dripStep', this.ndrip);

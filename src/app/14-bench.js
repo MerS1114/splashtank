@@ -16,7 +16,7 @@
       const warmTo = async () => { resetSim(0); for (let i = 0; i < W; i++) { stepOnce(); if (i % 10 === 9) await settle(); } await settle(); };
       say('Simulating up to ' + (W / 60).toFixed(2) + ' s, the moment to measure' + (atHead ? ' (the playhead)' : '') + '...');
       await sim.whenReady; await warmTo();
-      const N = sim.N, M = window.__benchM || 24, ST = ['sort', 'blocks', 'clear', 'p2g', 'classify', 'normFaces', 'divergence', 'pressure', 'project', 'g2p', 'spray'];
+      const N = sim.N, M = window.__benchM || 24, ST = ['sort', 'blocks', 'clear', 'p2g', 'narrow band', 'classify', 'normFaces', 'divergence', 'pressure', 'project', 'g2p', 'air', 'spray', 'reseed'];
       const f1 = (v) => v.toFixed(2), mb = (v) => Math.round(v / 1048576);
       const BASE = { noFoam: false, noCull: false, noSolidCache: false, fastAir: false, sort: true, sortEvery: 16, iters: 0 };
       let lastSum = null;
@@ -115,7 +115,7 @@
       const cv = renderer.domElement;
       say('SplashTank smoothness test');
       say('GPU: ' + (S.gpu && S.gpu.name) + '. Browser: ' + navigator.userAgent.replace(/^Mozilla\/5.0 /, '').slice(0, 90));
-      say('Scene: ' + $('#scene').value + ', ' + S.engine.toUpperCase() + ', spacing ' + S.liveD.toFixed(3) + ', max points ' + fmtN(S.cap) + ', whitewater ' + (S.sprOn ? 'on (pool ' + fmtN(S.sprCap) + ')' : 'off') + ', narrow band ' + (nbActive() ? 'on' : 'off') + '. View ' + cv.width + ' × ' + cv.height + ' pixels, look-only copies ' + (1 + (S.detail | 0)) + ' water, ' + (1 + (S.sprDetail | 0)) + ' whitewater.');
+      say('Scene: ' + $('#scene').value + ', ' + S.engine.toUpperCase() + ', spacing ' + S.liveD.toFixed(3) + ', max points ' + fmtN(S.cap) + ', whitewater ' + (S.sprOn ? 'on (pool ' + fmtN(S.sprCap) + ')' : 'off') + ', narrow band ' + (nbActive() ? 'on' : 'off') + '. View ' + cv.width + ' × ' + cv.height + ' pixels, look-only copies ' + (1 + (S.detail | 0)) + ' water, ' + (1 + (S.sprDetail | 0)) + ' whitewater' + (S.liteRun ? ' (1 and at most 2 while the sim runs: Lighter while running is on)' : '') + '.');
       // 1. the live sim from the start
       S.tab = 'live'; applyMode(); setCPlay(false); setPlaying(false); lcClear(); resetSim(0);
       if (sim.whenReady) {

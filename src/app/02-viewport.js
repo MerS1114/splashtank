@@ -150,10 +150,14 @@
   // show slot a (and slot bi to blend the water towards, by w)
   function showSlots(a, bi, w) {
     const A = SLOTS[a], B = SLOTS[bi], N = w < 0.5 ? A : B;
-    const kW = 1 + Math.min(S.detail | 0, LKMAX - 1), kS = 1 + Math.min(S.sprDetail | 0, LKMAX - 1), kD = 5;
+    // while the live sim runs, drawing shares the GPU with the solver (on Mer's UHD 730 a redraw cost more than half a step), so the
+    // look-only copies are left out then: none for the water, at most one for whitewater
+    const lite = S.liteRun && viewMode() === 'live' && S.playing && !S.lcPlay;
+    const dW = lite ? 0 : S.detail | 0, dS = lite ? Math.min(S.sprDetail | 0, 1) : S.sprDetail | 0;
+    const kW = 1 + Math.min(dW, LKMAX - 1), kS = 1 + Math.min(dS, LKMAX - 1), kD = lite ? 1 : 5;
     const vW = (w > 0 ? Math.max(A.nW, B.nW) : A.nW) * kW, vD = N.nD * kD, vS = N.nS * kS, need = Math.max(vW, vD, vS);
     if (dummyPos.count < need) { dummyPos = new THREE.BufferAttribute(new Uint8Array(Math.ceil(need * 1.25)), 1); [geoW, geoD, geoS].forEach((g) => g.setAttribute('position', dummyPos)); }
-    U.uKw.value = S.detail | 0; U.uKs.value = Math.min(S.sprDetail | 0, LKMAX - 1); U.uStreak.value = S.streak;
+    U.uKw.value = dW; U.uKs.value = Math.min(dS, LKMAX - 1); U.uStreak.value = S.streak;
     const uw = matW.uniforms;
     uw.tPA.value = A.T.p; uw.tSA.value = A.T.s; uw.tFA.value = A.T.f; uw.tPB.value = B.T.p; uw.tSB.value = B.T.s; uw.tFB.value = B.T.f;
     uw.uNA.value = A.nW; uw.uNB.value = w > 0 ? B.nW : 0; uw.uFmA.value = A.fm ? 1 : 0; uw.uFmB.value = B.fm ? 1 : 0; uw.uBlend.value = w; uw.uK1.value = kW;
