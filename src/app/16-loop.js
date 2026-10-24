@@ -27,7 +27,12 @@
     const prev = S.prevStates && S.prevStates.length === states.length ? S.prevStates : null;
     const vfast = Math.max(objSpeed(prev, states, DT, S.colMax / (S.scale || 1)), (sim.stats && sim.stats.vmax) || 0);
     const hc = S.engine === 'flip' ? sim.h : 2 * S.liveD, lo = Math.max(1, S.subMin | 0), hi = Math.max(lo, S.subMax | 0);
-    const n = clamp(Math.ceil(DT * vfast / (1.5 * hc)), lo, hi); S.lastSub = n;
+    // the speed comes back from the GPU only after the steps queued before it, so in a sudden splash it is behind: once a frame needed
+    // more substeps, keep that many for a second rather than dropping back on an old reading (too few substeps tear the water)
+    let n = clamp(Math.ceil(DT * vfast / (1.5 * hc)), lo, hi);
+    const now = performance.now();
+    if (n >= (S.subHold || 0) || now > (S.subHoldT || 0)) { S.subHold = n; S.subHoldT = now + 1000; } else n = S.subHold;
+    S.lastSub = n;
     const par = simPar();
     const t0 = performance.now();
     for (let s = 1; s <= n; s++) { par.time = (S.frame + s / n) * DT; runner.step(DT / n, prev && s < n ? lerpStates(prev, states, s / n) : states, par); }
@@ -108,10 +113,10 @@
       if (S.playing && !S.baking && !prep) {
         if (isGpu()) {
           // Steps stay queued until the browser reports them done, which can take far longer than the GPU work itself (seen on Mer's Intel
-          // UHD 730), so more than one frame may wait. But keep the queue to about half a second of steps at the rate they really finish
+          // UHD 730), so more than one frame may wait. But keep the queue to about 0.3 s of steps at the rate they really finish
           // (lastMs): a longer one made Stop take effect seconds late and kept the GPU busy after it (20 steps of 0.47 s each at spacing 0.02).
           const sub = S.lastSub || 1, svc = Math.max(sim.lastMs || 0, sim.gpuMs || 0);
-          const lim = svc ? Math.max(sub, Math.min(8 * sub, Math.floor(500 / svc))) : 2 * sub;
+          const lim = svc ? Math.max(sub, Math.min(8 * sub, Math.floor(300 / svc))) : 2 * sub;
           acc = Math.min(acc + dt, 3 * DT);
           for (let k = 0; k < 3 && acc >= DT && (sim.inflight || 0) < lim; k++) { acc -= DT; stepOnce(); sim.maxQ = Math.max(sim.maxQ || 0, sim.inflight || 0); }
         } else {
