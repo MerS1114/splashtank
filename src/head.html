@@ -54,6 +54,11 @@ svg { flex-shrink: 0; }
 .tb-right { display: flex; align-items: center; gap: 6px; }
 .chip-live { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 11px; background: #2c3a2c; color: #a9dca9; font-size: 11px; white-space: nowrap; }
 .chip-live i { width: 7px; height: 7px; border-radius: 4px; background: #6fd36f; }
+.chip-ww { background: #2a3340; color: #c9d6e6; }
+.chip-ww i { background: var(--wwc, #888); }
+.tb-bake { display: inline-flex; gap: 4px; }
+.btn.sm { height: 22px; padding: 0 8px; font-size: 11px; }
+#ww-lane { top: 10px; height: 3px; pointer-events: none; }
 
 /* ---------- buttons and fields ---------- */
 .btn {
@@ -162,7 +167,7 @@ select.dd option, select option { background: #2b2b2b; color: #e2e2e2; }
 .kf-key { position: absolute; top: 6px; width: 10px; height: 10px; margin-left: -5px; transform: rotate(45deg); background: #c8c8c8; border: 1px solid #111; cursor: ew-resize; }
 .kf-key.emitter { background: #35d07f; }
 .kf-key.cur { background: var(--accent); border-color: #fff; }
-.kf-cache { position: relative; height: 11px; border-bottom: 1px solid #333; cursor: ew-resize; }
+.kf-cache { position: relative; height: 14px; border-bottom: 1px solid #333; cursor: ew-resize; }
 .kf-cache i { position: absolute; left: 0; width: 0; border-radius: 1px; }
 .kf-cache i[hidden] { display: none; }
 #bk-bar, #bk-prog { top: 1px; height: 3px; }
@@ -330,7 +335,7 @@ kbd { font: 500 10px var(--font-mono); color: #e8e8e8; background: #3c3c3c; bord
 @media (max-width: 860px) {
   .app { grid-template-rows: 32px minmax(0, 1fr) 0; }
   .main { flex-direction: column; }
-  .shelf, .split.v, .menus, .brand small, .chip-live { display: none; }
+  .shelf, .split.v, .menus, .brand small, .chip-live, .tb-bake { display: none; }
   .rightcol { width: auto; height: 46%; flex-shrink: 0; }
   .outliner { height: 110px; }
   .vhead .hide-narrow { display: none; }
@@ -354,7 +359,9 @@ kbd { font: 500 10px var(--font-mono); color: #e8e8e8; background: #3c3c3c; bord
       <button type="button" data-v="bake" aria-pressed="false" data-tip="Bake: run the whole shot at full quality into a cache, then play it back.">Bake</button>
     </div>
     <div class="tb-right">
+      <span class="tb-bake"><button class="btn flat sm" id="tb-bakew" type="button" data-tip="Bake the water only (the Bake settings, without whitewater).">Bake water</button><button class="btn flat sm" id="tb-bakeww" type="button" data-tip="Bake whitewater for the shown bake from its water, with the Whitewater settings as they are now.">Bake whitewater</button></span>
       <span class="chip-live" id="chip-live"><i></i><span id="chip-live-t">Live</span></span>
+      <span class="chip-live chip-ww" id="chip-ww" data-tip="Where the whitewater you see comes from. Live: made by the live sim. Cached: made while the water was baked. Baked: made by Bake whitewater from the baked water."><i></i><span id="chip-ww-t">Whitewater</span></span>
       <div class="bar" id="bar-live">
         <label class="sel" for="scene"><span>Scene</span>
           <select id="scene">
@@ -530,11 +537,13 @@ kbd { font: 500 10px var(--font-mono); color: #e8e8e8; background: #3c3c3c; bord
               <div class="pos" id="bake-note">Uses the Simulation settings, the keyframes and any recorded motion.</div>
               <div class="pos" id="bake-est"></div>
               <div class="btnrow">
-                <button class="btn primary" id="btn-bake" type="button">Bake simulation</button>
+                <button class="btn primary" id="btn-bake" type="button" data-tip="Bakes the water and its whitewater together.">Bake simulation</button><button class="btn flat" id="btn-bakew" type="button" data-tip="Bakes only the water, faster. Then Bake whitewater makes the whitewater from it, and can be run again with other settings.">Bake water</button>
                 <button class="btn flat" id="btn-cancel" type="button" hidden>Cancel</button>
               </div>
               <div class="progress" id="bake-progress" hidden><i id="bake-prog"></i></div>
               <div class="pos" id="bake-status"></div>
+              <div class="btnrow"><button class="btn flat" id="c-ww" type="button" data-tip="Makes the whitewater for the shown bake from its water, with the Whitewater settings as they are now (Houdini style: the water is not simulated again). Change the settings and run it again to try another look. Replaces the bake's whitewater; save the cache to keep it.">Bake whitewater</button><button class="btn flat" id="c-ww-stop" type="button" hidden>Stop</button></div>
+              <div class="pos" id="ww-status"></div>
             </div>
             <div class="group" id="g-cache" data-ptab="bake">
               <h2>Cache playback</h2>
@@ -560,7 +569,7 @@ kbd { font: 500 10px var(--font-mono); color: #e8e8e8; background: #3c3c3c; bord
 
           <div class="group" id="g-sim" data-ptab="sim bake"><h2 data-tip="One set of settings for both the live view and the bake. Changing them clears the live cache.">Simulation</h2></div>
           <div class="group" id="g-perf" data-ptab="perf"><h2>Performance</h2>
-            <div class="btnrow"><button class="btn flat" id="btn-smooth" type="button" data-tip="Measures how smoothly this scene runs on your computer: 10 seconds of the live sim from the start, then 10 seconds of the bake if there is one, then how long each object's collision shape takes to rebuild (what happens after scaling). Every drawn frame is timed, so it shows the hitches and where the time goes. About 30 seconds.">Smoothness test</button><button class="btn flat" id="btn-bench" type="button" data-tip="Times every stage of the FLIP solver on your GPU, with and without the speed-ups, on whatever is in the scene. It takes about 20 seconds.">Solver benchmark</button><button class="btn flat" id="btn-bench-copy" type="button">Copy results</button></div>
+            <div class="btnrow"><button class="btn flat" id="btn-smooth" type="button" data-tip="Measures how smoothly this scene runs on your computer: 10 seconds of the live sim from the start, then 10 seconds of the bake if there is one, then how long each object's collision shape takes to rebuild (what happens after scaling). Every drawn frame is timed, so it shows the hitches and where the time goes. About 30 seconds.">Smoothness test</button><button class="btn flat" id="btn-bench" type="button" data-tip="Times every stage of the FLIP solver on your GPU, with and without the speed-ups. It measures the scene from the playhead on (put the playhead just before the moment you care about, like an impact); with the playhead at the start it measures from 2.5 s. Every run simulates up to that moment again first, so it takes a few minutes.">Solver benchmark</button><button class="btn flat" id="btn-bench-copy" type="button">Copy results</button></div>
             <textarea id="bench-out" readonly rows="14" spellcheck="false" aria-label="Benchmark results"></textarea>
           </div>
 

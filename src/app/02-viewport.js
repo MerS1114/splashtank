@@ -25,44 +25,65 @@
   // ---- integer textures for the frames, made with WebGL directly (three.js r128 cannot update part of a texture) and handed to three.js
   // by setting the WebGL texture of an empty THREE.Texture, which three.js then only binds ----
   const gl = renderer.getContext();
-  const TFMT = { p: [gl.RGB16UI, gl.RGB_INTEGER, gl.UNSIGNED_SHORT, 3], s: [gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE, 1], f: [gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE, 1], k: [gl.R32UI, gl.RED_INTEGER, gl.UNSIGNED_INT, 1] };
-  function slotAlloc(sl, rows) {
-    rows = Math.max(16, rows); if (sl.gl && sl.rows >= rows) return;
-    rows = Math.min(Math.ceil(rows * 1.25 / 16) * 16, gl.getParameter(gl.MAX_TEXTURE_SIZE));
-    if (sl.gl) for (const k in sl.gl) gl.deleteTexture(sl.gl[k]);
-    sl.gl = {}; sl.T = sl.T || {};
-    for (const k of ['p', 's', 'f', 'k']) {
+  // [format, values per point, texels per point]. Positions are one-channel 16-bit, three texels per point (a texture 3 x TEXW wide):
+  // three-channel textures have no native format on D3D (Chrome on Windows), so each upload of them was converted to four channels on the CPU.
+  const TFMT = { p: [gl.R16UI, gl.RED_INTEGER, gl.UNSIGNED_SHORT, 3, 3], s: [gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE, 1, 1], f: [gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE, 1, 1], k: [gl.R32UI, gl.RED_INTEGER, gl.UNSIGNED_INT, 1, 1],
+    q: [gl.R32UI, gl.RED_INTEGER, gl.UNSIGNED_INT, 1, 1], w: [gl.R16UI, gl.RED_INTEGER, gl.UNSIGNED_SHORT, 1, 1] };   // q, w: compact frames (compactFrame)
+  // each texture of a slot sized to what it holds (rows of TEXW points: positions for all, speed for water and deep, white water for water,
+  // whitewater codes for whitewater only), grown with 25% to spare. False when the GPU is out of memory (the slot is then left empty).
+  const TBYTES = { p: 6, s: 1, f: 1, k: 4, q: 4, w: 2 }, OLDK = { p: 0, s: 0, f: 0, k: 0 };
+  // exact: no room to spare (a finished bake that is all kept on the GPU never puts a bigger frame into the slot)
+  function slotAlloc(sl, need, exact) {
+    if (!sl.gl) { sl.gl = {}; sl.T = sl.T || {}; sl.rows = {}; }
+    need = need || OLDK;
+    for (const k in sl.gl) if (sl.gl[k] && !(k in need)) { gl.deleteTexture(sl.gl[k]); sl.gl[k] = null; sl.rows[k] = 0; }   // the other layout's textures
+    for (const k in need) {
+      const want = Math.max(exact ? 1 : 16, need[k] || 0); if (sl.gl[k] && sl.rows[k] >= want && (!exact || sl.rows[k] <= want)) continue;
+      const rows = Math.min(exact ? want : Math.ceil(want * 1.25 / 16) * 16, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+      if (sl.gl[k]) { gl.deleteTexture(sl.gl[k]); sl.gl[k] = null; sl.rows[k] = 0; }
+      sl.key = null;
       const t = gl.createTexture(); renderer.state.bindTexture(gl.TEXTURE_2D, t);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      gl.texStorage2D(gl.TEXTURE_2D, 1, TFMT[k][0], TEXW, rows);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, TFMT[k][0], TEXW * TFMT[k][4], rows);
+      if (gl.getError() === gl.OUT_OF_MEMORY) { gl.deleteTexture(t); return false; }
       sl.gl[k] = t; if (!sl.T[k]) sl.T[k] = new THREE.Texture();
-      renderer.properties.get(sl.T[k]).__webglTexture = t;
+      renderer.properties.get(sl.T[k]).__webglTexture = t; sl.rows[k] = rows;
     }
-    sl.rows = rows; sl.key = null;
+    return true;
   }
+  function slotBytes(sl) { let b = 0; if (sl.gl) for (const k in TBYTES) if (sl.gl[k]) b += sl.rows[k] * TEXW * TBYTES[k]; return b; }
+  function slotFree(sl) { if (sl.gl) for (const k in sl.gl) if (sl.gl[k]) gl.deleteTexture(sl.gl[k]); sl.gl = null; sl.rows = {}; sl.key = null; sl.nW = sl.nD = sl.nS = 0; }
   // n values of a frame array into rows from row0: the whole rows, then the part of the last one
   function upTex(t, k, row0, data, n) {
     if (!n) return 0;
-    const f = TFMT[k], c = f[3], full = Math.floor(n / TEXW), rem = n - full * TEXW;
+    const f = TFMT[k], c = f[3], tp = f[4], full = Math.floor(n / TEXW), rem = n - full * TEXW;
     renderer.state.bindTexture(gl.TEXTURE_2D, t);
-    if (full) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row0, TEXW, full, f[1], f[2], data, 0);
-    if (rem) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row0 + full, rem, 1, f[1], f[2], data, full * TEXW * c);
+    if (full) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row0, TEXW * tp, full, f[1], f[2], data, 0);
+    if (rem) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row0 + full, rem * tp, 1, f[1], f[2], data, full * TEXW * c);
     return n * c * data.BYTES_PER_ELEMENT;
   }
   // a frame into a slot, as it is (no per-point work on the CPU)
-  function slotLoad(sl, fr, b) {
+  function slotLoad(sl, fr, b, exact) {
     const t0 = performance.now(), show = S.showSpray !== false;
     const nW = fr ? fr.n : 0, nD = fr && fr.dp ? fr.dp.n : 0, nS = fr && show && fr.sp ? fr.sp.n : 0;
     const rW = Math.ceil(nW / TEXW), rD = Math.ceil(nD / TEXW), rS = Math.ceil(nS / TEXW);
-    slotAlloc(sl, rW + rD + rS + 1);
+    const cq = !!(fr && fr.p32);   // compact frame: positions in q, speed and white water in w
+    if (!slotAlloc(sl, cq ? { q: rW + rD + rS, w: rW + rD, k: rS } : { p: rW + rD + rS, s: rW + rD, f: fr && fr.fm ? rW : 0, k: rS }, exact)) { perf.oom = (perf.oom || 0) + 1; return false; }
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     let by = 0;
-    if (nW) { by += upTex(sl.gl.p, 'p', 0, fr.pos, nW) + upTex(sl.gl.s, 's', 0, fr.spd, nW); if (fr.fm) by += upTex(sl.gl.f, 'f', 0, fr.fm, nW); }
-    if (nD) by += upTex(sl.gl.p, 'p', rW, fr.dp.pos, nD) + upTex(sl.gl.s, 's', rW, fr.dp.spd, nD);
-    if (nS) by += upTex(sl.gl.p, 'p', rW + rD, fr.sp.pos, nS) + upTex(sl.gl.k, 'k', rW + rD, fr.sp.pk, nS);
-    Object.assign(sl, { nW, nD, nS, rowD: rW, rowS: rW + rD, fm: !!(fr && fr.fm), b: (fr && fr.b) || b || DEFB, alive: fr ? frameAlive(fr, show) : 0 });
+    if (cq) {
+      if (nW) by += upTex(sl.gl.q, 'q', 0, fr.p32, nW) + upTex(sl.gl.w, 'w', 0, fr.sf, nW);
+      if (nD) by += upTex(sl.gl.q, 'q', rW, fr.dp.p32, nD) + upTex(sl.gl.w, 'w', rW, fr.dp.sf, nD);
+      if (nS) by += upTex(sl.gl.q, 'q', rW + rD, fr.sp.p32, nS) + upTex(sl.gl.k, 'k', 0, fr.sp.pk, nS);
+    } else {
+      if (nW) { by += upTex(sl.gl.p, 'p', 0, fr.pos, nW) + upTex(sl.gl.s, 's', 0, fr.spd, nW); if (fr.fm) by += upTex(sl.gl.f, 'f', 0, fr.fm, nW); }
+      if (nD) by += upTex(sl.gl.p, 'p', rW, fr.dp.pos, nD) + upTex(sl.gl.s, 's', rW, fr.dp.spd, nD);
+      if (nS) by += upTex(sl.gl.p, 'p', rW + rD, fr.sp.pos, nS) + upTex(sl.gl.k, 'k', 0, fr.sp.pk, nS);   // whitewater codes from row 0 of their own texture
+    }
+    Object.assign(sl, { q: cq ? fr.q : null, nW, nD, nS, rowD: rW, rowS: rW + rD, fm: !!(fr && fr.fm), b: (fr && fr.b) || b || DEFB, sb: (fr && fr.sb) || null, alive: fr ? frameAlive(fr, show) : 0 });
     perf.up = performance.now() - t0; perf.upBytes = by; perf.upN++;
+    return true;
   }
   // three draws: water (blended between two frames), deep water and whitewater (from the nearer frame). The vertex count is points x copies;
   // the only vertex attribute is a dummy that three.js needs to know how many vertices to draw.
@@ -81,18 +102,25 @@
     ' vec3 ball(uint s) { vec3 r = vec3(float(hsh(s) & 65535u), float(hsh(s + 7919u) & 65535u), float(hsh(s + 104729u) & 65535u)) / 32767.5 - 1.0; float l = length(r); return l > 1.0 ? r / l : r; }' +
     ' void hide() { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; vK = 0.0; vS = 0.0; vF = 0.0; vL = 0.0; }' +
     ' ivec2 tcOf(int i) { return ivec2(i % ' + TEXW + ', i / ' + TEXW + '); }' +
+    // a position on 0..65535 across the box: three 16-bit texels, or (qb.x > 0, compact frames) one 32-bit texel with qb bits an axis
+    ' vec3 pAt(highp usampler2D t, ivec2 tc, vec3 qb) { if (qb.x < 0.5) { int x = tc.x * 3; return vec3(uvec3(texelFetch(t, ivec2(x, tc.y), 0).r, texelFetch(t, ivec2(x + 1, tc.y), 0).r, texelFetch(t, ivec2(x + 2, tc.y), 0).r)); }' +
+    '  uint v = texelFetch(t, tc, 0).r; uint bx = uint(qb.x + 0.5); uint by = uint(qb.y + 0.5); uint bz = uint(qb.z + 0.5); uint mx = (1u << bx) - 1u; uint my = (1u << by) - 1u; uint mz = (1u << bz) - 1u;' +
+    '  return vec3(float(v & mx) / float(mx), float((v >> bx) & my) / float(my), float((v >> (bx + by)) & mz) / float(mz)) * 65535.0; }' +
     ' void place(vec3 p, float sz, float minPx) { vec4 mv = modelViewMatrix * vec4(p, 1.0); gl_Position = projectionMatrix * mv; gl_PointSize = max((uOrtho > 0.0 ? uSize * uOrtho : uSize * uScale / (-mv.z)) * sz, minPx); }';
   // water: blended between frame A and frame B (the same particle has the same number in both). A particle only in B shows at once;
   // one only in A shows until halfway.
   const VW = VHEAD + ' uniform highp usampler2D tPA; uniform highp usampler2D tSA; uniform highp usampler2D tFA; uniform highp usampler2D tPB; uniform highp usampler2D tSB; uniform highp usampler2D tFB;' +
-    ' uniform float uNA; uniform float uNB; uniform float uFmA; uniform float uFmB; uniform float uBlend; uniform float uFdt; uniform vec3 uB0A; uniform vec3 uQA; uniform vec3 uB0B; uniform vec3 uQB;' +
+    ' uniform float uNA; uniform float uNB; uniform float uFmA; uniform float uFmB; uniform float uBlend; uniform float uFdt; uniform vec3 uB0A; uniform vec3 uQA; uniform vec3 uB0B; uniform vec3 uQB; uniform vec3 uQbA; uniform vec3 uQbB;' +
     ' void main() { int k1 = int(uK1 + 0.5); int bi = gl_VertexID / k1; float lk = float(gl_VertexID - bi * k1); ivec2 tc = tcOf(bi); bool bl = uBlend > 0.0;' +
-    '  uint sa = bi < int(uNA + 0.5) ? texelFetch(tSA, tc, 0).r : 255u; uint sb = (bl && bi < int(uNB + 0.5)) ? texelFetch(tSB, tc, 0).r : 255u;' +
+    // compact frames hold speed | white-water level << 8 in one texel; the others a speed texel and a white-water texel (level x 17)
+    '  uint ra = bi < int(uNA + 0.5) ? texelFetch(tSA, tc, 0).r : 255u; uint rb = (bl && bi < int(uNB + 0.5)) ? texelFetch(tSB, tc, 0).r : 255u;' +
+    '  bool cA = uQbA.x > 0.5; bool cB = uQbB.x > 0.5; uint sa = cA ? (ra & 255u) : ra; uint sb = cB ? (rb & 255u) : rb;' +
     '  bool va = sa != 255u; bool vb = sb != 255u; vec3 p; float spd; float lv;' +
-    '  float la = (va && uFmA > 0.5) ? floor(float(texelFetch(tFA, tc, 0).r) / 17.0 + 0.5) : 0.0; float lb = (vb && uFmB > 0.5) ? floor(float(texelFetch(tFB, tc, 0).r) / 17.0 + 0.5) : 0.0;' +
+    '  float la = !va ? 0.0 : cA ? float(ra >> 8u) : uFmA > 0.5 ? floor(float(texelFetch(tFA, tc, 0).r) / 17.0 + 0.5) : 0.0;' +
+    '  float lb = !vb ? 0.0 : cB ? float(rb >> 8u) : uFmB > 0.5 ? floor(float(texelFetch(tFB, tc, 0).r) / 17.0 + 0.5) : 0.0;' +
     // a slot can be a different particle in the next frame (narrow band reseeding reuses slots): if it is further than it could have moved,
     // it is not blended but switches halfway, so nothing streaks across the water
-    '  vec3 pa = va ? vec3(texelFetch(tPA, tc, 0).xyz) * uQA + uB0A : vec3(0.0); vec3 pb = vb ? vec3(texelFetch(tPB, tc, 0).xyz) * uQB + uB0B : vec3(0.0);' +
+    '  vec3 pa = va ? pAt(tPA, tc, uQbA) * uQA + uB0A : vec3(0.0); vec3 pb = vb ? pAt(tPB, tc, uQbB) * uQB + uB0B : vec3(0.0);' +
     '  float sm = max(float(sa), float(sb)); if (va && vb && sm < 191.0 && length(pb - pa) > sm / 16.0 / uVs * 2.0 * uFdt + 3.0 * uD) { if (uBlend < 0.5) vb = false; else va = false; }' +
     '  if (va && vb) { p = mix(pa, pb, uBlend); spd = mix(float(sa), float(sb), uBlend) / 16.0; lv = floor(mix(la, lb, uBlend) + 0.5); }' +
     '  else if (va && uBlend < 0.5) { p = pa; spd = float(sa) / 16.0; lv = la; }' +
@@ -103,18 +131,18 @@
     '  if (lk > 0.5) p += ball(uint(bi) * 16u + uint(lk)) * 0.5 * uD;' +
     '  place(p, 1.0 - 0.3 * vF, 1.5); }';
   // deep water (narrow band, look only): the centre of each deep cell and four extras spread over the cell
-  const VD = VHEAD + ' uniform highp usampler2D tP; uniform highp usampler2D tS; uniform float uBase; uniform float uN; uniform vec3 uB0; uniform vec3 uQ;' +
+  const VD = VHEAD + ' uniform highp usampler2D tP; uniform highp usampler2D tS; uniform float uBase; uniform float uN; uniform vec3 uB0; uniform vec3 uQ; uniform vec3 uQb;' +
     ' void main() { int k1 = int(uK1 + 0.5); int bi = gl_VertexID / k1; float lk = float(gl_VertexID - bi * k1); if (bi >= int(uN + 0.5)) { hide(); return; }' +
-    '  int idx = int(uBase + 0.5) + bi; ivec2 tc = tcOf(idx); uint s = texelFetch(tS, tc, 0).r; if (s == 255u) { hide(); return; }' +
-    '  vec3 p = vec3(texelFetch(tP, tc, 0).xyz) * uQ + uB0; vK = 3.0; vS = float(s) / 16.0; vL = 0.0; vF = 0.0;' +
+    '  int idx = int(uBase + 0.5) + bi; ivec2 tc = tcOf(idx); uint s = texelFetch(tS, tc, 0).r & 255u; if (s == 255u) { hide(); return; }' +
+    '  vec3 p = pAt(tP, tc, uQb) * uQ + uB0; vK = 3.0; vS = float(s) / 16.0; vL = 0.0; vF = 0.0;' +
     '  if (lk > 0.5) p += ball(uint(idx) * 16u + uint(lk)) * 0.5 * uD * uCR;' +
     '  place(p, 1.3, 1.5); }';
   // whitewater from its 32-bit code: spray (its copies trail back along its motion as a short streak), mist (a soft cloud), foam (flat on the
   // surface, fading with its life) and bubbles
-  const VS = VHEAD + ' uniform highp usampler2D tP; uniform highp usampler2D tK; uniform float uBase; uniform float uN; uniform vec3 uB0; uniform vec3 uQ;' +
+  const VS = VHEAD + ' uniform highp usampler2D tP; uniform highp usampler2D tK; uniform float uBase; uniform float uN; uniform vec3 uB0; uniform vec3 uQ; uniform vec3 uQb;' +
     ' void main() { int k1 = int(uK1 + 0.5); int bi = gl_VertexID / k1; float lk = float(gl_VertexID - bi * k1); if (bi >= int(uN + 0.5)) { hide(); return; }' +
-    '  int idx = int(uBase + 0.5) + bi; ivec2 tc = tcOf(idx); uint pk = texelFetch(tK, tc, 0).r; if (pk == 0u) { hide(); return; }' +
-    '  vec3 p = vec3(texelFetch(tP, tc, 0).xyz) * uQ + uB0; uint kc = (pk >> 29u) & 3u; float spd = float((pk >> 21u) & 255u) / 4.0; float life = float(pk & 1023u) / 1023.0;' +
+    '  int idx = int(uBase + 0.5) + bi; ivec2 tc = tcOf(idx); uint pk = texelFetch(tK, tcOf(bi), 0).r; if (pk == 0u) { hide(); return; }' +
+    '  vec3 p = pAt(tP, tc, uQb) * uQ + uB0; uint kc = (pk >> 29u) & 3u; float spd = float((pk >> 21u) & 255u) / 4.0; float life = float(pk & 1023u) / 1023.0;' +
     '  vF = 0.0; vL = 0.0; uint hs = uint(idx) * 16u + uint(lk);' +
     '  if (kc == 0u) { vK = 1.0; vS = spd; if (lk > uKs + 0.5) { hide(); return; }' +
     '   float u = float(pk & 1023u) / 1023.0 * 2.0 - 1.0; float w = float((pk >> 10u) & 1023u) / 1023.0 * 2.0 - 1.0; vec3 n = vec3(u, w, 1.0 - abs(u) - abs(w));' +
@@ -141,29 +169,35 @@
     ' if (uMode > 0.5) { vec3 c = vK > 2.5 ? ' + v3(TYPE_COL.deep) + ' : (vL > 0.3 ? ' + v3(TYPE_COL.churn) + ' : ' + v3(TYPE_COL.water) + '); gl_FragColor = vec4(c*sh,1.0); return; }' +
     ' float t = clamp(vS/uMax,0.0,1.0); vec3 col = vK > 2.5 ? ramp(t)*0.82 : mix(ramp(t), vec3(0.97,0.99,1.0), vF); gl_FragColor = vec4(col*sh,1.0);\n' +
     '#endif\n }';
-  const matW = new THREE.ShaderMaterial({ uniforms: Object.assign({}, U, { tPA: tex(), tSA: tex(), tFA: tex(), tPB: tex(), tSB: tex(), tFB: tex(), uNA: num(), uNB: num(), uFmA: num(), uFmB: num(), uBlend: num(), uFdt: num(1 / 24), uK1: num(1), uB0A: vec(), uQA: vec(), uB0B: vec(), uQB: vec() }), vertexShader: VW, fragmentShader: FRAG });
-  const matD = new THREE.ShaderMaterial({ uniforms: Object.assign({}, U, { tP: tex(), tS: tex(), uBase: num(), uN: num(), uK1: num(5), uB0: vec(), uQ: vec() }), vertexShader: VD, fragmentShader: FRAG });
-  const matS = new THREE.ShaderMaterial({ uniforms: Object.assign({}, U, { tP: tex(), tK: tex(), uBase: num(), uN: num(), uK1: num(1), uB0: vec(), uQ: vec() }), vertexShader: VS, fragmentShader: FRAG,
+  const matW = new THREE.ShaderMaterial({ uniforms: Object.assign({}, U, { tPA: tex(), tSA: tex(), tFA: tex(), tPB: tex(), tSB: tex(), tFB: tex(), uNA: num(), uNB: num(), uFmA: num(), uFmB: num(), uBlend: num(), uFdt: num(1 / 24), uK1: num(1), uB0A: vec(), uQA: vec(), uB0B: vec(), uQB: vec(), uQbA: vec(), uQbB: vec() }), vertexShader: VW, fragmentShader: FRAG });
+  const matD = new THREE.ShaderMaterial({ uniforms: Object.assign({}, U, { tP: tex(), tS: tex(), uBase: num(), uN: num(), uK1: num(5), uB0: vec(), uQ: vec(), uQb: vec() }), vertexShader: VD, fragmentShader: FRAG });
+  const matS = new THREE.ShaderMaterial({ uniforms: Object.assign({}, U, { tP: tex(), tK: tex(), uBase: num(), uN: num(), uK1: num(1), uB0: vec(), uQ: vec(), uQb: vec() }), vertexShader: VS, fragmentShader: FRAG,
     defines: { WW: 1 }, transparent: true, depthWrite: false });
   const pmat = matW;   // the shared uniforms (size, colours, ...) are the same objects in all three materials
   const boxU = (b0, q, b) => { b0.value.set(b.x0, b.y0, b.z0); q.value.set((b.x1 - b.x0) / 65535, (b.y1 - b.y0) / 65535, (b.z1 - b.z0) / 65535); };
   // show slot a (and slot bi to blend the water towards, by w)
   function showSlots(a, bi, w) {
     const A = SLOTS[a], B = SLOTS[bi], N = w < 0.5 ? A : B;
-    const kW = 1 + Math.min(S.detail | 0, LKMAX - 1), kS = 1 + Math.min(S.sprDetail | 0, LKMAX - 1), kD = 5;
+    // while the live sim runs, drawing shares the GPU with the solver (on Mer's UHD 730 a redraw cost more than half a step), so the
+    // look-only copies are left out then: none for the water, at most one for whitewater
+    const lite = (S.liteRun && viewMode() === 'live' && S.playing && !S.lcPlay) || (S.liteBake && viewMode() === 'cache' && S.cplay);
+    const dW = lite ? 0 : S.detail | 0, dS = lite ? Math.min(S.sprDetail | 0, 1) : S.sprDetail | 0;
+    const kW = 1 + Math.min(dW, LKMAX - 1), kS = 1 + Math.min(dS, LKMAX - 1), kD = lite ? 1 : 5;
     const vW = (w > 0 ? Math.max(A.nW, B.nW) : A.nW) * kW, vD = N.nD * kD, vS = N.nS * kS, need = Math.max(vW, vD, vS);
     if (dummyPos.count < need) { dummyPos = new THREE.BufferAttribute(new Uint8Array(Math.ceil(need * 1.25)), 1); [geoW, geoD, geoS].forEach((g) => g.setAttribute('position', dummyPos)); }
-    U.uKw.value = S.detail | 0; U.uKs.value = Math.min(S.sprDetail | 0, LKMAX - 1); U.uStreak.value = S.streak;
+    U.uKw.value = dW; U.uKs.value = Math.min(dS, LKMAX - 1); U.uStreak.value = S.streak;
     const uw = matW.uniforms;
-    uw.tPA.value = A.T.p; uw.tSA.value = A.T.s; uw.tFA.value = A.T.f; uw.tPB.value = B.T.p; uw.tSB.value = B.T.s; uw.tFB.value = B.T.f;
+    // compact slots: positions in T.q, speed and white water in T.w (also bound as the unused white-water texture)
+    const tp = (X) => (X.q ? X.T.q : X.T.p), ts = (X) => (X.q ? X.T.w : X.T.s), tff = (X) => (X.q ? X.T.w : X.T.f), qb = (v, X) => (X.q ? v.set(X.q[0], X.q[1], X.q[2]) : v.set(0, 0, 0));
+    uw.tPA.value = tp(A); uw.tSA.value = ts(A); uw.tFA.value = tff(A); uw.tPB.value = tp(B); uw.tSB.value = ts(B); uw.tFB.value = tff(B); qb(uw.uQbA.value, A); qb(uw.uQbB.value, B);
     uw.uNA.value = A.nW; uw.uNB.value = w > 0 ? B.nW : 0; uw.uFmA.value = A.fm ? 1 : 0; uw.uFmB.value = B.fm ? 1 : 0; uw.uBlend.value = w; uw.uK1.value = kW;
     boxU(uw.uB0A, uw.uQA, A.b || DEFB); boxU(uw.uB0B, uw.uQB, B.b || DEFB);
-    const ud = matD.uniforms; ud.tP.value = N.T.p; ud.tS.value = N.T.s; ud.uBase.value = N.rowD * TEXW; ud.uN.value = N.nD; ud.uK1.value = kD; boxU(ud.uB0, ud.uQ, N.b || DEFB);
-    const us = matS.uniforms; us.tP.value = N.T.p; us.tK.value = N.T.k; us.uBase.value = N.rowS * TEXW; us.uN.value = N.nS; us.uK1.value = kS; boxU(us.uB0, us.uQ, N.b || DEFB);
+    const ud = matD.uniforms; ud.tP.value = tp(N); ud.tS.value = ts(N); qb(ud.uQb.value, N); ud.uBase.value = N.rowD * TEXW; ud.uN.value = N.nD; ud.uK1.value = kD; boxU(ud.uB0, ud.uQ, N.b || DEFB);
+    const us = matS.uniforms; us.tP.value = tp(N); us.tK.value = N.T.k; qb(us.uQb.value, N); us.uBase.value = N.rowS * TEXW; us.uN.value = N.nS; us.uK1.value = kS; boxU(us.uB0, us.uQ, N.sb || N.b || DEFB);   // whitewater is quantized across the whitewater area
     geoW.setDrawRange(0, vW); geoD.setDrawRange(0, vD); geoS.setDrawRange(0, vS); shownN = N.nW + N.nD + N.nS;
   }
   function hideSlots() { geoW.setDrawRange(0, 0); geoD.setDrawRange(0, 0); geoS.setDrawRange(0, 0); shownN = 0; }
-  SLOTS.forEach((sl) => slotAlloc(sl, 16));
+  SLOTS.forEach((sl) => slotAlloc(sl, null));
   const points = new THREE.Group(), pointsW = new THREE.Points(geoW, matW), pointsD = new THREE.Points(geoD, matD), pointsS = new THREE.Points(geoS, matS);
   [pointsW, pointsD, pointsS].forEach((q) => { q.frustumCulled = false; points.add(q); }); scene.add(points);
 
@@ -221,6 +255,19 @@
   const gridGeo = new THREE.BufferGeometry();
   const gridMat = new THREE.LineBasicMaterial({ color: 0x8a949e, transparent: true, opacity: 0.2 });
   scene.add(new THREE.LineSegments(gridGeo, gridMat));
+  // the whitewater area (dashed): spray and mist fly on past the tank walls up to here; the water itself stays in the tank
+  const areaMat = new THREE.LineDashedMaterial({ color: 0xb8c4d0, transparent: true, opacity: 0.45, dashSize: 0.1, gapSize: 0.08 });
+  const areaBox = new THREE.LineSegments(new THREE.BufferGeometry(), areaMat); areaBox.frustumCulled = false; areaBox.visible = false; scene.add(areaBox);
+  function updateAreaViz() {
+    const a = wwArea(), on = S.sprOn && S.engine === 'flip' && (a.k > 1 || a.up > 1);
+    areaBox.visible = on; if (!on) return;
+    const A = wwAreaBox(b, a), X = [A.x0, A.x1], Y = [A.y0, A.y1], Z = [A.z0, A.z1], p = [];
+    for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) {
+      p.push(X[0], Y[i], Z[j], X[1], Y[i], Z[j]); p.push(X[i], Y[0], Z[j], X[i], Y[1], Z[j]); p.push(X[i], Y[j], Z[0], X[i], Y[j], Z[1]);
+    }
+    areaBox.geometry.setAttribute('position', new THREE.Float32BufferAttribute(p, 3)); areaBox.computeLineDistances();
+    const ds = Math.max(A.x1 - A.x0, A.z1 - A.z0) * 0.015; areaMat.dashSize = ds; areaMat.gapSize = ds * 0.8;
+  }
   const openMat = new THREE.LineBasicMaterial({ color: 0xe0a030 });
   const openLines = [];
   for (let i = 0; i < 6; i++) { const l = new THREE.LineLoop(new THREE.BufferGeometry(), openMat); l.frustumCulled = false; l.visible = false; scene.add(l); openLines.push(l); }
@@ -339,6 +386,7 @@
     };
     const names = ['x0', 'x1', 'y0', 'y1', 'z0', 'z1'];
     names.forEach((nm, i) => { openLines[i].geometry.setAttribute('position', face(quad[nm])); openLines[i].visible = !!S.open[nm]; });
+    updateAreaViz();
   }
   updateDomainViz();
 

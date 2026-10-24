@@ -14,9 +14,11 @@ struct Params {
   wwFoamLife: f32, wwRise: f32, wwCrest: f32, wwImpact: f32,
   airOn: u32, airCouple: f32, airDecay: f32, airH: f32,
   aNx: u32, aNy: u32, aNz: u32, ndrip: u32,
-  dripRate: f32, dripDry: f32, airBlur: f32, wwPad: f32,
+  dripRate: f32, dripDry: f32, airBlur: f32, wwSpin: f32,
   fills: array<vec4<f32>, 16>,
   waves: array<vec4<f32>, 64>,
+  wwEdge: f32, wwErode: f32, wwLand: f32, wwTrail: f32,   // words 404-407: cosine of the leading-edge angle, foam spreading fade, foam from landing water, mist trails
+  wwA0: vec4<f32>, wwA1: vec4<f32>,                       // words 408-415: the whitewater area (lowest and highest corner), at least the tank
 };
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read_write> pos: array<vec4<f32>>;
@@ -60,13 +62,14 @@ fn gv0W(f: u32, v: f32) { atomicStore(&accW[f], bitcast<i32>(v)); }
 @group(0) @binding(31) var<storage, read_write> velG: array<f32>;
 // air field: a coarse grid of air velocity that the water, the spray and moving objects drag along; spray and mist drift with it
 @group(0) @binding(32) var<storage, read_write> air: array<vec4<f32>>;
-@group(0) @binding(33) var<storage, read_write> sAux: array<vec4<f32>>;      // per whitewater point: water velocity there (xyz), how wet (w)
+@group(0) @binding(33) var<storage, read_write> sAux: array<vec4<f32>>;      // per whitewater point: water velocity there (xyz), how wet + 4 x (surface spreading in half steps per second) (w)
 @group(0) @binding(34) var<storage, read_write> airAcc: array<atomic<i32>>;  // per air cell: momentum and weight pushed in this step (fixed point)
 @group(0) @binding(35) var<storage, read_write> air2: array<vec4<f32>>;
 @group(0) @binding(36) var<storage, read_write> drip: array<vec4<f32>>;
 // the live view packed the way cache frames are stored (see packDisp): 16-bit positions across the box, a speed byte and a white-water byte
 struct PackU { nW: u32, nS: u32, nD: u32, wFromPos: u32, srcS: u32, srcD: u32, oWp: u32, oWs: u32, oWf: u32, oSp: u32, oSk: u32, oDp: u32, oDs: u32, pad0: u32, pad1: u32, pad2: u32,
-  x0: f32, y0: f32, z0: f32, kx: f32, ky: f32, kz: f32, vs: f32, pad4: f32 };   // vs: metres per scene unit (speed bytes in 16ths of m/s)
+  x0: f32, y0: f32, z0: f32, kx: f32, ky: f32, kz: f32, vs: f32, pad4: f32,
+  sx0: f32, sy0: f32, sz0: f32, skx: f32, sky: f32, skz: f32, pad5: f32, pad6: f32 };   // whitewater positions are across the whitewater area   // vs: metres per scene unit (speed bytes in 16ths of m/s)
 @group(0) @binding(37) var<storage, read_write> packOut: array<u32>;
 @group(0) @binding(38) var<uniform> PK: PackU;      // per drip sample: (local position, collider), (local normal, wetness)   // the grid velocity kept from the last step (narrow band)
 ${SDF_WGSL}
@@ -132,6 +135,8 @@ fn colAtCell(i: i32, j: i32, k: i32) -> i32 {
 fn particleCell(p: vec3<f32>) -> vec3<i32> {
   return clamp(vec3<i32>(floor((p - vec3<f32>(P.x0, P.y0, P.z0)) * P.ih)), vec3<i32>(0), vec3<i32>(i32(P.nx) - 1, i32(P.ny) - 1, i32(P.nz) - 1));
 }
+// inside the tank (the water's box); whitewater can also be outside it, in the larger whitewater area, where there is only air
+fn inTank(p: vec3<f32>) -> bool { return p.x >= P.x0 && p.y >= P.y0 && p.z >= P.z0 && p.x <= P.x1 && p.y <= P.y1 && p.z <= P.z1; }
 fn hasStorage(c: vec3<i32>) -> bool { return tmap[tileOf(c.x, c.y, c.z)] != NONE; }
 // new and old grid velocity at p, in one pass over the 24 faces around it
 struct VV { vn: vec3<f32>, vo: vec3<f32> };
@@ -149,6 +154,23 @@ fn sampleBoth(p: vec3<f32>) -> VV {
       sn += w * gvR(f); so += w * gv0R(f);
     }
     r.vn[axis] = sn; r.vo[axis] = so;
+  }
+  return r;
+}
+// the new grid velocity alone (reads only accV, for kernels that cannot also bind accW)
+fn sampleNew(p: vec3<f32>) -> vec3<f32> {
+  var r = vec3<f32>(0.0);
+  for (var axis = 0u; axis < 3u; axis++) {
+    var g = (p - vec3<f32>(P.x0, P.y0, P.z0)) * P.ih;
+    if (axis == 0u) { g.y -= 0.5; g.z -= 0.5; } else if (axis == 1u) { g.x -= 0.5; g.z -= 0.5; } else { g.x -= 0.5; g.y -= 0.5; }
+    let f0 = floor(g); let fr = g - f0; let i0 = vec3<i32>(f0);
+    var sn = 0.0;
+    for (var c = 0u; c < 8u; c++) {
+      let dx = i32(c & 1u); let dy = i32((c >> 1u) & 1u); let dz = i32((c >> 2u) & 1u);
+      let w = select(1.0 - fr.x, fr.x, dx == 1) * select(1.0 - fr.y, fr.y, dy == 1) * select(1.0 - fr.z, fr.z, dz == 1);
+      sn += w * gvR(faceIndex(axis, i0.x + dx, i0.y + dy, i0.z + dz));
+    }
+    r[axis] = sn;
   }
   return r;
 }

@@ -137,6 +137,7 @@
   }
   // restart the particles from the initial fills at time t, keeping objects and keyframes
   function resetSim(t) {
+    S.vpeak = 0; S.subPeak = 0; S.subHold = 0; S.subHoldT = 0;
     S.lcPlay = false; lcDrop(); LC.armed = S.lcOn && !t; S.prevStates = null;
     sim.clear(); runner.em = {}; runner.prev = {}; S.frame = Math.round((t || 0) * 60); S.tl.t = S.frame / 60;
     applyFills(); S.events.forEach((e) => { e.done = e.t < S.tl.t; if (e.done) return; });

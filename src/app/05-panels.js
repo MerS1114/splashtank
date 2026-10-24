@@ -205,9 +205,14 @@
       addSlider(sp, { id: 's-spramt', label: 'Spray amount', min: 0.1, max: 6, log: true, round: 0.05, value: S.sprAmt, def: dv('sprAmt'), fmt: (v) => v.toFixed(2) + '×', tip: 'How many spray points fast water throws off.', onInput: (v) => { S.sprAmt = v; } });
       addSlider(sp, { id: 's-sprmin', label: 'Spray from', min: 0.5, max: 30, log: true, round: 0.1, value: S.sprMin, def: dv('sprMin'), fmt: (v) => v.toFixed(1) + ' m/s', tip: 'Water faster than this, near the surface, throws off spray. Lower makes more spray from calmer water.', onInput: (v) => { S.sprMin = v; } });
       addSlider(sp, { id: 's-sprlife', label: 'Spray lifetime', min: 0.2, max: 6, step: 0.1, value: S.sprLife, def: dv('sprLife'), fmt: (v) => v.toFixed(1) + ' s', tip: 'How long a spray point lives before it fades.', onInput: (v) => { S.sprLife = v; } });
-      addSlider(sp, { id: 's-wwcrest', label: 'From crests', min: 0, max: 3, step: 0.05, value: S.wwCrest, def: dv('wwCrest'), fmt: (v) => (v === 0 ? 'off' : v.toFixed(2) + '×'), tip: 'Whitewater from fast, exposed water: wave crests, thin sheets and splashes (Houdini sources this from curvature and speed).', onInput: (v) => { S.wwCrest = v; } });
+      addSlider(sp, { id: 's-wwcrest', label: 'From crests', min: 0, max: 3, step: 0.05, value: S.wwCrest, def: dv('wwCrest'), fmt: (v) => (v === 0 ? 'off' : v.toFixed(2) + '×'), tip: 'Whitewater from fast water at crests, thin sheets and splash edges moving outwards (Houdini sources this from curvature and speed).', onInput: (v) => { S.wwCrest = v; } });
+      addSlider(sp, { id: 's-wwedge', label: 'Leading edge', min: 20, max: 90, step: 1, value: S.wwEdge, def: dv('wwEdge'), fmt: (v) => Math.round(v) + '°', tip: 'Crests only throw whitewater where the water moves outwards from the surface, within this angle of straight out: the leading edges of waves and splashes. 90° lets any fast exposed water throw it (Houdini: Max Velocity Angle).', onInput: (v) => { S.wwEdge = v; } });
       addSlider(sp, { id: 's-wwimpact', label: 'From churn', min: 0, max: 3, step: 0.05, value: S.wwImpact, def: dv('wwImpact'), fmt: (v) => (v === 0 ? 'off' : v.toFixed(2) + '×'), tip: 'Whitewater from churning white water: impacts, breaking waves, hard turns (Houdini sources this from acceleration). Made under the surface it starts as bubbles.', onInput: (v) => { S.wwImpact = v; } });
+      addSlider(sp, { id: 's-wwland', label: 'Foam from landing', min: 0, max: 3, step: 0.05, value: S.wwLand, def: dv('wwLand'), fmt: (v) => (v === 0 ? 'off' : v.toFixed(2) + '×'), tip: 'Foam where falling water lands on water: splashes coming down, a waterfall hitting a pool, a crown falling back into the sea.', onInput: (v) => { S.wwLand = v; } });
+      addSlider(sp, { id: 's-wwtrail', label: 'Mist trails', min: 0, max: 3, step: 0.05, value: S.wwTrail, def: dv('wwTrail'), fmt: (v) => (v === 0 ? 'off' : v.toFixed(2) + '×'), tip: 'Fast spray drops leave a trail of fine mist behind them; the faster they fly, the more.', onInput: (v) => { S.wwTrail = v; } });
+      addSlider(sp, { id: 's-wwspin', label: 'From spin', min: 0, max: 3, step: 0.05, value: S.wwSpin, def: dv('wwSpin'), fmt: (v) => (v === 0 ? 'off' : v.toFixed(2) + '×'), tip: 'Bubbles from water spinning under the surface, where churning drags air down (Houdini sources this from vorticity).', onInput: (v) => { S.wwSpin = v; } });
       addSlider(sp, { id: 's-wwfoam', label: 'Foam lifetime', min: 0.3, max: 20, log: true, round: 0.1, value: S.wwFoamLife, def: dv('wwFoamLife'), fmt: (v) => v.toFixed(1) + ' s', tip: 'How long foam lasts on the surface before it breaks up. Long foam leaves the trails and patches that make big water read as big.', onInput: (v) => { S.wwFoamLife = v; } });
+      addSlider(sp, { id: 's-wwerode', label: 'Foam spreading', min: 0, max: 3, step: 0.05, value: S.wwErode, def: dv('wwErode'), fmt: (v) => (v === 0 ? 'off' : v.toFixed(2) + '×'), tip: 'Foam fades faster where the surface spreads apart and lasts where it gathers, so it forms lines and lacy patches instead of an even sheet.', onInput: (v) => { S.wwErode = v; } });
       addSlider(sp, { id: 's-wwrise', label: 'Bubble rise', min: 0.05, max: 2, log: true, round: 0.01, value: S.wwRise, def: dv('wwRise'), fmt: (v) => v.toFixed(2) + ' m/s', tip: 'How fast bubbles rise through the water before they surface as foam.', onInput: (v) => { S.wwRise = v; } });
       addSlider(sp, { id: 's-sprmist', label: 'Mist share', min: 0, max: 1, step: 0.05, value: S.sprMist, def: dv('sprMist'), fmt: f2, tip: 'Fraction of the spray that is fine mist: lighter, slowed hard by the air, drawn as soft puffs.', onInput: (v) => { S.sprMist = v; } });
       addSlider(sp, { id: 's-sprdrag', label: 'Spray drag', min: 0, max: 6, step: 0.1, value: S.sprDrag, def: dv('sprDrag'), fmt: (v) => v.toFixed(1) + ' /s', tip: 'How quickly spray droplets slow down in the air.', onInput: (v) => { S.sprDrag = v; } });
@@ -245,9 +250,10 @@
     // motion: substeps for the whole scene and how fast things may go
     const mo = sub(gs, 'motion', 'Substeps and speed limits', false, 'Each frame is split into substeps so nothing moves more than about 1.5 grid cells per step; the count follows the fastest water, source or object.');
     addSlider(mo, { id: 's-submin', label: 'Min substeps', min: 1, max: 8, step: 1, value: S.subMin, def: dv('subMin'), fmt: f0, tip: 'Substeps every frame even when the water is calm.', onInput: (v) => { S.subMin = v; } });
-    addSlider(mo, { id: 's-submax', label: 'Max substeps', min: 1, max: 32, step: 1, value: S.subMax, def: dv('subMax'), fmt: f0, tip: 'The most substeps a frame may take when things move fast.', onInput: (v) => { S.subMax = v; } });
+    addSlider(mo, { id: 's-submax', label: 'Max substeps', min: 1, max: 128, step: 1, value: S.subMax, def: dv('subMax'), fmt: f0, tip: 'The most substeps a frame may take when things move fast.', onInput: (v) => { S.subMax = v; } });
     addSlider(mo, { id: 's-colmax', label: 'Object speed limit', min: 5, max: 1000, log: true, round: 1, value: S.colMax, def: dv('colMax'), fmt: (v) => Math.round(v) + ' m/s', tip: 'An object moving faster than this counts as jumping: it shows up in the new place and only pushes water out of its way, without carrying it along.', onInput: (v) => { S.colMax = v; } });
-    if (flip) addSlider(mo, { id: 's-wmax', label: 'Max water speed', min: 5, max: 200, log: true, round: 1, value: S.vmaxW, def: dv('vmaxW'), fmt: (v) => Math.round(v) + ' m/s', tip: 'Water is never allowed to go faster than this. A safety limit against blow-ups.', onInput: (v) => { S.vmaxW = v; } });
+    if (flip) addSlider(mo, { id: 's-wmax', label: 'Max water speed', min: 5, max: 1000, log: true, round: 1, value: S.vmaxW, def: dv('vmaxW'), fmt: (v) => Math.round(v) + ' m/s', tip: 'Water is never allowed to go faster than this. A safety limit against blow-ups.', onInput: (v) => { S.vmaxW = v; } });
+    if (flip) mo.insertAdjacentHTML('beforeend', '<div class="pos" id="vmax-info" data-keep></div>');   // fastest water and substeps against their limits (updated by the frame loop)
     addSlider(mo, { id: 's-dragspd', label: 'Drag speed', min: 1, max: 100, log: true, round: 0.5, value: S.dragSpeed, def: dv('dragSpeed'), fmt: (v) => v.toFixed(v < 10 ? 1 : 0) + ' m/s', tip: 'How fast objects follow the mouse when you drag them while the sim runs.', onInput: (v) => { S.dragSpeed = v; } });
 
     if (isGpu()) {   // live cache controls; changing these never clears the cache
@@ -273,6 +279,8 @@
   addSlider(gd, { id: 'd-vmax', label: 'White at', min: 1, max: 12, step: 0.5, value: S.vmax, def: dv('vmax'), fmt: (v) => v.toFixed(1) + ' m/s', tip: 'The speed that is coloured white. Slower water runs from blue to cyan.', onInput: (v) => { S.vmax = v; pmat.uniforms.uMax.value = v; } });
   addSlider(gd, { id: 'd-foam', label: 'White water', min: 0, max: 1, step: 0.05, value: S.foam, def: dv('foam'), fmt: (v) => v === 0 ? 'off' : v.toFixed(2), tip: 'How strongly churned water is drawn white.', onInput: (v) => { S.foam = v; pmat.uniforms.uFoam.value = v; } });
   addCheck(gd, 'c-gizmo', 'Transform gizmo', S.gizmo, 'Arrows move along an axis, rings rotate, small cubes scale, the centre ball moves freely. Hold V while moving to snap to points.', (on) => { setTool(on ? 'transform' : 'select'); $('#c-gizmo').blur(); }, false);
+  addCheck(gd, 'c-literun', 'Lighter while running', S.liteRun, 'While the live sim runs, draws each point once, without the look-only extra points, so the GPU has more time for the sim. The full look comes back when it stops, and in bakes. Drawing only.', (on) => { S.liteRun = on; }, true);
+  addCheck(gd, 'c-litebake', 'Lighter while a bake plays', S.liteBake, 'While a bake plays, draws each point once, without the look-only extra points, so dense bakes play faster. The full look comes back when it is paused. Drawing only.', (on) => { S.liteBake = on; }, false);
   addCheck(gd, 'c-oview', 'Ocean around box', S.oceanView, 'With the ocean on, draws its surface over the boundary and out past the box, so the box sits in open sea. Drawing only.', (on) => { S.oceanView = on; }, true);
   addSlider(gd, { id: 'd-sprdetail', label: 'Spray detail', min: 0, max: 12, step: 1, value: S.sprDetail, def: dv('sprDetail'), fmt: (v) => (v === 0 ? 'off' : '×' + (v + 1)), tip: 'Extra look-only points drawn around each spray and mist point, so spray looks denser. Drawing only.', onInput: (v) => { S.sprDetail = v; lastGen = -1; } });
   addSlider(gd, { id: 'd-streak', label: 'Spray streaks', min: 0, max: 0.1, step: 0.005, value: S.streak, def: dv('streak'), fmt: (v) => (v === 0 ? 'off' : Math.round(v * 1000) + ' ms'), tip: 'Draws fast spray as short streaks along its motion, like a camera shutter of this length.', onInput: (v) => { S.streak = v; lastGen = -1; } });
@@ -311,12 +319,22 @@
   const gbx = $('#g-box');
   function commitBox() { makeSim(); resetSim(S.tl.t); updateDomainViz(); renderUI(); updateEst(); buildBoxUI(); }
   // move one face of the box (world coordinate v), keeping the box between 0.6 and 14 m
+  // the box size and what it costs at the live spacing: grid cells, and points to fill it a third deep (narrow band: one band-deep layer)
+  function boxSizeText() {
+    const c = gridCost(S.liveD, S.cellRatio, S.cap), d3 = S.liveD ** 3;
+    let n = S.dom.w * S.dom.d * S.dom.h / 3 / d3;
+    if (nbActive()) n = Math.min(n, S.dom.w * S.dom.d * S.nbBand * S.liveD * S.cellRatio / d3);
+    const over = n > S.cap;
+    return 'size <b>' + S.dom.w.toFixed(2) + '</b> × <b>' + S.dom.h.toFixed(2) + '</b> × <b>' + S.dom.d.toFixed(2) + '</b> m. Changing the box restarts the particles.<br>' +
+      'At spacing ' + S.liveD.toFixed(3) + ': grid ' + c.nx + ' × ' + c.ny + ' × ' + c.nz + ' (' + (c.ncell / 1e6).toFixed(1) + 'M cells); water a third deep is about <b' + (over ? ' class="warn"' : '') + '>' + fmtN(Math.round(n)) + '</b> points' +
+      (over ? ', more than Max points (' + fmtN(S.cap) + ')' : '') + '. The solver\'s time grows with the number of points.';
+  }
   function setFaceCoord(k, v) {
     const B = { x0: b.x0, x1: b.x1, y0: b.y0, y1: b.y1, z0: b.z0, z1: b.z1 }, lo = k.endsWith('0');
     const other = B[lo ? k[0] + '1' : k[0] + '0'];
     B[k] = lo ? clamp(v, other - 14, other - 0.6) : clamp(v, other + 0.6, other + 14);
     S.min = { x: B.x0, y: B.y0, z: B.z0 }; S.dom = { w: B.x1 - B.x0, h: B.y1 - B.y0, d: B.z1 - B.z0 };
-    updateDomainViz();
+    updateDomainViz(); const bs = $('#box-size'); if (bs) bs.innerHTML = boxSizeText();
   }
   function setDomain(w, h, d) {
     S.dom = { w, h, d }; S.min = { x: -w / 2, y: 0, z: -d / 2 }; updateDomainViz();
@@ -336,7 +354,7 @@
       gbx.appendChild(row);
     });
     const sz = document.createElement('div'); sz.className = 'pos'; sz.id = 'box-size';
-    sz.innerHTML = 'size <b>' + S.dom.w.toFixed(2) + '</b> × <b>' + S.dom.h.toFixed(2) + '</b> × <b>' + S.dom.d.toFixed(2) + '</b> m. Changing the box restarts the particles.'; gbx.appendChild(sz);
+    sz.innerHTML = boxSizeText(); gbx.appendChild(sz);
     const fr = document.createElement('div'); fr.className = 'row face';
     fr.innerHTML = '<label for="fill-h">Fill tank</label><input type="number" id="fill-h" step="0.1" value="' + (+Math.min(1, S.dom.h * 0.4).toFixed(2)) + '"><button type="button" class="btn flat" id="btn-filltank">to height</button>';
     fr.querySelector('button').addEventListener('click', () => {
@@ -345,6 +363,11 @@
       select(o); fillNow(o);
     });
     gbx.appendChild(fr);
+    const AREA = [['1', 'Tank only'], ['1.5', '1.5 × tank'], ['2', '2 × tank'], ['3', '3 × tank'], ['4', '4 × tank']];
+    addSelect(gbx, 'ww-area', 'Whitewater area', AREA, String(S.wwArea), 'Spray, mist and foam may fly on past the tank walls, up to this many times the tank\'s width and depth (the dashed box). The water itself stays in the tank. A bigger area costs almost nothing.',
+      (v) => { S.wwArea = +v; updateDomainViz(); buildBoxUI(); }).classList.toggle('nd', S.wwArea !== dv('wwArea'));
+    addSelect(gbx, 'ww-area-up', 'Spray height', AREA.map(([v, l]) => [v, v === '1' ? 'Tank top' : l.replace('tank', 'height')]), String(S.wwAreaUp), 'How high spray may fly above the tank floor, in tank heights.',
+      (v) => { S.wwAreaUp = +v; updateDomainViz(); buildBoxUI(); }).classList.toggle('nd', S.wwAreaUp !== dv('wwAreaUp'));
     const hl = document.createElement('label'); hl.className = 'check';
     hl.innerHTML = '<input type="checkbox" id="show-handles"' + (S.handles ? ' checked' : '') + '><span>Show face arrows</span>';
     hl.querySelector('input').addEventListener('change', (e) => { S.handles = e.target.checked; });

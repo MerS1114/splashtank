@@ -9,14 +9,20 @@
 function flipWGSL() { return FLIP_WGSL_CORE + FLIP_WGSL_BLOCKS + FLIP_WGSL_SOLVER + FLIP_WGSL_WHITEWATER + FLIP_WGSL_NARROWBAND; }
 
 const FLIP_SLOT = { cells: 512 };   // one block of the sparse grid: 8 x 8 x 8 cells
-const FLIP_PARAMS_BYTES = 1632;      // the solver's uniform block: settings, whitewater, air and drips (words 68-83), starting-water shapes (84), ocean waves (148)
-const FLIP_DEEPMAX = 200000;          // deep water points drawn at most (narrow band, look only); matches DEEPMAX in the shader
+const FLIP_PARAMS_BYTES = 1664;      // the solver's uniform block: settings, whitewater, air and drips (words 68-83), starting-water shapes (84), ocean waves (148), more whitewater (404), whitewater area (408)
+const FLIP_DEEPMAX = 200000;
+// the whitewater area: the tank widened k times about its centre and raised to up times its height (floor kept); never smaller than the tank
+function wwAreaBox(b, a) {
+  const k = Math.max(1, (a && a.k) || 1), up = Math.max(1, (a && a.up) || 1), cx = (b.x0 + b.x1) / 2, cz = (b.z0 + b.z1) / 2;
+  const hx = (b.x1 - b.x0) / 2 * k, hz = (b.z1 - b.z0) / 2 * k;
+  return { x0: cx - hx, x1: cx + hx, y0: b.y0, y1: b.y0 + (b.y1 - b.y0) * up, z0: cz - hz, z1: cz + hz };
+}          // deep water points drawn at most (narrow band, look only); matches DEEPMAX in the shader
 // The bindings each kernel uses (makeGroups says which buffer each number is). Keep every kernel within 8 storage buffers.
 const FLIP_L = {
   tileReset: [12], tileNeedClear: [0, 17], tileMark: [0, 1, 17], tileMarkPhi: [0, 7, 12, 17, 18, 19], tileMarkFill: [0, 10, 11, 17], phiInitAll: [0, 7, 10, 11, 12, 18, 19, 31], tileFree: [0, 12, 16, 17, 20, 21], argsNew: [12, 14], tileAlloc: [0, 12, 16, 19, 20, 21], tileFix: [0, 12],
   initNew: [0, 7, 8, 10, 11, 12, 21, 31], slotListBuild: [0, 12, 16, 18], argsSlots: [12, 14], growFree: [12, 20, 25],
   sortClear: [22], sortHist: [0, 1, 22], sortScan: [22], sortScatter: [0, 1, 2, 22, 23, 24, 26, 27], sortCopy: [0, 1, 2, 23, 24, 26, 27], unsort: [0, 1, 23, 26],
-  clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], sprayStep: [0, 10, 11, 28, 29, 32, 33], sprayDisp: [0, 15, 28, 29, 30], dispBegin: [30], packDisp: [1, 12, 15, 30, 37, 38], wwSample: [0, 3, 5, 6, 7, 16, 28, 33], wwArgs: [0, 14, 30],
+  clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], spinEmit: [0, 1, 2, 3, 6, 16, 28, 29, 30], wwAdvect: [0, 1, 2], sprayStep: [0, 10, 11, 28, 29, 30, 32, 33], sprayDisp: [0, 15, 28, 29, 30], dispBegin: [30], packDisp: [1, 12, 15, 30, 37, 38], wwSample: [0, 3, 5, 6, 7, 16, 28, 29, 33], wwArgs: [0, 14, 30],
   airClear: [0, 34], airSplatW: [0, 1, 2, 6, 16, 34], airSplatS: [0, 28, 29, 34], airUpdate: [0, 10, 11, 32, 34, 35], airCopy: [0, 32, 35], dripStep: [0, 6, 7, 10, 16, 28, 29, 30, 36],
   normFaces: [0, 3, 5, 7, 10, 12, 16, 18, 19], divergence: [0, 3, 6, 7, 9, 12, 16, 18, 19],
   listClear: [12], buildList: [0, 7, 12, 13, 18, 19], listArgs: [0, 12, 14], rbRed: [0, 7, 8, 9, 12, 13, 16, 19], rbBlack: [0, 7, 8, 9, 12, 13, 16, 19],
@@ -28,6 +34,7 @@ const FLIP_L = {
 // createComputePipelineAsync lets the driver compile them in parallel; done one after another on first use they stalled the first step
 // for many seconds on some GPUs (D3D shader compiles). pipes is set once all of them are ready.
 const FLIP_PIPES = new WeakMap();
+const WWSTAGES = new Set(['blocks', 'clear', 'p2g', 'classify', 'normFaces', 'air', 'spray']);
 function flipPipes(device) {
   let sh = FLIP_PIPES.get(device); if (sh) return sh;
   sh = { pipes: null, ms: 0 }; FLIP_PIPES.set(device, sh);
@@ -79,7 +86,7 @@ class FlipSim {
     this.bGro = mk(16);
     this.dispMax = 300000; this.stride = 1;
     this.bDisp = mk(Math.min(this.MAXN, this.dispMax + 1) * 16 + 16);
-    this.bPack = mk(16); this.bPackU = device.createBuffer({ size: 96, usage: U.UNIFORM | U.COPY_DST }); this.packWords = 4;
+    this.bPack = mk(16); this.bPackU = device.createBuffer({ size: 128, usage: U.UNIFORM | U.COPY_DST }); this.packWords = 4;
     this.bArgs = device.createBuffer({ size: 128, usage: U.STORAGE | U.INDIRECT | U.COPY_DST });
     this.sdfCap = 16; this.sdfSig = null; this.bSdf = mk(64);
     this.bParams = device.createBuffer({ size: FLIP_PARAMS_BYTES, usage: U.UNIFORM | U.COPY_DST });
@@ -97,6 +104,11 @@ class FlipSim {
     device.queue.writeBuffer(this.bStack, 0, st);
     device.queue.writeBuffer(this.bCtl, 0, new Uint32Array([0, 0, this.scap - 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
     // the pipelines are shared by every FlipSim on this device and compiled once, in parallel; until they are ready the sim does not step
+    if (device.features && device.features.has('timestamp-query')) {   // GPU time of a step, one reading in flight (gpuMs: median of the last 31)
+      this.tsq = device.createQuerySet({ type: 'timestamp', count: 64 });
+      this.tsRes = device.createBuffer({ size: 512, usage: U.QUERY_RESOLVE | U.COPY_SRC });
+      this.tsRead = device.createBuffer({ size: 512, usage: U.MAP_READ | U.COPY_DST }); this.tsBusy = false;
+    }
     this.L = FLIP_L; this.pipes = {}; this.ready = false;
     const sh = flipPipes(device);
     this.dispAlloc();   // makes the bind groups once the pipelines are there
@@ -226,16 +238,27 @@ class FlipSim {
     u32[72] = airo && ad ? 1 : 0; f32[73] = airo ? airo.couple : 0; f32[74] = airo ? airo.decay : 0; f32[75] = ad ? ad.h : 1;
     u32[76] = ad ? ad.nx : 1; u32[77] = ad ? ad.ny : 1; u32[78] = ad ? ad.nz : 1;
     if (dr) this.dripUpdate(o.cols.slice(0, nc)); u32[79] = dr ? this.ndrip : 0;
-    f32[80] = dr ? dr.rate : 0; f32[81] = dr ? dr.dry : 1; f32[82] = airo ? (airo.blur === undefined ? 0.35 : airo.blur) : 0; f32[83] = 0;
+    f32[80] = dr ? dr.rate : 0; f32[81] = dr ? dr.dry : 1; f32[82] = airo ? (airo.blur === undefined ? 0.35 : airo.blur) : 0;
+    this.ab = wwAreaBox(b, ww.area); f32.set([this.ab.x0, this.ab.y0, this.ab.z0, 0, this.ab.x1, this.ab.y1, this.ab.z1, 0], 408);
+    f32[83] = ww.spin === undefined ? 0.5 : ww.spin; f32[404] = Math.cos((ww.edge === undefined ? 70 : ww.edge) * Math.PI / 180); f32[405] = ww.erode === undefined ? 0.25 : ww.erode;
+    f32[406] = ww.land === undefined ? 1 : ww.land; f32[407] = ww.trail === undefined ? 1 : ww.trail;
     this.airOnStep = !!(airo && ad); this.dripOnStep = !!(dr && this.ndrip > 0);
     this.dev.queue.writeBuffer(this.bParams, 0, this.pu);
     const iters = Math.max(1, (this.opt.iters || o.iters) | 0);
-    const enc = this.dev.createCommandEncoder();
-    const pass = enc.beginComputePass();
+    const enc = this.dev.createCommandEncoder(), ts = this.tsq && !this.tsBusy && !this.only;
+    const pass = enc.beginComputePass(ts ? { timestampWrites: { querySet: this.tsq, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } } : undefined);
     for (const st of this.stages(N, iters)) st.fn(pass);
     pass.end();
+    if (ts) { enc.resolveQuerySet(this.tsq, 0, 2, this.tsRes, 0); enc.copyBufferToBuffer(this.tsRes, 0, this.tsRead, 0, 16); }
     this.readStats(enc);
     this.dev.queue.submit([enc.finish()]);
+    if (ts) {
+      this.tsBusy = true;
+      this.tsRead.mapAsync(GPUMapMode.READ, 0, 16).then(() => {
+        const a = new BigUint64Array(this.tsRead.getMappedRange(0, 16)), ms = Number(a[1] - a[0]) / 1e6; this.tsRead.unmap(); this.tsBusy = false;
+        if (ms > 0 && ms < 1e4) { const r = this.gpuSteps || (this.gpuSteps = []); r.push(ms); if (r.length > 31) r.shift(); const s = r.slice().sort((x, y) => x - y); this.gpuMs = s[s.length >> 1]; }
+      }).catch(() => { this.tsBusy = false; });
+    }
     if (!this.only) { this.needRead = true; this.track(); }
     return nc;
   }
@@ -272,7 +295,7 @@ class FlipSim {
       const p = this.pipes.sortScan; ps.setPipeline(p.pipeline); ps.setBindGroup(0, p.bg); ps.dispatchWorkgroups(1);
       dispatch(ps, 'sortScatter', N); dispatch(ps, 'sortCopy', N);
     } };
-    return [
+    const all = [
       ...(this.opt.sort ? [sortStage] : []),
       tiles,
       { name: 'clear', fn: (ps) => indirect(ps, 'clearSlots', 80) },
@@ -293,22 +316,27 @@ class FlipSim {
       } },
       { name: 'project', fn: (ps) => { indirect(ps, 'project', 64); if (nb) indirect(ps, 'saveVel', 64); } },
       { name: 'g2p', fn: (ps) => dispatch(ps, 'g2p', N) },
+      ...(this.sprayCap > 0 && this.airOnStep ? [{ name: 'air', fn: (ps) => {   // air field first, so the whitewater moves with this step's air
+        const na = this.airDims.n;
+        dispatch(ps, 'wwArgs', 1);
+        dispatch(ps, 'airClear', na); dispatch(ps, 'airSplatW', N); indirect(ps, 'airSplatS', 112); dispatch(ps, 'airUpdate', na); dispatch(ps, 'airCopy', na);
+      } }] : []),
       ...(this.sprayCap > 0 ? [{ name: 'spray', fn: (ps) => {
-        if (this.airOnStep) {   // air field first, so the whitewater moves with this step's air
-          const na = this.airDims.n;
-          dispatch(ps, 'wwArgs', 1);
-          dispatch(ps, 'airClear', na); dispatch(ps, 'airSplatW', N); indirect(ps, 'airSplatS', 112); dispatch(ps, 'airUpdate', na); dispatch(ps, 'airCopy', na);
-        }
         dispatch(ps, 'wwArgs', 1); indirect(ps, 'wwSample', 112); indirect(ps, 'sprayStep', 112);
-        if (this.sprOnStep) dispatch(ps, 'sprayEmit', N);
+        if (this.sprOnStep) { dispatch(ps, 'sprayEmit', N); if (this.pf32[83] > 0) dispatch(ps, 'spinEmit', N); }
         if (this.dripOnStep) dispatch(ps, 'dripStep', this.ndrip);
       } }] : []),
       ...(nb ? [{ name: 'reseed', fn: (ps) => {
         dispatch(ps, 'nbKill', N); dispatch(ps, 'nbReset', 1); dispatch(ps, 'nbDead', N); indirect(ps, 'nbDeficit', 64); dispatch(ps, 'nbArgs', 1); indirect(ps, 'nbSpawn', 96);
       } }] : [])
     ];
+    // whitewater pass over a bake (runWhitewaterPass): the baked particles only build the grid (no pressure solve, no moving them by the
+    // grid), the whitewater stages run, then the particles move on along their velocity towards the next baked frame
+    if (this.wwOnly) return all.filter((st) => WWSTAGES.has(st.name)).concat([{ name: 'advect', fn: (ps) => dispatch(ps, 'wwAdvect', N) }]);
+    return all;
   }
-  // benchmark helper: run one real step, but submit every stage separately and wait for it, returning milliseconds per stage
+  // benchmark helper: run one real step stage by stage, returning milliseconds per stage. With timestamp queries every stage is timed
+  // on the GPU in one submission (out.gpu = true); without, each stage is submitted and waited for alone, which adds a fixed cost to each.
   async stepTimed(dt, o) {
     await this.whenReady;
     const N = this.N; if (N === 0) return null;
@@ -319,6 +347,22 @@ class FlipSim {
     this.stages = prev;
     const stages = this.stages(N, iters);
     const out = {};
+    if (this.tsq && stages.length <= 32) {
+      while (this.tsBusy) await new Promise((r) => setTimeout(r, 1));
+      this.tsBusy = true;
+      const enc = this.dev.createCommandEncoder();
+      stages.forEach((st, k) => { const ps = enc.beginComputePass({ timestampWrites: { querySet: this.tsq, beginningOfPassWriteIndex: 2 * k, endOfPassWriteIndex: 2 * k + 1 } }); st.fn(ps); ps.end(); });
+      enc.resolveQuerySet(this.tsq, 0, 2 * stages.length, this.tsRes, 0); enc.copyBufferToBuffer(this.tsRes, 0, this.tsRead, 0, 16 * stages.length);
+      this.dev.queue.submit([enc.finish()]);
+      try {
+        await this.tsRead.mapAsync(GPUMapMode.READ, 0, 16 * stages.length);
+        const a = new BigUint64Array(this.tsRead.getMappedRange(0, 16 * stages.length));
+        stages.forEach((st, k) => { out[st.name] = Math.max(0, Number(a[2 * k + 1] - a[2 * k])) / 1e6; });
+        this.tsRead.unmap();
+      } finally { this.tsBusy = false; }
+      out.gpu = true; this.needRead = true;
+      return out;
+    }
     for (const st of stages) {
       const t0 = performance.now();
       const enc = this.dev.createCommandEncoder(), ps = enc.beginComputePass(); st.fn(ps); ps.end();
@@ -385,7 +429,8 @@ class FlipSim {
     const nW = fromPos ? Math.min(this.N, this.dispMax + 1, this.MAXN) : Math.ceil(this.lastN / this.stride);
     this.dispWaterN = nW;
     const L = this.packLayout(nW, spr ? this.sprDispMax : 0, deep ? FLIP_DEEPMAX : 0);
-    const b = this.b, u = new ArrayBuffer(96), u32 = new Uint32Array(u), f32 = new Float32Array(u);
+    const b = this.b, ab = this.ab || b, u = new ArrayBuffer(128), u32 = new Uint32Array(u), f32 = new Float32Array(u);
+    f32.set([ab.x0, ab.y0, ab.z0, 65535 / (ab.x1 - ab.x0), 65535 / (ab.y1 - ab.y0), 65535 / (ab.z1 - ab.z0), 0, 0], 24); L.sb = Object.assign({}, ab);
     u32.set([L.nW, L.nS, L.nD, fromPos ? 1 : 0, nW, deep ? Math.round(this.pf32[62]) : 0, L.oWp, L.oWs, L.oWf, L.oSp, L.oSk, L.oDp, L.oDs, 0, 0, 0]);
     f32.set([b.x0, b.y0, b.z0, 65535 / (b.x1 - b.x0), 65535 / (b.y1 - b.y0), 65535 / (b.z1 - b.z0), this.vs || 1, 0], 16);
     this.dev.queue.writeBuffer(this.bPackU, 0, u);
@@ -495,6 +540,7 @@ class FlipSim {
   }
   destroy() {
     this.dead = true;
+    [this.tsq, this.tsRes, this.tsRead].forEach((x) => { try { x && x.destroy(); } catch (e) { /* ignore */ } });
     [this.bPos, this.bVel, this.bPid, this.bTpid, this.bSPos, this.bSVel, this.bSctl, this.sstage, this.bTmap, this.bNeed, this.bNew, this.bCols, this.bSortCnt, this.bTpos, this.bTvel, this.bSdf, this.bParams, this.stage, this.bList, this.bCtl, this.bGro, this.bArgs, this.bDisp, this.bStat, this.dstage, this.sctlStage, this.bSAux, this.bAir, this.bAir2, this.bAirAcc, this.bDrip, this.bPack, this.bPackU]
       .concat(this.slotBufs().map((k) => this[k])).forEach((x) => { try { x && x.destroy(); } catch (e) { /* ignore */ } });
     (this.rs || []).forEach((q) => q.buf.destroy());
@@ -531,7 +577,7 @@ function unpackLive(range, L, b) {
   const cp = (k, from) => { if (sz[k]) new Uint8Array(ab, off[k], sz[k]).set(src.subarray(from, from + sz[k])); };
   cp(0, L.oSk * 4); cp(1, L.oWp * 4); cp(2, L.oSp * 4); cp(3, L.oDp * 4); cp(4, L.oWs * 4); cp(5, L.oWf * 4); cp(6, L.oDs * 4);
   const fr = { n: nW, pos: new Uint16Array(ab, off[1], nW * 3), spd: new Uint8Array(ab, off[4], nW), fm: new Uint8Array(ab, off[5], nW), b, bytes: ab.byteLength };
-  if (nS) fr.sp = { n: nS, pos: new Uint16Array(ab, off[2], nS * 3), pk: new Uint32Array(ab, off[0], nS), alive: nS };
+  if (nS) { fr.sp = { n: nS, pos: new Uint16Array(ab, off[2], nS * 3), pk: new Uint32Array(ab, off[0], nS), alive: nS }; fr.sb = L.sb; }   // whitewater across the whitewater area
   if (nD) fr.dp = { n: nD, pos: new Uint16Array(ab, off[3], nD * 3), spd: new Uint8Array(ab, off[6], nD) };
   return fr;
 }

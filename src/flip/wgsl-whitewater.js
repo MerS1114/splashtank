@@ -61,7 +61,7 @@ fn airSplatW(@builtin(global_invocation_id) g: vec3<u32>) {
 @compute @workgroup_size(256)
 fn airSplatS(@builtin(global_invocation_id) g: vec3<u32>) {
   let j = gid1(g); if (j >= P.smax) { return; }
-  let sp = sPos[j]; if (sp.w <= 0.0 || sVel[j].w > 1.5) { return; }
+  let sp = sPos[j]; if (sp.w <= 0.0 || sVel[j].w > 1.5 || !inTank(sp.xyz)) { return; }
   airPush(sp.xyz, sVel[j].xyz, 0.25);
 }
 // each air cell: spreads a little to its neighbours, is pulled towards what pushed it, moves with an object it is inside, and settles back to the wind
@@ -93,11 +93,26 @@ fn wwSample(@builtin(global_invocation_id) g: vec3<u32>) {
   let j = gid1(g); if (j >= P.smax) { return; }
   let sp = sPos[j]; if (sp.w <= 0.0) { return; }
   let p = sp.xyz; var vf = vec3<f32>(0.0);
+  if (!inTank(p)) { sAux[j] = vec4<f32>(0.0); return; }   // out in the whitewater area: no water, still air
   if (hasStorage(particleCell(p))) { vf = sampleBoth(p).vn; }
-  sAux[j] = vec4<f32>(vf, wetAt(p));
+  // for foam: how fast the surface spreads apart (positive) or gathers (negative) there. Foam thins out where it spreads and collects
+  // in lines and patches where the flow converges (what makes foam look lacy instead of an even sheet).
+  var dq = 0.0;
+  if (P.wwErode > 0.0 && u32(sVel[j].w + 0.5) == 2u) {
+    let h = P.h; let ex = vec3<f32>(h, 0.0, 0.0); let ez = vec3<f32>(0.0, 0.0, h);
+    if (hasStorage(particleCell(p + ex)) && hasStorage(particleCell(p - ex)) && hasStorage(particleCell(p + ez)) && hasStorage(particleCell(p - ez))) {
+      let div = (sampleBoth(p + ex).vn.x - sampleBoth(p - ex).vn.x + sampleBoth(p + ez).vn.z - sampleBoth(p - ez).vn.z) / (2.0 * h);
+      dq = clamp(round(div * 2.0), -15.0, 15.0);
+    }
+  }
+  sAux[j] = vec4<f32>(vf, wetAt(p) + 4.0 * dq);
 }
-// every water particle near the surface can throw off whitewater: fast exposed water (crests, sheets, splashes) and churning white water (impacts,
-// breaking). Points made inside the water start as bubbles; the rest as spray or mist, and the next steps sort them by depth.
+// every water particle can throw off whitewater, Houdini style (Whitewater Source):
+//   crests: fast water at a convex, open part of the surface (a crest, a thin sheet, a splash edge) moving outwards, along the surface's
+//     outward normal within the leading-edge angle, so only the leading edges of waves throw spray, not every fast flat surface;
+//   churn: water whose white-water level is high (sudden changes of velocity: impacts, water landing on water, breaking; built in g2p);
+//   spin: water spinning under the surface (vorticity of the grid velocity), which entrains air as bubbles.
+// Points made inside the water start as bubbles; the rest as spray or mist, and the next steps sort them by depth.
 @compute @workgroup_size(256)
 fn sprayEmit(@builtin(global_invocation_id) g: vec3<u32>) {
   let i = gid1(g); if (i >= P.n || P.smax == 0u || P.sprRate <= 0.0) { return; }
@@ -109,27 +124,84 @@ fn sprayEmit(@builtin(global_invocation_id) g: vec3<u32>) {
   var rho = 0.0;
   for (var dz = 0; dz <= 1; dz++) { for (var dy = 0; dy <= 1; dy++) { for (var dx = 0; dx <= 1; dx++) { rho += wetCell(bc + vec3<i32>(dx, dy, dz)); } } }
   rho = rho / 8.0;
-  let crest = (1.0 - smoothstep(0.3, 0.75, rho)) * fast * (0.3 + 0.7 * foam);
-  let churn = (1.0 - smoothstep(0.8, 1.0, rho)) * clamp((foam - 0.55) / 0.45, 0.0, 1.0) * smoothstep(0.5, 1.5, spd * P.vs);   // moving water only: settling at the start is not churn
-  let e = (P.wwCrest * crest + P.wwImpact * churn) * smoothstep(0.1, 0.5, P.q8);   // none while the starting water settles
-  if (e <= 0.0) { return; }
   let h0 = i * 747796405u + P.seed * 2891336453u;
+  var crest = 0.0;
+  if (rho < 0.95 && fast > 0.0 && P.wwCrest > 0.0) {
+    // the 3 x 3 x 3 cells around it: how open (a flat surface is about half open, a crest or an edge more) and which way is out
+    let c0 = particleCell(q.xyz); var wsum = 0.0; var grad = vec3<f32>(0.0);
+    for (var dz = -1; dz <= 1; dz++) { for (var dy = -1; dy <= 1; dy++) { for (var dx = -1; dx <= 1; dx++) {
+      let w = wetCell(c0 + vec3<i32>(dx, dy, dz)); wsum += w; grad += vec3<f32>(f32(dx), f32(dy), f32(dz)) * w;
+    } } }
+    let open = 1.0 - wsum / 27.0; let gl = length(grad);
+    var lead = 1.0;   // a lone drop or a thread has no clear surface: it counts as a leading edge
+    if (gl > 0.5 && spd > 1.0e-4) { lead = smoothstep(P.wwEdge - 0.25, P.wwEdge + 0.05, dot(-grad / gl, v / spd)); }
+    crest = smoothstep(0.55, 0.85, open) * lead * fast * (0.3 + 0.7 * foam);
+  }
+  let churn = (1.0 - smoothstep(0.8, 1.0, rho)) * clamp((foam - 0.55) / 0.45, 0.0, 1.0) * smoothstep(0.5, 1.5, spd * P.vs);   // moving water only: settling at the start is not churn
+  // water falling onto water: fast downwards at the surface (some water around it, not deep inside) leaves foam where it lands
+  let land = smoothstep(0.5, 2.0, -v.y * P.vs / max(P.sprMin, 0.1)) * smoothstep(0.25, 0.5, rho) * (1.0 - smoothstep(0.85, 1.0, rho));
+  // the fastest water throws more, and more of it as mist
+  let vfast = smoothstep(3.0, 8.0, spd * P.vs / max(P.sprMin, 0.1));
+  let settle = smoothstep(0.1, 0.5, P.q8);   // none while the starting water settles
+  let e = (P.wwCrest * crest * (1.0 + 2.0 * vfast) + P.wwImpact * churn + P.wwLand * land) * settle;
+  if (e <= 0.0) { return; }
+  let fromLand = P.wwLand * land * settle / e;   // the share from landing water: made as foam on the surface
   let k = min(u32(floor(P.sprRate * e * P.dt + hash1(h0))), 4u);
   for (var m = 0u; m < k; m++) {
     let hh = h0 ^ ((m + 1u) * 0x9E3779B9u);
     let z = hash1(hh + 1u) * 2.0 - 1.0; let a = hash1(hh + 2u) * 6.2831853; let s = sqrt(max(0.0, 1.0 - z * z));
     let dir = vec3<f32>(s * cos(a), s * sin(a), z);
-    let under = rho > 0.7 && hash1(hh + 7u) < 0.7;
-    let mist = !under && hash1(hh + 3u) < P.mistFrac * fast;
+    let onTop = hash1(hh + 9u) < fromLand;
+    let under = !onTop && rho > 0.7 && hash1(hh + 7u) < 0.7;
+    let mist = !under && !onTop && hash1(hh + 3u) < min(0.9, P.mistFrac * (fast + 2.0 * vfast));
     var nv = v * (0.9 + 0.2 * hash1(hh + 4u)) + dir * spd * select(0.06, 0.2, mist);   // mostly the water's own velocity: a wide random spread looks like a sparkler
     var life = P.sprLife * (0.6 + 0.8 * hash1(hh + 5u)) * select(1.0, 1.6, mist);
     var kind = select(0.0, 1.0, mist);
     if (under) { nv = v + dir * spd * 0.05; life = P.wwFoamLife * (0.6 + 0.8 * hash1(hh + 5u)); kind = 3.0; }
+    if (onTop) { nv = vec3<f32>(v.x * 0.5, 0.0, v.z * 0.5) + vec3<f32>(dir.x, 0.0, dir.z) * spd * 0.15; life = P.wwFoamLife * (0.6 + 0.8 * hash1(hh + 5u)); kind = 2.0; }
     let slot = atomicAdd(&sctl[0], 1u) % P.smax;
     if (sPos[slot].w > 0.0) { continue; }   // never replace a living point: when the pool is full, new whitewater waits for room
     sPos[slot] = vec4<f32>(q.xyz + nv * P.dt + dir * P.h * 0.3 * hash1(hh + 6u), life);
     sVel[slot] = vec4<f32>(nv, kind);
   }
+}
+// spin: water turning over under the surface drags air down as bubbles (Houdini: vorticity). Its own kernel, because the curl needs the
+// grid velocity and sprayEmit already uses its 8 storage buffers. Vorticity costs six grid samples, so a quarter of the particles look
+// each step and count four times (the same on average).
+@compute @workgroup_size(256)
+fn spinEmit(@builtin(global_invocation_id) g: vec3<u32>) {
+  let i = gid1(g); if (i >= P.n || P.smax == 0u || P.sprRate <= 0.0 || P.wwSpin <= 0.0) { return; }
+  let q = pos[i]; if (q.y < DEADY) { return; }
+  if (P.ocean != 0u && layerW(q.xyz) > 0.0) { return; }
+  let v = vel[i].xyz; let spd = length(v); if (spd * P.vs < 0.5) { return; }
+  let h0 = i * 747796405u + P.seed * 2891336453u + 101u;
+  if (hash1(h0) >= 0.25) { return; }
+  let c0 = particleCell(q.xyz); if (!hasStorage(c0)) { return; }
+  if (f32(atomicLoad(&cnt[cellIdx(c0.x, c0.y, c0.z)])) < 0.5 * P.rest) { return; }   // in the body of the water, not at a thin edge
+  let h = P.h; let p = q.xyz; let ex = vec3<f32>(h, 0.0, 0.0); let ey = vec3<f32>(0.0, h, 0.0); let ez = vec3<f32>(0.0, 0.0, h);
+  if (!(hasStorage(particleCell(p + ex)) && hasStorage(particleCell(p - ex)) && hasStorage(particleCell(p + ey)) && hasStorage(particleCell(p - ey)) &&
+        hasStorage(particleCell(p + ez)) && hasStorage(particleCell(p - ez)))) { return; }
+  let ax = sampleNew(p + ex) - sampleNew(p - ex); let ay = sampleNew(p + ey) - sampleNew(p - ey); let az = sampleNew(p + ez) - sampleNew(p - ez);
+  let curl = vec3<f32>(ay.z - az.y, az.x - ax.z, ax.y - ay.x) / (2.0 * h);
+  let e = P.wwSpin * 4.0 * clamp((length(curl) - 3.0) / 12.0, 0.0, 1.0) * smoothstep(0.1, 0.5, P.q8);
+  if (e <= 0.0) { return; }
+  let k = min(u32(floor(P.sprRate * e * P.dt + hash1(h0 + 1u))), 4u);
+  for (var m = 0u; m < k; m++) {
+    let hh = h0 ^ ((m + 1u) * 0x9E3779B9u);
+    let z = hash1(hh + 1u) * 2.0 - 1.0; let a = hash1(hh + 2u) * 6.2831853; let s = sqrt(max(0.0, 1.0 - z * z));
+    let dir = vec3<f32>(s * cos(a), s * sin(a), z);
+    let slot = atomicAdd(&sctl[0], 1u) % P.smax;
+    if (sPos[slot].w > 0.0) { continue; }   // never replace a living point
+    sPos[slot] = vec4<f32>(p + v * P.dt + dir * h * 0.4 * hash1(hh + 6u), P.wwFoamLife * (0.6 + 0.8 * hash1(hh + 5u)));
+    sVel[slot] = vec4<f32>(v + dir * spd * 0.05, 3.0);
+  }
+}
+// whitewater pass over a bake: the baked particles move on along the velocity worked out from two baked frames
+@compute @workgroup_size(256)
+fn wwAdvect(@builtin(global_invocation_id) g: vec3<u32>) {
+  let i = gid1(g); if (i >= P.n) { return; }
+  let q = pos[i]; if (q.y < DEADY) { return; }
+  pos[i] = vec4<f32>(q.xyz + vel[i].xyz * P.dt, q.w);
 }
 // moves every whitewater point by its kind: spray and mist fly with gravity and drag towards the air; foam follows the water's surface;
 // bubbles are carried by the water and rise. They are gone when their time is up, when they hit an object or leave the box.
@@ -141,7 +213,7 @@ fn sprayStep(@builtin(global_invocation_id) g: vec3<u32>) {
   // the fraction part of the kind is how long the point has been this kind (0.4 = WWHOLD seconds or more). A point keeps its kind at least
   // that long, so it never flickers between kinds (and sizes) from one step to the next where the water is thin or broken up.
   var tk = (kw - f32(kind)) / 0.4 * WWHOLD; let settled = tk >= WWHOLD * 0.999; let k0 = kind;
-  let aux = sAux[j]; let wet = aux.w; let vf = aux.xyz;
+  let aux = sAux[j]; let dq = floor((aux.w + 2.0) / 4.0); let wet = aux.w - 4.0 * dq; let spread = dq * 0.5; let vf = aux.xyz;
   var life = sp.w;
   let h0 = j * 2654435761u + P.seed * 974711u;
   if (kind == 0u && v.y < vf.y && wet > 0.55 && tk > 0.05) { kind = 2u; life = P.wwFoamLife * (0.6 + 0.8 * hash1(h0)); v = vf; }   // spray landing on water turns to foam
@@ -151,6 +223,18 @@ fn sprayStep(@builtin(global_invocation_id) g: vec3<u32>) {
   else if (kind == 3u && wet < 0.6 && settled) { kind = 2u; life = max(life, 0.5 * P.wwFoamLife); }                   // a bubble reaching the surface: foam
   if (kind != k0) { tk = 0.0; } else { tk = min(tk + P.dt, WWHOLD); }
   let p = sp.xyz;
+  // fast spray leaves a trail of mist behind it (drops shed fine droplets as the air tears at them)
+  if (kind == 0u && P.wwTrail > 0.0 && life > 0.0) {
+    let sp2 = length(v) * P.vs / max(P.sprMin, 0.1);
+    let pr = P.wwTrail * P.sprRate * P.mistFrac * smoothstep(1.5, 5.0, sp2) * P.dt;
+    if (hash1(h0 + 31u) < pr) {
+      let slot = atomicAdd(&sctl[0], 1u) % P.smax;
+      if (slot != j && sPos[slot].w <= 0.0) {
+        sPos[slot] = vec4<f32>(sp.xyz, P.sprLife * 1.6 * (0.6 + 0.8 * hash1(h0 + 32u)));
+        sVel[slot] = vec4<f32>(v * (0.2 + 0.2 * hash1(h0 + 33u)), 1.0);
+      }
+    }
+  }
   if (kind <= 1u) {
     let mist = kind == 1u;
     var gust = vec3<f32>(0.0);
@@ -166,13 +250,16 @@ fn sprayStep(@builtin(global_invocation_id) g: vec3<u32>) {
   } else if (kind == 2u) {
     let vy = vf.y + clamp((wet - 0.5) * 4.0, -1.0, 1.0) * P.h * 4.0;   // held at the surface: pushed up when under, pulled down when above
     v = mix(v, vec3<f32>(vf.x, vy, vf.z), 1.0 - exp(-10.0 * P.dt));
-    life -= P.dt;
+    life -= P.dt * clamp(1.0 + P.wwErode * spread, 0.3, 2.0);   // fades faster where the surface spreads apart, lasts where it gathers
   } else {
-    v = mix(v, vf + vec3<f32>(0.0, P.wwRise, 0.0), 1.0 - exp(-6.0 * P.dt));
+    // bubbles of different sizes: big ones rise fast, small ones hang in the water and keep it white longer
+    v = mix(v, vf + vec3<f32>(0.0, P.wwRise * (0.4 + 1.2 * hash1(j * 7919u + 3u)), 0.0), 1.0 - exp(-6.0 * P.dt));
     life -= 0.3 * P.dt;
   }
   let np = p + v * P.dt;
-  if (np.x < P.x0 || np.x > P.x1 || np.y < P.y0 || np.y > P.y1 || np.z < P.z0 || np.z > P.z1) { life = 0.0; }
+  // gone at the walls of the whitewater area (at least the tank); outside the tank over an ocean, gone below the sea's level
+  if (np.x < P.wwA0.x || np.x > P.wwA1.x || np.y < P.wwA0.y || np.y > P.wwA1.y || np.z < P.wwA0.z || np.z > P.wwA1.z) { life = 0.0; }
+  else if (P.ocean != 0u && !inTank(np) && np.y < P.olevel) { life = 0.0; }
   else if (P.ncols > 0u && colAt(np) >= 0) { life = 0.0; }
   else if (P.ocean != 0u && kind >= 2u && layerW(np) > 0.6) { life = 0.0; }
   sPos[j] = vec4<f32>(np, life); sVel[j] = vec4<f32>(v, f32(kind) + 0.4 * tk / WWHOLD);
@@ -210,6 +297,7 @@ fn dispBegin() { atomicStore(&sctl[2], 0u); }
 // The live view as a cache frame: every thread packs four points of one part (water, whitewater or deep water). Positions are 16 bits
 // across the box (three per point, so four points fill six words), water gets a speed byte (16ths, 255 = gone) and a white-water byte,
 // whitewater its 32-bit code (0 = none), deep water a speed byte. Word 0 and 1 hold how many whitewater and deep points there are.
+fn q16s(p: vec3<f32>) -> vec3<u32> { return vec3<u32>(clamp(round((p - vec3<f32>(PK.sx0, PK.sy0, PK.sz0)) * vec3<f32>(PK.skx, PK.sky, PK.skz)), vec3<f32>(0.0), vec3<f32>(65535.0))); }
 fn q16(p: vec3<f32>) -> vec3<u32> { return vec3<u32>(clamp(round((p - vec3<f32>(PK.x0, PK.y0, PK.z0)) * vec3<f32>(PK.kx, PK.ky, PK.kz)), vec3<f32>(0.0), vec3<f32>(65535.0))); }
 fn put6(o: u32, q: array<vec3<u32>, 4>) {
   packOut[o] = q[0].x | (q[0].y << 16u); packOut[o + 1u] = q[0].z | (q[1].x << 16u); packOut[o + 2u] = q[1].y | (q[1].z << 16u);
@@ -236,7 +324,7 @@ fn packDisp(@builtin(global_invocation_id) g: vec3<u32>) {
   if (ts < gS) {
     for (var m = 0u; m < 4u; m++) {
       let k = ts * 4u + m; var code = 0u; q[m] = vec3<u32>(0u);
-      if (k < nS) { let v = disp[PK.srcS + k]; if (v.y > DEADY) { q[m] = q16(v.xyz); code = bitcast<u32>(v.w); } }
+      if (k < nS) { let v = disp[PK.srcS + k]; if (v.y > DEADY) { q[m] = q16s(v.xyz); code = bitcast<u32>(v.w); } }
       packOut[PK.oSk + k] = code;
     }
     put6(PK.oSp + ts * 6u, q); return;

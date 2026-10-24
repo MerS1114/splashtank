@@ -495,7 +495,8 @@ async function initGpu() {
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) return null;
     const lim = adapter.limits;
-    const dev = await adapter.requestDevice({ requiredLimits: {
+    // timestamp queries (when the GPU offers them) time the solver on the GPU itself, without the wait for the browser to report back
+    const dev = await adapter.requestDevice({ requiredFeatures: adapter.features.has('timestamp-query') ? ['timestamp-query'] : [], requiredLimits: {
       maxStorageBufferBindingSize: Math.min(lim.maxStorageBufferBindingSize, 1 << 29),
       maxBufferSize: Math.min(lim.maxBufferSize, 1 << 29)
     } });

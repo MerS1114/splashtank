@@ -148,10 +148,18 @@
     $('#vp-sub').textContent = '(' + fr + ') ' + sc + (selected ? ' | ' + selected.name : '');
     const cl = $('#chip-live-t'), cache = viewMode() === 'cache';
     if (cl) cl.textContent = cache ? (S.baking ? 'Baking · ' + S.cache.frames.length + ' frames so far' : 'Bake playback') : S.lcPlay ? 'Live cache' : S.playing ? 'Live · ' + Math.round(fpsE) + ' fps' : 'Live · stopped';
+    const cw = $('#chip-ww-t');
+    if (cw) {   // where the whitewater shown comes from
+      let t = 'Whitewater off', col = '#666';
+      if (S.wwPass) { t = 'Baking whitewater ' + Math.round(100 * (S.wwProg || 0)) + '%'; col = '#f2f2f2'; }
+      else if (cache) { const f = S.cache && S.cache.frames[Math.round(S.ct)], k = f ? f.wws || 0 : 0; t = k === 2 ? 'Whitewater: baked' : k === 1 ? 'Whitewater: cached' : 'No whitewater'; col = k === 2 ? '#f2f2f2' : k === 1 ? '#b48df0' : '#666'; }
+      else if (S.sprOn) { t = S.lcPlay ? 'Whitewater: live (cached)' : 'Whitewater: live'; col = '#6fd36f'; }
+      cw.textContent = t; $('#chip-ww').style.setProperty('--wwc', col);
+    }
     const ss = $('#ol-sim-sub'); if (ss) ss.textContent = (isGpu() ? fmtN(sim ? sim.N : 0) : fmtN(sim ? sim.N : 0)) + ' particles' + (S.engine === 'flip' && nbActive() ? ' · narrow band' : '');
     const vm = $('#vh-mode'); if (vm && document.activeElement !== vm) vm.value = uiMode;
   }
-  window.__splash = { setTool, setSnap, setOrient, setColorBy, setPtab, renderOutliner, setHidden, layState, bakeRes, buildDesc, LC, filterPanel, drawCount: () => shownN, slots: SLOTS, perf, rawBuf, geoW, geoD, geoS, pmat, matS, slotLoad, showSlots, packCpuFrame, renderer, scene, gizmo, pickGizmo, snapView, setOrtho, tfLines, snapMark, getCam: () => camera, select, get tfState() { return tf; }, lc: () => ({ frames: LC.frames.length, end: lcEnd(), armed: LC.armed, play: S.lcPlay, t: S.lcT, bytes: LC.bytes, full: LC.full }), lcRestart, stepOnce, runBenchmark, runSmooth, getSim: () => sim, cam, b, setFaceCoord, commitBox, FACES, sceneData, applySceneData, S, objs, addKey, resetSim, setDomain, selSet, select, startTf, confirmTf, cancelTf, enterEdit, exitEdit, extrudeFaces, ES, undo, redo, addAt, setSelMode, lastM, get tf() { return tf; }, get uiMode() { return uiMode; }, editPick, toScreen, makeObj, selVerts, selectAllEdit, modalKey, evalTf };
+  window.__splash = { gpuKept, BAKE, setTool, setSnap, setOrient, setColorBy, setPtab, renderOutliner, setHidden, layState, bakeRes, buildDesc, LC, filterPanel, drawCount: () => shownN, slots: SLOTS, perf, rawBuf, geoW, geoD, geoS, pmat, matS, slotLoad, showSlots, packCpuFrame, renderer, scene, gizmo, pickGizmo, snapView, setOrtho, tfLines, snapMark, getCam: () => camera, select, get tfState() { return tf; }, lc: () => ({ frames: LC.frames.length, end: lcEnd(), armed: LC.armed, play: S.lcPlay, t: S.lcT, bytes: LC.bytes, full: LC.full }), lcRestart, stepOnce, runBenchmark, runSmooth, getSim: () => sim, cam, b, setFaceCoord, commitBox, FACES, sceneData, applySceneData, S, objs, addKey, resetSim, setDomain, selSet, select, startTf, confirmTf, cancelTf, enterEdit, exitEdit, extrudeFaces, ES, undo, redo, addAt, setSelMode, lastM, get tf() { return tf; }, get uiMode() { return uiMode; }, editPick, toScreen, makeObj, selVerts, selectAllEdit, modalKey, evalTf };
   initGpu().then((g) => {
     S.gpu = g; applyPreset(g ? 'flip' : 'cpu');
     buildLiveUI(); buildBakeUI(); makeSim(); $('#capshow').textContent = fmtN(S.cap);
