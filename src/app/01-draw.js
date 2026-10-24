@@ -4,12 +4,13 @@
   // positions and speed bytes (dp, narrow band look only). A frame goes to the GPU as it is, into integer textures one texel per point and
   // 2048 wide: water from row 0, then deep water, then whitewater. The shaders turn the bytes back into points and make the look-only
   // extras (fixed random offsets from a hash of the point's number), so the CPU never goes over the points one by one.
-  // Slots 0 and 4 are the live view and the live cache, used in turn so an upload never rewrites the textures the last draw may still be
-  // reading (that made the driver wait); slots 1 to 3 hold baked frames (the two either side of the playhead and the next one).
-  const TEXW = 2048, NSLOT = 5, NBSLOT = 4;
+  // Slots 0 and 6 are the live view and the live cache, used in turn so an upload never rewrites the textures the last draw may still be
+  // reading (that made the driver wait); slots 1 to 5 hold baked frames (the two either side of the playhead and up to two ahead, so the
+  // slot a new frame goes into was last drawn a few frames ago).
+  const TEXW = 2048, NSLOT = 7, NBSLOT = 6;
   const SLOTS = Array.from({ length: NSLOT }, () => ({ rows: 0, gl: null, T: null, key: null, used: 0, nW: 0, nD: 0, nS: 0, rowD: 0, rowS: 0, fm: false, b: null, alive: 0 }));
   let liveI = 0;   // the live slot shown now
-  function liveLoad(fr, b, key) { liveI = liveI ? 0 : 4; const sl = SLOTS[liveI]; slotLoad(sl, fr, b); sl.key = key; return sl; }
+  function liveLoad(fr, b, key) { liveI = liveI ? 0 : NSLOT - 1; const sl = SLOTS[liveI]; slotLoad(sl, fr, b); sl.key = key; return sl; }
   const perf = { up: 0, upBytes: 0, upN: 0, build: 0, render: 0, frame: 0 };   // milliseconds of the last upload, frame build and draw (for the benchmark)
   // how many points of a frame are really there (counted once per frame)
   function frameAlive(fr, show) {

@@ -163,13 +163,15 @@
   $('#scrub').addEventListener('input', (e) => { S.ct = +e.target.value; if (S.cache && S.cache.partial) S.cfollow = S.ct >= S.cache.frames.length - 1.5; });
 
   const DEFB = { x0: -1.5, x1: 1.5, y0: 0, y1: 2.6, z0: -1.5, z1: 1.5 };
-  // Baked frames live in slots 1 to 3: the frame at the playhead, the next one (to blend towards) and, while playing, the one after that,
-  // loaded ahead on a display frame that had nothing else to load, so crossing into a new frame never has to load two at once.
+  // Baked frames live in slots 1 to 5: the frame at the playhead, the next one (to blend towards) and, while playing, up to two after that,
+  // loaded ahead one per display frame that had nothing else to load, so crossing into a new frame never has to load at that moment.
+  // perf.late counts frames that were needed before they were loaded ahead (what makes playback hitch).
   let useTick = 0;
   function slotKey(c, k) { return c.uid + ':' + k + ':' + (S.showSpray !== false); }
   function findSlot(key) { for (let i = 1; i < NBSLOT; i++) if (SLOTS[i].key === key) { SLOTS[i].used = ++useTick; return i; } return -1; }
-  function slotFor(c, k, keep) {
+  function slotFor(c, k, keep, ahead) {
     const key = slotKey(c, k); let i = findSlot(key); if (i > 0) return i;
+    if (!ahead && S.cplay) perf.late = (perf.late || 0) + 1;
     let v = -1; for (let j = 1; j < NBSLOT; j++) if (!keep.includes(j) && (v < 0 || SLOTS[j].used < SLOTS[v].used)) v = j;
     slotLoad(SLOTS[v], c.frames[k], c.b || DEFB); SLOTS[v].key = key; SLOTS[v].used = ++useTick; loadedNow = true;
     return v;
@@ -183,9 +185,15 @@
     // blend between frames only when the same slot is the same particle in both (older caches with sorting were not saved that way)
     const a = Math.floor(t), bi = Math.min(a + 1, last), w = c.stableIds && bi !== a ? t - a : 0, A = fr[a], B = fr[bi], og = c.org || { x: 0, y: 0, z: 0 };
     const sa = slotFor(c, a, []), sb = w > 0 ? slotFor(c, bi, [sa]) : sa;
-    if (!loadedNow && S.cplay && last > 1) {   // nothing loaded this time: load the frame after next now
-      let nx = bi + 1; if (nx > last) nx = S.cloop && !c.partial ? 0 : -1;
-      if (nx >= 0 && findSlot(slotKey(c, nx)) < 0) slotFor(c, nx, [sa, sb]);
+    if (!loadedNow && S.cplay && last > 1) {   // nothing loaded this time: load the first of the next two frames that is not loaded yet
+      const keep = [sa, sb];
+      for (let j = 1; j <= 2; j++) {
+        let nx = bi + j; if (nx > last) nx = S.cloop && !c.partial ? nx - last - 1 : -1;
+        if (nx < 0) break;
+        const have = findSlot(slotKey(c, nx));
+        if (have < 0) { slotFor(c, nx, keep, true); break; }
+        keep.push(have);
+      }
     }
     pmat.uniforms.uD.value = c.d; pmat.uniforms.uCR.value = (c.desc && c.desc.cellRatio) || 2; matW.uniforms.uFdt.value = 1 / c.fps;
     showSlots(sa, sb, w);

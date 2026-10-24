@@ -25,7 +25,9 @@
   // ---- integer textures for the frames, made with WebGL directly (three.js r128 cannot update part of a texture) and handed to three.js
   // by setting the WebGL texture of an empty THREE.Texture, which three.js then only binds ----
   const gl = renderer.getContext();
-  const TFMT = { p: [gl.RGB16UI, gl.RGB_INTEGER, gl.UNSIGNED_SHORT, 3], s: [gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE, 1], f: [gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE, 1], k: [gl.R32UI, gl.RED_INTEGER, gl.UNSIGNED_INT, 1] };
+  // [format, values per point, texels per point]. Positions are one-channel 16-bit, three texels per point (a texture 3 x TEXW wide):
+  // three-channel textures have no native format on D3D (Chrome on Windows), so each upload of them was converted to four channels on the CPU.
+  const TFMT = { p: [gl.R16UI, gl.RED_INTEGER, gl.UNSIGNED_SHORT, 3, 3], s: [gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE, 1, 1], f: [gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE, 1, 1], k: [gl.R32UI, gl.RED_INTEGER, gl.UNSIGNED_INT, 1, 1] };
   function slotAlloc(sl, rows) {
     rows = Math.max(16, rows); if (sl.gl && sl.rows >= rows) return;
     rows = Math.min(Math.ceil(rows * 1.25 / 16) * 16, gl.getParameter(gl.MAX_TEXTURE_SIZE));
@@ -35,7 +37,7 @@
       const t = gl.createTexture(); renderer.state.bindTexture(gl.TEXTURE_2D, t);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      gl.texStorage2D(gl.TEXTURE_2D, 1, TFMT[k][0], TEXW, rows);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, TFMT[k][0], TEXW * TFMT[k][4], rows);
       sl.gl[k] = t; if (!sl.T[k]) sl.T[k] = new THREE.Texture();
       renderer.properties.get(sl.T[k]).__webglTexture = t;
     }
@@ -44,10 +46,10 @@
   // n values of a frame array into rows from row0: the whole rows, then the part of the last one
   function upTex(t, k, row0, data, n) {
     if (!n) return 0;
-    const f = TFMT[k], c = f[3], full = Math.floor(n / TEXW), rem = n - full * TEXW;
+    const f = TFMT[k], c = f[3], tp = f[4], full = Math.floor(n / TEXW), rem = n - full * TEXW;
     renderer.state.bindTexture(gl.TEXTURE_2D, t);
-    if (full) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row0, TEXW, full, f[1], f[2], data, 0);
-    if (rem) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row0 + full, rem, 1, f[1], f[2], data, full * TEXW * c);
+    if (full) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row0, TEXW * tp, full, f[1], f[2], data, 0);
+    if (rem) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row0 + full, rem * tp, 1, f[1], f[2], data, full * TEXW * c);
     return n * c * data.BYTES_PER_ELEMENT;
   }
   // a frame into a slot, as it is (no per-point work on the CPU)
@@ -81,6 +83,7 @@
     ' vec3 ball(uint s) { vec3 r = vec3(float(hsh(s) & 65535u), float(hsh(s + 7919u) & 65535u), float(hsh(s + 104729u) & 65535u)) / 32767.5 - 1.0; float l = length(r); return l > 1.0 ? r / l : r; }' +
     ' void hide() { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; vK = 0.0; vS = 0.0; vF = 0.0; vL = 0.0; }' +
     ' ivec2 tcOf(int i) { return ivec2(i % ' + TEXW + ', i / ' + TEXW + '); }' +
+    ' uvec3 pAt(highp usampler2D t, ivec2 tc) { int x = tc.x * 3; return uvec3(texelFetch(t, ivec2(x, tc.y), 0).r, texelFetch(t, ivec2(x + 1, tc.y), 0).r, texelFetch(t, ivec2(x + 2, tc.y), 0).r); }' +
     ' void place(vec3 p, float sz, float minPx) { vec4 mv = modelViewMatrix * vec4(p, 1.0); gl_Position = projectionMatrix * mv; gl_PointSize = max((uOrtho > 0.0 ? uSize * uOrtho : uSize * uScale / (-mv.z)) * sz, minPx); }';
   // water: blended between frame A and frame B (the same particle has the same number in both). A particle only in B shows at once;
   // one only in A shows until halfway.
@@ -92,7 +95,7 @@
     '  float la = (va && uFmA > 0.5) ? floor(float(texelFetch(tFA, tc, 0).r) / 17.0 + 0.5) : 0.0; float lb = (vb && uFmB > 0.5) ? floor(float(texelFetch(tFB, tc, 0).r) / 17.0 + 0.5) : 0.0;' +
     // a slot can be a different particle in the next frame (narrow band reseeding reuses slots): if it is further than it could have moved,
     // it is not blended but switches halfway, so nothing streaks across the water
-    '  vec3 pa = va ? vec3(texelFetch(tPA, tc, 0).xyz) * uQA + uB0A : vec3(0.0); vec3 pb = vb ? vec3(texelFetch(tPB, tc, 0).xyz) * uQB + uB0B : vec3(0.0);' +
+    '  vec3 pa = va ? vec3(pAt(tPA, tc)) * uQA + uB0A : vec3(0.0); vec3 pb = vb ? vec3(pAt(tPB, tc)) * uQB + uB0B : vec3(0.0);' +
     '  float sm = max(float(sa), float(sb)); if (va && vb && sm < 191.0 && length(pb - pa) > sm / 16.0 / uVs * 2.0 * uFdt + 3.0 * uD) { if (uBlend < 0.5) vb = false; else va = false; }' +
     '  if (va && vb) { p = mix(pa, pb, uBlend); spd = mix(float(sa), float(sb), uBlend) / 16.0; lv = floor(mix(la, lb, uBlend) + 0.5); }' +
     '  else if (va && uBlend < 0.5) { p = pa; spd = float(sa) / 16.0; lv = la; }' +
@@ -106,7 +109,7 @@
   const VD = VHEAD + ' uniform highp usampler2D tP; uniform highp usampler2D tS; uniform float uBase; uniform float uN; uniform vec3 uB0; uniform vec3 uQ;' +
     ' void main() { int k1 = int(uK1 + 0.5); int bi = gl_VertexID / k1; float lk = float(gl_VertexID - bi * k1); if (bi >= int(uN + 0.5)) { hide(); return; }' +
     '  int idx = int(uBase + 0.5) + bi; ivec2 tc = tcOf(idx); uint s = texelFetch(tS, tc, 0).r; if (s == 255u) { hide(); return; }' +
-    '  vec3 p = vec3(texelFetch(tP, tc, 0).xyz) * uQ + uB0; vK = 3.0; vS = float(s) / 16.0; vL = 0.0; vF = 0.0;' +
+    '  vec3 p = vec3(pAt(tP, tc)) * uQ + uB0; vK = 3.0; vS = float(s) / 16.0; vL = 0.0; vF = 0.0;' +
     '  if (lk > 0.5) p += ball(uint(idx) * 16u + uint(lk)) * 0.5 * uD * uCR;' +
     '  place(p, 1.3, 1.5); }';
   // whitewater from its 32-bit code: spray (its copies trail back along its motion as a short streak), mist (a soft cloud), foam (flat on the
@@ -114,7 +117,7 @@
   const VS = VHEAD + ' uniform highp usampler2D tP; uniform highp usampler2D tK; uniform float uBase; uniform float uN; uniform vec3 uB0; uniform vec3 uQ;' +
     ' void main() { int k1 = int(uK1 + 0.5); int bi = gl_VertexID / k1; float lk = float(gl_VertexID - bi * k1); if (bi >= int(uN + 0.5)) { hide(); return; }' +
     '  int idx = int(uBase + 0.5) + bi; ivec2 tc = tcOf(idx); uint pk = texelFetch(tK, tc, 0).r; if (pk == 0u) { hide(); return; }' +
-    '  vec3 p = vec3(texelFetch(tP, tc, 0).xyz) * uQ + uB0; uint kc = (pk >> 29u) & 3u; float spd = float((pk >> 21u) & 255u) / 4.0; float life = float(pk & 1023u) / 1023.0;' +
+    '  vec3 p = vec3(pAt(tP, tc)) * uQ + uB0; uint kc = (pk >> 29u) & 3u; float spd = float((pk >> 21u) & 255u) / 4.0; float life = float(pk & 1023u) / 1023.0;' +
     '  vF = 0.0; vL = 0.0; uint hs = uint(idx) * 16u + uint(lk);' +
     '  if (kc == 0u) { vK = 1.0; vS = spd; if (lk > uKs + 0.5) { hide(); return; }' +
     '   float u = float(pk & 1023u) / 1023.0 * 2.0 - 1.0; float w = float((pk >> 10u) & 1023u) / 1023.0 * 2.0 - 1.0; vec3 n = vec3(u, w, 1.0 - abs(u) - abs(w));' +

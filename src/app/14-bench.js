@@ -94,18 +94,18 @@
     const pctl = (a, p) => { if (!a.length) return 0; const b = a.slice().sort((x, y) => x - y); return b[Math.min(b.length - 1, Math.floor(p * b.length))]; };
     const record = (secs) => new Promise((res) => {
       const rec = { gaps: [], js: [], up: [], upMB: [], render: [], unpack: [], t0: performance.now(), frame0: S.frame, ct0: S.ct, wrapped: 0 };
-      let upN = perf.upN, prev = performance.now(), lastCt = S.ct, lastG = sim ? sim.gen : 0;
+      let upN = perf.upN, prev = performance.now(), lastCt = S.ct, lastG = sim ? sim.gen : 0; rec.late0 = perf.late || 0;
       frameHook = (now) => {
         rec.gaps.push(now - prev); prev = now; rec.js.push(perf.frame); rec.render.push(perf.render);
         if (perf.upN !== upN) { upN = perf.upN; rec.up.push(perf.up); rec.upMB.push(perf.upBytes / 1048576); }
         if (sim && sim.gen !== lastG && viewMode() === 'live') { lastG = sim.gen; if (sim.unpackMs) rec.unpack.push(sim.unpackMs); }
         if (S.ct < lastCt) rec.wrapped++; lastCt = S.ct;
-        if (now - rec.t0 > secs * 1000) { frameHook = null; rec.secs = (now - rec.t0) / 1000; res(rec); }
+        if (now - rec.t0 > secs * 1000) { frameHook = null; rec.secs = (now - rec.t0) / 1000; rec.late = (perf.late || 0) - rec.late0; res(rec); }
       };
     });
     const report = (rec) => {
       const g = rec.gaps, slow = g.slice().sort((x, y) => y - x).slice(0, 5).map(f0).join(', ');
-      say('  ' + f1(g.length / rec.secs) + ' frames a second drawn (the live view is only redrawn when something changed, so these are the times between new pictures). Typical frame ' + f0(pctl(g, 0.5)) + ' ms, 1 in 20 slower than ' + f0(pctl(g, 0.95)) + ' ms, slowest ' + slow + ' ms. Frames over 50 ms: ' + g.filter((v) => v > 50).length + ', over 100 ms: ' + g.filter((v) => v > 100).length + '.');
+      say('  ' + f1(g.length / rec.secs) + ' frames a second drawn' + (rec.live ? ' (the live view is only redrawn when something changed, so these are the times between new pictures)' : '') + '. Typical frame ' + f0(pctl(g, 0.5)) + ' ms, 1 in 20 slower than ' + f0(pctl(g, 0.95)) + ' ms, slowest ' + slow + ' ms. Frames over 50 ms: ' + g.filter((v) => v > 50).length + ', over 100 ms: ' + g.filter((v) => v > 100).length + '.');
       say('  Page work per frame ' + f1(avg(rec.js)) + ' ms on average (' + f1(pctl(rec.js, 0.95)) + ' ms for 1 in 20), of which handing it to the drawing ' + f1(avg(rec.render)) + ' ms.');
       if (rec.up.length) say('  New points sent to the drawing ' + rec.up.length + ' times, ' + f1(avg(rec.up)) + ' ms each (slowest ' + f1(Math.max(...rec.up)) + ' ms), about ' + f1(avg(rec.upMB)) + ' MB each.');
       if (rec.unpack.length) say('  Copying the GPU\'s points for the view: ' + f1(avg(rec.unpack)) + ' ms each.');
@@ -127,7 +127,7 @@
       if (sim.stepMs) sim.stepMs.length = 0; sim.slowMs = 0; sim.maxQ = 0;
       setPlaying(true);
       say(''); say('Live sim, ' + (window.__smoothSecs || 10) + ' seconds from the start:');
-      const L = await record(window.__smoothSecs || 10); setPlaying(false);
+      const L = await record(window.__smoothSecs || 10); L.live = true; setPlaying(false);
       const simS = (S.frame - L.frame0) / 60;
       say('  The sim got through ' + f1(simS) + ' s of its time (' + Math.round(100 * simS / L.secs) + '% of real time). ' + fmtN(sim.N) + ' particles now, solver step about ' + f1(sim.lastMs) + ' ms from start until the browser reports it done (median of the last 31, slowest ' + f0(sim.slowMs) + ' ms)' + (sim.gpuMs ? ', of which the GPU was busy ' + f1(sim.gpuMs) + ' ms' : '') + (sim.maxQ ? ', up to ' + sim.maxQ + ' steps queued' : '') + (S.lastSub > 1 ? ' with ' + S.lastSub + ' substeps a frame' : '') + ', ' + fmtN(shownN) + ' points drawn.');
       report(L);
@@ -139,6 +139,7 @@
         say(''); say('Bake playback, ' + (window.__smoothSecs || 10) + ' seconds (' + (c.frames.length - 1) + ' frames at ' + c.fps + ' a second, up to ' + fmtN(c.maxN) + ' water points):');
         const P = await record(window.__smoothSecs || 10);
         report(P);
+        say('  Frames needed before they had been loaded ahead: ' + P.late + (P.late ? ' (each of those loads during the frame that shows it)' : '') + '.');
       } else { say(''); say('No bake to play (bake something first to test playback).'); }
       // 3. collision shapes
       const ms = objs.filter((o) => o.kind === 'mesh');
