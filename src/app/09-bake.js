@@ -18,8 +18,29 @@
   function setBakeUI(running) {
     $('#btn-bake').disabled = running; $('#btn-cancel').hidden = !running; $('#bake-progress').hidden = !running;
     $('#seg-mode').querySelectorAll('button').forEach((x) => { x.disabled = running; });
-    wwButtons();
+    wwButtons(); pipeUi();
   }
+  // the three bake steps (water, whitewater, save): their state in the Bake tab and as chips in the top bar
+  function pipeUi() {
+    const c = S.cache, has = !!(c && c.frames.length > 1);
+    let w = 'none', wt = 'not baked';
+    if (S.baking) { w = 'busy'; wt = 'baking'; } else if (has) { w = 'done'; wt = c.cancelled ? 'baked (cancelled early)' : 'baked'; }
+    let ww = 'none', wwt = has ? 'none in this bake' : 'bake the water first';
+    if (S.wwPass) { ww = 'busy'; wwt = 'baking ' + Math.round((S.wwProg || 0) * 100) + '%'; }
+    else if (S.baking && c && c.desc && c.desc.spr) { ww = 'busy'; wwt = 'baking with the water'; }
+    else if (has) { const f = c.frames[c.frames.length >> 1] || {}; const k = f.wws || (c.frames.some((x) => x.sp && x.sp.n) ? 1 : 0); if (k) { ww = 'done'; wwt = k === 2 ? 'baked from the water' : 'made with the water'; } }
+    let sv = 'none', svt = 'nothing to save';
+    if (has && !c.partial) { if (c.dirty) { sv = 'stale'; svt = 'not saved yet'; } else { sv = 'done'; svt = c.fromFile ? 'loaded from a file' : 'saved'; } }
+    const set = (step, st, chip, cls, txt) => { const e = $(step); if (e) { e.className = 'step ' + cls; $(st).textContent = txt; } const p = $(chip); if (p) p.className = 'pp ' + cls; };
+    $('#pp-save').textContent = sv === 'stale' ? 'Not saved' : 'Saved';
+    set('#step-water', '#st-water', '#pp-water', w, wt); set('#step-ww', '#st-ww', '#pp-ww', ww, wwt); set('#step-save', '#st-save', '#pp-save', sv, svt);
+    const si = $('#save-info');
+    if (si) si.textContent = !has ? '' : c.partial ? 'Saving is possible when the bake has finished or is cancelled.' : (c.dirty ? 'Not saved: ' : 'In memory: ') + (cacheBytes(c) / 1048576).toFixed(0) + ' MB. ' + (c.dirty ? 'Closing the page loses it.' : '');
+  }
+  $('#pipe').addEventListener('click', () => { S.tab = 'bake'; applyMode(); setPtab('bake'); });
+  $('#ww-goto').addEventListener('click', (e) => { e.currentTarget.blur(); setPtab('sim'); const g = document.querySelector('details.sub[data-k="spray"]'); if (g) { g.open = true; g.scrollIntoView({ block: 'start' }); } });
+  // a bake not saved yet is lost with the page: the browser asks first
+  window.addEventListener('beforeunload', (e) => { if (S.baking || S.wwPass || (S.cache && S.cache.dirty && S.cache.frames.length > 1)) { e.preventDefault(); e.returnValue = ''; } });
   function fmtTime(s) { s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
   function frameBytes(f) {
     const by = (o, ks) => (o ? ks.reduce((t, k) => t + (o[k] ? o[k].byteLength : 0), 0) : 0);
@@ -66,7 +87,7 @@
   function finishBake(cache, cancelled) {
     S.baking = false; setBakeUI(false); S.bakeT = 0;
     if (worker) { worker.terminate(); worker = null; }
-    cache.partial = false;
+    cache.partial = false; cache.dirty = true;
     if (cache.frames.length < 2) {   // nothing usable: the cache from before comes back
       S.cache = cache.prev || null; delete cache.prev;
       $('#bake-status').textContent = cancelled ? 'Bake cancelled before any frames were finished.' : 'Nothing was baked.';
@@ -79,7 +100,7 @@
     $('#bake-status').innerHTML = cancelled ? 'Cancelled. Kept the <b>' + (cache.frames.length - 1) + '</b> frames baked so far (' + (cache.frames.length / cache.fps).toFixed(1) + ' s); they play and save like a full bake.'
       : 'Baked <b>' + (cache.frames.length - 1) + '</b> frames in ' + fmtTime(cache.seconds) + '.';
     $('#bake-status').innerHTML += ' ' + bakeLimits(cache);
-    applyMode(); lcUi();
+    applyMode(); lcUi(); pipeUi();
   }
   // waterOnly: the water without whitewater (faster); Bake whitewater makes it afterwards
   function startBake(waterOnly) {
@@ -133,7 +154,7 @@
     const g = gpuKept();
     el.innerHTML = '<b>' + (c.frames.length - 1) + '</b> frames at ' + c.fps + ' fps, up to <b>' + fmtN(c.maxN) + '</b> points, spacing ' + c.d.toFixed(3) + ', <b>' + (cacheBytes(c) / 1048576).toFixed(0) + ' MB</b> in memory, ' + g.n + ' frames on the GPU (' + g.mb.toFixed(0) + ' MB).';
   }
-  setInterval(() => { if (S.cache && viewMode() === 'cache') { updateCacheInfo(); lcUi(); } }, 1000);
+  setInterval(() => { if (S.cache && viewMode() === 'cache') { updateCacheInfo(); lcUi(); } pipeUi(); }, 1000);
   addSlider($('#g-cache'), { id: 'c-gpukeep', label: 'GPU memory', min: 256, max: 8192, step: 256, value: S.gpuKeepMB, def: dv('gpuKeepMB'), fmt: (v) => (v >= 1024 ? (v / 1024).toFixed(v % 1024 ? 2 : 0) + ' GB' : v + ' MB'), tip: 'How much GPU memory baked frames may keep. A bake that fits is sent to the GPU once (while it plays the first time, or while it is paused) and then plays smoothly without moving any data. Frames that do not fit are sent again each time they are shown. If the GPU runs out of memory first, fewer frames are kept.', onInput: (v) => { S.gpuKeepMB = v; } });
   // whitewater pass over the shown bake (runWhitewaterPass in flip/bake.js), with the scene's colliders and whitewater settings as they are now
   let wwStop = false;
@@ -154,12 +175,12 @@
       }, () => wwStop);
       st.textContent = (ok ? 'Whitewater made for ' : 'Stopped: whitewater remade for the first frames of ') + (c.frames.length - 1) + ' frames in ' + fmtTime((performance.now() - t0) / 1000) + (ok ? '. Save the cache to keep it.' : '; the rest keep the old whitewater.');
     } catch (err) { st.textContent = 'The whitewater pass failed: ' + (err && err.message || err); }
-    c.uid = ++cacheUid; S.wwPass = false; wwButtons(); updateCacheInfo(); lcUi();
+    c.uid = ++cacheUid; c.dirty = true; S.wwPass = false; wwButtons(); updateCacheInfo(); lcUi(); pipeUi();
   }
   function wwButtons() {
     const busy = S.baking || S.wwPass;
     for (const id of ['#c-ww', '#tb-bakeww', '#btn-bake', '#btn-bakew', '#tb-bakew']) { const b = $(id); if (b) b.disabled = busy; }
-    $('#c-ww-stop').hidden = !S.wwPass;
+    $('#c-ww-stop').hidden = !S.wwPass; $('#c-save').disabled = busy;
   }
   $('#c-ww').addEventListener('click', (e) => { e.currentTarget.blur(); bakeWhitewater(); });
   $('#tb-bakeww').addEventListener('click', (e) => { e.currentTarget.blur(); S.tab = 'bake'; applyMode(); setPtab('bake'); bakeWhitewater(); });
@@ -168,14 +189,14 @@
   $('#c-ww-stop').addEventListener('click', () => { wwStop = true; });
   $('#c-loop').addEventListener('change', (e) => { S.cloop = e.target.checked; });
   seg('#seg-cspeed', (v) => { S.cspeed = +v; });
-  $('#c-clear').addEventListener('click', () => { S.cache = null; for (const i of BAKE.slice(5)) slotFree(SLOTS[i]); BAKE.length = 5; updateCacheInfo(); applyMode(); lcUi(); });
+  $('#c-clear').addEventListener('click', () => { if (S.cache && S.cache.dirty && !confirm('This bake is not saved. Clear it anyway?')) return; S.cache = null; for (const i of BAKE.slice(5)) slotFree(SLOTS[i]); BAKE.length = 5; updateCacheInfo(); applyMode(); lcUi(); });
   function download(blob, name) {
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 8000);
   }
   $('#c-save').addEventListener('click', (e) => {
     e.currentTarget.blur(); const c = S.cache; if (!c) { flash('Bake something first.'); return; }
-    download(new Blob(writeCacheParts(c), { type: 'application/octet-stream' }), 'splashtank-bake.splc');
+    download(new Blob(writeCacheParts(c), { type: 'application/octet-stream' }), 'splashtank-bake.splc'); c.dirty = false; pipeUi();
     flash('Saved splashtank-bake.splc (' + Math.round(cacheBytes(c) / 1048576) + ' MB) to your Downloads folder.');
   });
   // measurements from a stored frame, for bakes that did not record them while running
@@ -308,7 +329,7 @@
       const c = parseCache(buf);
       if (c.frames.length < 2) throw new Error('The file has no frames.');
       if (c.scene && (c.ids || []).some((id) => !objs.find((o) => o.id === id))) { try { applySceneData(c.scene); } catch (e2) { /* keep the current scene */ } }
-      S.cache = c; S.ct = 0; setCPlay(true); buildTicks(); updateCacheInfo(); S.tab = 'bake'; applyMode(); lcUi();
+      c.fromFile = true; S.cache = c; S.ct = 0; setCPlay(true); buildTicks(); updateCacheInfo(); S.tab = 'bake'; applyMode(); lcUi(); pipeUi();
       st.textContent = 'Loaded ' + file.name + '.';
     } catch (err) { st.classList.add('warn'); st.textContent = 'Could not load the file: ' + err.message; }
     e.target.value = '';

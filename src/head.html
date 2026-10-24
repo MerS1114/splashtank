@@ -57,8 +57,23 @@ svg { flex-shrink: 0; }
 .chip-ww { background: #2a3340; color: #c9d6e6; }
 .chip-ww i { background: var(--wwc, #888); }
 .tb-bake { display: inline-flex; gap: 4px; }
+.pipe { display: inline-flex; align-items: center; gap: 3px; cursor: pointer; font-size: 11px; white-space: nowrap; }
+.pipe b { color: #6b7480; font-weight: 400; }
+.pp { height: 20px; line-height: 20px; padding: 0 8px; border-radius: 10px; background: #2a2d31; color: #7d858f; }
+.pp.done { background: #2c3a2c; color: #a9dca9; } .pp.done::after { content: ' ✓'; }
+.pp.busy { background: #4a3a1c; color: #f2c46d; } .pp.stale { background: #3d3524; color: #e0b060; }
+.step { border: 1px solid var(--line, #3a3d42); border-radius: 6px; padding: 8px 10px; margin: 8px 0; background: rgba(255,255,255,0.02); }
+.step-h { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.step-h i { font-style: normal; width: 18px; height: 18px; border-radius: 9px; background: #3a3f46; color: #cfd6de; font-size: 11px; display: inline-flex; align-items: center; justify-content: center; }
+.step-h .st { margin-left: auto; font-size: 11px; color: #8a929c; }
+.step.done .step-h i { background: #3f7d3f; color: #fff; } .step.done .st { color: #8fd48f; }
+.step.busy .step-h i { background: #a8741c; color: #fff; } .step.busy .st { color: #f2c46d; }
+.step.stale .st { color: #e0b060; }
 .btn.sm { height: 22px; padding: 0 8px; font-size: 11px; }
-#ww-lane { top: 10px; height: 3px; pointer-events: none; }
+#ww-lane { top: 14px; height: 6px; pointer-events: none; }
+.kf-cache::before { content: ''; position: absolute; inset: 11px 0 auto 0; height: 11px; background: rgba(255,255,255,0.025); pointer-events: none; }
+.kf-names > div.lanes { height: 34px; padding: 0 0 0 10px; cursor: default; line-height: 11px; font-size: 10px; color: #8d8d8d; }
+.kf-names > div.lanes span { display: block; height: 11px; }
 
 /* ---------- buttons and fields ---------- */
 .btn {
@@ -113,6 +128,8 @@ select.dd option, select option { background: #2b2b2b; color: #e2e2e2; }
 .camtools .ib:hover { background: rgba(255, 255, 255, 0.16); }
 .camtools .pad { cursor: grab; touch-action: none; user-select: none; }
 .camtools .pad.on { background: rgba(255, 255, 255, 0.24); cursor: grabbing; }
+.perf-ov { position: absolute; left: 12px; top: 64px; padding: 6px 9px; border-radius: 5px; background: rgba(20,22,25,0.78); font: 400 11px/16px var(--font-mono); color: #d6d6d6; pointer-events: none; white-space: pre; z-index: 3; }
+.perf-ov b { color: #fff; font-weight: 600; } .perf-ov .w { color: #f2b45a; }
 .vp-stats { position: absolute; right: 12px; bottom: 10px; display: flex; gap: 12px; align-items: center; font: 400 11px var(--font-mono); color: #c8c8c8; text-shadow: 0 1px 2px #000; pointer-events: none; }
 .vp-stats b { color: #f2f2f2; font-weight: 500; }
 .meter { width: 90px; height: 5px; background: rgba(0, 0, 0, 0.4); border-radius: 3px; overflow: hidden; }
@@ -167,13 +184,13 @@ select.dd option, select option { background: #2b2b2b; color: #e2e2e2; }
 .kf-key { position: absolute; top: 6px; width: 10px; height: 10px; margin-left: -5px; transform: rotate(45deg); background: #c8c8c8; border: 1px solid #111; cursor: ew-resize; }
 .kf-key.emitter { background: #35d07f; }
 .kf-key.cur { background: var(--accent); border-color: #fff; }
-.kf-cache { position: relative; height: 14px; border-bottom: 1px solid #333; cursor: ew-resize; }
+.kf-cache { position: relative; height: 33px; border-bottom: 1px solid #333; cursor: ew-resize; }
 .kf-cache i { position: absolute; left: 0; width: 0; border-radius: 1px; }
 .kf-cache i[hidden] { display: none; }
-#bk-bar, #bk-prog { top: 1px; height: 3px; }
+#bk-bar, #bk-prog { top: 3px; height: 6px; }
 #bk-bar { background: #9b7be0; cursor: pointer; }
 #bk-prog { background: repeating-linear-gradient(135deg, #e9a43a 0 5px, #9c6514 5px 10px); }
-#lc-bar, #lc-stale { top: 5px; height: 4px; pointer-events: none; }
+#lc-bar, #lc-stale { top: 25px; height: 6px; pointer-events: none; }
 #lc-bar { background: #3f86d9; }
 #lc-stale { background: #c27a2c; }
 .kf-ph { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--accent); pointer-events: none; z-index: 2; }
@@ -240,7 +257,7 @@ select.dd option, select option { background: #2b2b2b; color: #e2e2e2; }
 .group > :not(h2) { margin-left: 8px; margin-right: 8px; }
 .group > h2 + * { margin-top: 4px; }
 .row { display: grid; grid-template-columns: minmax(60px, 34%) minmax(0, 1fr); align-items: center; column-gap: 8px; min-height: 22px; }
-.row > label { color: var(--fg-2); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row > label { color: var(--fg-2); text-align: right; white-space: normal; line-height: 1.15; overflow-wrap: break-word; min-width: 0; }   /* long labels wrap instead of being cut off */
 .row.nd > label { font-weight: 600; color: #f6f6f6; }
 /* Blender style number field: a dark box with the value in the middle and a blue fill for where it sits in its range. Drag sideways to change it, click to type. */
 .num { position: relative; height: 22px; min-width: 0; border-radius: 4px; background: var(--field); overflow: hidden; cursor: ew-resize; }
@@ -271,6 +288,7 @@ input[type=checkbox]:disabled { opacity: 0.5; cursor: default; }
 .seg button:disabled { opacity: 0.5; cursor: default; }
 .row > .seg, .sub-body .row > .seg { display: flex; min-width: 0; }
 .row > .seg > button { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; padding: 0 4px; font-size: 11.5px; }
+.row > .seg.wrap { flex-wrap: wrap; background: transparent; gap: 2px; } .row > .seg.wrap > button { min-width: auto; flex: 1 1 auto; border-radius: 3px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .adders { display: flex; flex-wrap: wrap; gap: 6px; }
 .pos { font: 400 11px var(--font-mono); color: #9aa4b0; line-height: 1.5; }
@@ -335,7 +353,7 @@ kbd { font: 500 10px var(--font-mono); color: #e8e8e8; background: #3c3c3c; bord
 @media (max-width: 860px) {
   .app { grid-template-rows: 32px minmax(0, 1fr) 0; }
   .main { flex-direction: column; }
-  .shelf, .split.v, .menus, .brand small, .chip-live, .tb-bake { display: none; }
+  .shelf, .split.v, .menus, .brand small, .chip-live, .tb-bake, .pipe { display: none; }
   .rightcol { width: auto; height: 46%; flex-shrink: 0; }
   .outliner { height: 110px; }
   .vhead .hide-narrow { display: none; }
@@ -360,6 +378,7 @@ kbd { font: 500 10px var(--font-mono); color: #e8e8e8; background: #3c3c3c; bord
     </div>
     <div class="tb-right">
       <span class="tb-bake"><button class="btn flat sm" id="tb-bakew" type="button" data-tip="Bake the water only (the Bake settings, without whitewater).">Bake water</button><button class="btn flat sm" id="tb-bakeww" type="button" data-tip="Bake whitewater for the shown bake from its water, with the Whitewater settings as they are now.">Bake whitewater</button></span>
+      <span class="pipe" id="pipe" data-tip="The bake steps: water, its whitewater, saved. Click to open Bake."><span class="pp" id="pp-water">Water</span><b>›</b><span class="pp" id="pp-ww">Whitewater</span><b>›</b><span class="pp" id="pp-save">Saved</span></span>
       <span class="chip-live" id="chip-live"><i></i><span id="chip-live-t">Live</span></span>
       <span class="chip-live chip-ww" id="chip-ww" data-tip="Where the whitewater you see comes from. Live: made by the live sim. Cached: made while the water was baked. Baked: made by Bake whitewater from the baked water."><i></i><span id="chip-ww-t">Whitewater</span></span>
       <div class="bar" id="bar-live">
@@ -438,6 +457,7 @@ kbd { font: 500 10px var(--font-mono); color: #e8e8e8; background: #3c3c3c; bord
           <button class="ib" type="button" data-act="focus" title="Frame the selection (F or numpad .)" aria-label="Focus the selection"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3"/></svg></button>
           <button class="ib" type="button" data-act="all" title="Frame the whole box (Home)" aria-label="Frame all"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg></button>
         </div>
+        <div class="perf-ov" id="perf-ov" hidden></div>
         <div class="hud" id="hud"><span id="hud-mode"></span><span id="hud-op"></span></div>
         <div class="boxsel" id="boxsel" hidden></div>
         <div class="legend" id="legend" hidden><b>Type</b>
@@ -533,17 +553,28 @@ kbd { font: 500 10px var(--font-mono); color: #e8e8e8; background: #3c3c3c; bord
 
           <div class="tab" id="tab-bake" hidden>
             <div class="group" id="g-bake" data-ptab="bake">
-              <h2>Bake settings</h2>
+              <h2 data-tip="Baking in steps, Houdini style: the water first, then its whitewater (which can be baked again with other settings without touching the water), then save.">Bake</h2>
               <div class="pos" id="bake-note">Uses the Simulation settings, the keyframes and any recorded motion.</div>
               <div class="pos" id="bake-est"></div>
-              <div class="btnrow">
-                <button class="btn primary" id="btn-bake" type="button" data-tip="Bakes the water and its whitewater together.">Bake simulation</button><button class="btn flat" id="btn-bakew" type="button" data-tip="Bakes only the water, faster. Then Bake whitewater makes the whitewater from it, and can be run again with other settings.">Bake water</button>
-                <button class="btn flat" id="btn-cancel" type="button" hidden>Cancel</button>
+              <div class="step" id="step-water">
+                <div class="step-h"><i>1</i><b>Water</b><span class="st" id="st-water">not baked</span></div>
+                <div class="progress" id="bake-progress" hidden><i id="bake-prog"></i></div>
+                <div class="pos" id="bake-status"></div>
+                <div class="btnrow">
+                  <button class="btn primary" id="btn-bake" type="button" data-tip="Bakes the water and its whitewater together.">Bake water and whitewater</button><button class="btn flat" id="btn-bakew" type="button" data-tip="Bakes only the water, faster. Then step 2 makes the whitewater from it, and can be run again with other settings.">Water only</button>
+                  <button class="btn flat" id="btn-cancel" type="button" hidden>Cancel</button>
+                </div>
               </div>
-              <div class="progress" id="bake-progress" hidden><i id="bake-prog"></i></div>
-              <div class="pos" id="bake-status"></div>
-              <div class="btnrow"><button class="btn flat" id="c-ww" type="button" data-tip="Makes the whitewater for the shown bake from its water, with the Whitewater settings as they are now (Houdini style: the water is not simulated again). Change the settings and run it again to try another look. Replaces the bake's whitewater; save the cache to keep it.">Bake whitewater</button><button class="btn flat" id="c-ww-stop" type="button" hidden>Stop</button></div>
-              <div class="pos" id="ww-status"></div>
+              <div class="step" id="step-ww">
+                <div class="step-h"><i>2</i><b>Whitewater</b><span class="st" id="st-ww">none</span></div>
+                <div class="pos" id="ww-status"></div>
+                <div class="btnrow"><button class="btn flat" id="c-ww" type="button" data-tip="Makes the whitewater for the shown bake from its water, with the Whitewater settings as they are now (Houdini style: the water is not simulated again). Change the settings and run it again to try another look. Replaces the bake's whitewater; save the cache to keep it.">Bake whitewater</button><button class="btn flat" id="c-ww-stop" type="button" hidden>Stop</button><button class="btn flat" id="ww-goto" type="button" data-tip="Opens the Whitewater settings (Simulation tab).">Whitewater settings…</button></div>
+              </div>
+              <div class="step" id="step-save">
+                <div class="step-h"><i>3</i><b>Save</b><span class="st" id="st-save">nothing to save</span></div>
+                <div class="pos" id="save-info"></div>
+                <div class="btnrow"><button class="btn flat" id="c-save" type="button" data-tip="Keeps the bake, the scene it came from and its settings, so it reopens here exactly.">Save cache (.splc)</button></div>
+              </div>
             </div>
             <div class="group" id="g-cache" data-ptab="bake">
               <h2>Cache playback</h2>
@@ -557,7 +588,7 @@ kbd { font: 500 10px var(--font-mono); color: #e8e8e8; background: #3c3c3c; bord
                   <button type="button" data-v="2" aria-pressed="false">2×</button>
                 </div>
               </div>
-              <div class="btnrow"><button class="btn flat" id="c-save" type="button" data-tip="Keeps the bake, the scene it came from and its settings, so it reopens here exactly.">Save cache (.splc)</button><button class="btn flat" id="c-report" type="button" data-tip="A small file for troubleshooting: what every frame measured, where the water went, and samples of the points. Attach it in the chat.">Bake report</button></div>
+              <div class="btnrow"><button class="btn flat" id="c-report" type="button" data-tip="A small file for troubleshooting: what every frame measured, where the water went, and samples of the points. Attach it in the chat.">Bake report</button></div>
               <div class="btnrow"><button class="btn flat danger" id="c-clear" type="button">Clear cache</button></div>
             </div>
             <div class="group" id="g-native" data-ptab="bake">
@@ -594,6 +625,7 @@ kbd { font: 500 10px var(--font-mono); color: #e8e8e8; background: #3c3c3c; bord
             <h2>Hotkeys, Blender style</h2>
             <ul class="keys">
               <li><kbd>G</kbd> move &nbsp; <kbd>R</kbd> rotate &nbsp; <kbd>S</kbd> scale</li>
+              <li><kbd>P</kbd> performance overlay: drawing, solver and bake playback times</li>
               <li>then <kbd>X</kbd> <kbd>Y</kbd> <kbd>Z</kbd> locks an axis (in the Global or Local orientation set in the header), press it again for the other one; <kbd>Shift</kbd>+axis locks a plane</li>
               <li>type a number for exact values; <kbd>Ctrl</kbd> held flips snapping; <kbd>Shift</kbd>+<kbd>Tab</kbd> turns snapping on or off; <kbd>V</kbd> held snaps to points</li>
               <li>click or <kbd>Enter</kbd> confirms, right click or <kbd>Esc</kbd> cancels</li>

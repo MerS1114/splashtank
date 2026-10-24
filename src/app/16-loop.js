@@ -61,6 +61,31 @@
   // While the sim plays, the live view is redrawn only when something changed: a new frame from the sim, the camera moving, or any input in the last moments
   // (and at least twice a second). Drawing shares the GPU with the solver: on Mer's Intel UHD 730 not drawing made a step about 40% faster,
   // and redrawing the same water 33 times a second while the sim delivered 8 new frames only slowed the sim down.
+  // performance overlay (P): where the time goes, updated twice a second
+  let ovT = 0, ovDraws = 0, ovSimT = 0, ovUp = 0;
+  S.perfOv = lsGet('perfOv') === '1';
+  function perfOv(span) {
+    const el = $('#perf-ov'); if (!el) return;
+    el.hidden = !S.perfOv; if (!S.perfOv) { ovDraws = perf.draws || 0; ovSimT = S.tl.t; ovUp = perf.upN; return; }
+    const mode = viewMode(), draws = ((perf.draws || 0) - ovDraws) / span, ups = (perf.upN - ovUp) / span, L = [];
+    const rt = mode === 'live' && S.playing && !S.lcPlay ? Math.max(0, S.tl.t - ovSimT) / span : null;
+    ovDraws = perf.draws || 0; ovSimT = S.tl.t; ovUp = perf.upN;
+    const f1 = (v) => (v == null || !isFinite(v) ? '-' : v.toFixed(1));
+    L.push('<b>Drawing</b>  ' + Math.round(draws) + ' a second, ' + f1(perf.render) + ' ms each, ' + fmtN(shownN) + ' points');
+    L.push('Page work ' + f1(perf.frame) + ' ms a frame, uploads ' + f1(ups) + ' a second (' + f1(perf.up) + ' ms, ' + (perf.upBytes / 1048576).toFixed(1) + ' MB)');
+    if (mode === 'live' && isGpu() && sim) {
+      L.push('<b>Solver</b>   step ' + f1(sim.lastMs) + ' ms' + (sim.gpuMs ? ', GPU busy ' + f1(sim.gpuMs) + ' ms' : '') + ', ' + (S.lastSub || 1) + ' substeps, ' + (sim.inflight || 0) + ' queued');
+      if (rt !== null) L.push((rt < 0.5 ? '<span class="w">' : '<span>') + 'Running at ' + Math.round(rt * 100) + '% of real time</span>');
+      L.push(fmtN(sim.N || 0) + ' particles' + (S.sprOn && sim.sprayCap ? ', whitewater pool ' + fmtN(sim.sprayCap) : ''));
+    }
+    if (mode === 'cache' && S.cache) { const g = gpuKept(); L.push('<b>Bake</b>     ' + g.n + ' of ' + (S.cache.frames.length) + ' frames on the GPU (' + g.mb.toFixed(0) + ' MB), ' + (perf.late || 0) + ' loaded late'); }
+    if (S.baking || S.wwPass) L.push('<span class="w">' + (S.baking ? 'Baking' : 'Baking whitewater') + ': the view redraws only twice a second</span>');
+    L.push('<span style="color:#8a8a8a">P hides this</span>');
+    const h = L.join('\n'); if (el._h !== h) { el._h = h; el.innerHTML = h; }
+  }
+  window.addEventListener('keydown', (e) => {
+    if ((e.key === 'p' || e.key === 'P') && !typing() && !e.ctrlKey && !e.metaKey && !e.altKey && !tf) { S.perfOv = !S.perfOv; lsSet('perfOv', S.perfOv ? '1' : '0'); perfOv(1); }
+  });
   let lastInput = 0, lastDraw = 0; const camWas = new Float64Array(17);   // 64-bit: a 32-bit copy never equals the matrix, so every frame looked like a camera move
   ['pointerdown', 'pointermove', 'pointerup', 'wheel', 'keydown', 'keyup', 'input', 'change', 'resize'].forEach((ev) => window.addEventListener(ev, () => { lastInput = performance.now(); }, { capture: true, passive: true }));
   function camMoved() {
@@ -158,6 +183,7 @@
       recUi += dt; if (S.rec && recUi > 0.5) { recUi = 0; updateRecInfo(); updateEst(); }
     }
     vpT += dt; if (vpT > 0.25) { vpT = 0; try { vpInfo(); } catch (e) { /* not ready */ } }
+    ovT += dt; if (ovT > 0.5) { perfOv(ovT); ovT = 0; }
     placeHandles();
     oceanUpdate(mode);
     camera.updateMatrixWorld();

@@ -47,7 +47,7 @@
   function renderKF() {
     kfNames.innerHTML = ''; kfTracks.innerHTML = '';
     const sp = document.createElement('div'); sp.className = 'spacer'; kfNames.appendChild(sp);
-    const sp2 = document.createElement('div'); sp2.className = 'spacer c'; kfNames.appendChild(sp2);
+    const sp2 = document.createElement('div'); sp2.className = 'lanes'; sp2.innerHTML = '<span>Water bake</span><span>Whitewater</span><span>Live cache</span>'; kfNames.appendChild(sp2);
     const ruler = document.createElement('div'); ruler.className = 'kf-ruler'; ruler.dataset.role = 'ruler';
     const span = tlSpan(), step = span > 24 ? 5 : span > 12 ? 2 : 1;
     for (let sec = 0; sec <= span + 1e-6; sec += step) {
@@ -57,7 +57,7 @@
     kfTracks.appendChild(ruler);
     // cache lanes, coloured like Houdini's: blue cached in memory, orange out of date, purple baked, stripes baking now
     const lanes = document.createElement('div'); lanes.className = 'kf-cache'; lanes.dataset.role = 'ruler';
-    lanes.dataset.tipTitle = 'Cache'; lanes.dataset.tip = 'Blue: cached in memory, plays back without simulating. Orange: out of date because something changed; Reset simulates it again. Purple: baked frames (click to play the bake). Stripes: baking now. The thin bottom line is the whitewater: green made by the live sim, lilac made while the water was baked, white made by Bake whitewater.';
+    lanes.dataset.tipTitle = 'Cache'; lanes.dataset.tip = 'Water bake: purple baked frames (click to play the bake), stripes baking now. Whitewater: green made by the live sim, lilac made while the water was baked, white made by Bake whitewater. Live cache: blue cached in memory, plays back without simulating; orange out of date because something changed (Reset simulates it again).';
     lanes.innerHTML = '<i id="bk-bar" data-role="bake" hidden></i><i id="bk-prog" hidden></i><i id="lc-stale" hidden></i><i id="lc-bar" hidden></i><i id="ww-lane" hidden></i>';
     kfTracks.appendChild(lanes);
     for (const o of objs) {
