@@ -654,13 +654,31 @@ function compactFrame(fr, q) {
   const n = fr.n, sf = new Uint16Array(n), s = fr.spd, f = fr.fm;
   if (f) for (let i = 0; i < n; i++) sf[i] = s[i] | (Math.round(f[i] / 17) << 8); else sf.set(s);
   const out = { n, q, p32: packPos32(fr.pos, n, q), sf, objs: fr.objs };
-  if (fr.b) out.b = fr.b;
+  if (fr.b) out.b = fr.b; if (fr.sb) out.sb = fr.sb; if (fr.wws) out.wws = fr.wws;
   if (fr.sp) out.sp = { n: fr.sp.n, p32: packPos32(fr.sp.pos, fr.sp.n, q), pk: fr.sp.pk, alive: fr.sp.alive };
   if (fr.dp) { const ds = new Uint16Array(fr.dp.n); ds.set(fr.dp.spd); out.dp = { n: fr.dp.n, p32: packPos32(fr.dp.pos, fr.dp.n, q), sf: ds }; }
   return out;
 }
+// A tank too big for the compact layout can still use it frame by frame: the box around the water (and deep water) in this frame,
+// with its own bits. Positions are re-measured across that box (fr.fb, fr.b, fr.q). Null when even that box is too big.
+function compactFrameBox(fr, b, d) {
+  const lo = [65535, 65535, 65535], hi = [0, 0, 0];
+  const scan = (pos, spd, n) => { for (let i = 0; i < n; i++) { if (spd[i] === 255) continue; for (let k = 0; k < 3; k++) { const v = pos[i * 3 + k]; if (v < lo[k]) lo[k] = v; if (v > hi[k]) hi[k] = v; } } };
+  scan(fr.pos, fr.spd, fr.n); if (fr.dp) scan(fr.dp.pos, fr.dp.spd, fr.dp.n);
+  const E = [b.x1 - b.x0, b.y1 - b.y0, b.z1 - b.z0], B0 = [b.x0, b.y0, b.z0];
+  for (let k = 0; k < 3; k++) if (hi[k] < lo[k]) { lo[k] = 0; hi[k] = 1; } else { lo[k] = Math.max(0, lo[k] - 1); hi[k] = Math.min(65535, Math.max(hi[k] + 1, lo[k] + 1)); }
+  const fb = { x0: B0[0] + lo[0] / 65535 * E[0], x1: B0[0] + hi[0] / 65535 * E[0], y0: B0[1] + lo[1] / 65535 * E[1], y1: B0[1] + hi[1] / 65535 * E[1], z0: B0[2] + lo[2] / 65535 * E[2], z1: B0[2] + hi[2] / 65535 * E[2] };
+  const q = compactBits(fb, d); if (!q) return null;
+  const re = (pos, n) => { const o = new Uint16Array(n * 3); for (let i = 0; i < n * 3; i++) { const k = i % 3; o[i] = Math.max(0, Math.min(65535, Math.round((pos[i] - lo[k]) * 65535 / (hi[k] - lo[k])))); } return o; };
+  const g = Object.assign({}, fr, { pos: re(fr.pos, fr.n) }); if (fr.dp) g.dp = Object.assign({}, fr.dp, { pos: re(fr.dp.pos, fr.dp.n) });
+  const out = compactFrame(Object.assign(g, { sp: null }), q);
+  out.b = fb; out.fb = true; if (fr.sp) { out.sp = { n: fr.sp.n, p32: packPos32(fr.sp.pos, fr.sp.n, q), pk: fr.sp.pk, alive: fr.sp.alive }; }
+  if (out.dp) Object.assign(out.dp, { fb: true, b: fb, q });
+  return out;
+}
 // point i of a frame (or of its deep water, passing the frame's q) in either layout: [x, y, z] in the box, the speed byte (255 = gone) and the white-water level 0-15
 function framePoint(fr, b, i, q0) {
+  if (fr.fb) b = fr.b;   // a compact frame measured across its own box
   if (fr.p32) {
     const q = fr.q || q0, v = fr.p32[i], mx = (1 << q[0]) - 1, my = (1 << q[1]) - 1, mz = (1 << q[2]) - 1, w = fr.sf[i];
     return [(v & mx) / mx * (b.x1 - b.x0) + b.x0, ((v >>> q[0]) & my) / my * (b.y1 - b.y0) + b.y0, ((v >>> (q[0] + q[1])) & mz) / mz * (b.z1 - b.z0) + b.z0, w & 255, w >> 8];
@@ -724,13 +742,16 @@ async function runBake(desc, onFrame, isCancelled) {
 // Flag 16: the frame's whitewater was made by Bake whitewater (afterwards, from the water). Flag 8 = a compact frame (see compactBits; the JSON's q gives the bits): positions as uint32, speed and white-water level as uint16,
 // padding; spray: count, uint32 positions, codes; deep: count, uint32 positions, uint16 speeds, padding.
 function writeCacheParts(c) {
-  const meta = { d: c.d, fps: c.fps, ids: c.ids, b: c.b, org: c.org, maxN: c.maxN, seconds: c.seconds, engine: c.engine, scene: c.scene, desc: c.desc, diag: c.diag, stableIds: !!c.stableIds, scale: c.scale || 1, spdMs: !!c.spdMs, q: c.q || null };
+  const meta = { d: c.d, fps: c.fps, ids: c.ids, b: c.b, org: c.org, maxN: c.maxN, seconds: c.seconds, engine: c.engine, scene: c.scene, desc: c.desc, diag: c.diag, stableIds: !!c.stableIds, scale: c.scale || 1, spdMs: !!c.spdMs, q: c.q || null,
+    sb: c.sb || ((c.frames || []).find((f) => f && f.sb) || {}).sb || null };   // whitewater area (whitewater positions are across it)
   const mj = new TextEncoder().encode(JSON.stringify(meta)), pad = (k) => (4 - (k % 4)) % 4;
   const parts = [new Uint8Array([83, 80, 76, 67]), new Uint32Array([2, mj.length]), mj, new Uint8Array(pad(mj.length)), new Uint32Array([c.frames.length])];
   for (const fr of c.frames) {
     const sp = fr.sp && fr.sp.n ? fr.sp : null, dp = fr.dp && fr.dp.n ? fr.dp : null;
     if (fr.p32) {
-      parts.push(new Uint32Array([fr.n, 8 | (sp ? 2 : 0) | (dp ? 4 : 0) | (fr.wws === 2 ? 16 : 0)]), fr.objs, fr.p32, fr.sf, new Uint8Array(pad(fr.n * 2)));
+      parts.push(new Uint32Array([fr.n, 8 | (sp ? 2 : 0) | (dp ? 4 : 0) | (fr.wws === 2 ? 16 : 0) | (fr.fb ? 32 : 0)]));
+      if (fr.fb) parts.push(new Float32Array([fr.b.x0, fr.b.y0, fr.b.z0, fr.b.x1, fr.b.y1, fr.b.z1]), new Uint8Array([fr.q[0], fr.q[1], fr.q[2], 0]));   // the frame's own box and bits
+      parts.push(fr.objs, fr.p32, fr.sf, new Uint8Array(pad(fr.n * 2)));
       if (sp) parts.push(new Uint32Array([sp.n]), sp.p32, sp.pk);
       if (dp) parts.push(new Uint32Array([dp.n]), dp.p32, dp.sf, new Uint8Array(pad(dp.n * 2)));
       continue;
@@ -752,13 +773,16 @@ function parseCache2(buf, dv) {
     if (o + 8 > buf.byteLength) break;
     const n = dv.getUint32(o, true), fl = dv.getUint32(o + 4, true); o += 8;
     if (fl & 8) {   // compact frame
+      let fb = null, fq = meta.q;
+      if (fl & 32) { const v = new Float32Array(buf.slice(o, o + 24)); fb = { x0: v[0], y0: v[1], z0: v[2], x1: v[3], y1: v[4], z1: v[5] }; fq = [dv.getUint8(o + 24), dv.getUint8(o + 25), dv.getUint8(o + 26)]; o += 28; }
       if (o + nobj * 24 + n * 6 > buf.byteLength) break;
       const objs = new Float32Array(buf.slice(o, o + nobj * 24)); o += nobj * 24;
-      const fr = { n, q: meta.q, p32: new Uint32Array(buf.slice(o, o + n * 4)), objs }; o += n * 4;
+      const fr = { n, q: fq, p32: new Uint32Array(buf.slice(o, o + n * 4)), objs }; o += n * 4;
+      if (fb) { fr.fb = true; fr.b = fb; }
       fr.sf = new Uint16Array(buf.slice(o, o + n * 2)); o += n * 2 + (n % 2) * 2;
       if (fl & 2) { const ns = dv.getUint32(o, true); o += 4; fr.sp = { n: ns, p32: new Uint32Array(buf.slice(o, o + ns * 4)), pk: new Uint32Array(buf.slice(o + ns * 4, o + ns * 8)), alive: ns }; o += ns * 8; }
-      if (fl & 4) { const nd = dv.getUint32(o, true); o += 4; fr.dp = { n: nd, p32: new Uint32Array(buf.slice(o, o + nd * 4)), sf: new Uint16Array(buf.slice(o + nd * 4, o + nd * 6)) }; o += nd * 6 + (nd % 2) * 2; }
-      fr.wws = fl & 16 ? 2 : fr.sp ? 1 : 0;
+      if (fl & 4) { const nd = dv.getUint32(o, true); o += 4; fr.dp = { n: nd, p32: new Uint32Array(buf.slice(o, o + nd * 4)), sf: new Uint16Array(buf.slice(o + nd * 4, o + nd * 6)) }; o += nd * 6 + (nd % 2) * 2; if (fb) Object.assign(fr.dp, { fb: true, b: fb, q: fq }); }
+      fr.wws = fl & 16 ? 2 : fr.sp ? 1 : 0; if (fr.sp && meta.sb) fr.sb = meta.sb;
       frames.push(fr); if (n > maxN) maxN = n;
       continue;
     }
@@ -782,7 +806,7 @@ function parseCache2(buf, dv) {
       const spd3 = new Uint8Array(buf.slice(o, o + nd)); o += nd + (4 - ((nd * 7) % 4)) % 4;
       fr.dp = { n: nd, pos: pos3, spd: spd3 };
     }
-    fr.wws = fl & 16 ? 2 : fr.sp ? 1 : 0;
+    fr.wws = fl & 16 ? 2 : fr.sp ? 1 : 0; if (fr.sp && meta.sb) fr.sb = meta.sb;
     frames.push(fr); if (n > maxN) maxN = n;
   }
   return Object.assign({}, meta, { frames, maxN: Math.max(maxN, meta.maxN || 0) });

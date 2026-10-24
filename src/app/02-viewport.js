@@ -81,7 +81,7 @@
       if (nD) by += upTex(sl.gl.p, 'p', rW, fr.dp.pos, nD) + upTex(sl.gl.s, 's', rW, fr.dp.spd, nD);
       if (nS) by += upTex(sl.gl.p, 'p', rW + rD, fr.sp.pos, nS) + upTex(sl.gl.k, 'k', 0, fr.sp.pk, nS);   // whitewater codes from row 0 of their own texture
     }
-    Object.assign(sl, { q: cq ? fr.q : null, nW, nD, nS, rowD: rW, rowS: rW + rD, fm: !!(fr && fr.fm), b: (fr && fr.b) || b || DEFB, alive: fr ? frameAlive(fr, show) : 0 });
+    Object.assign(sl, { q: cq ? fr.q : null, nW, nD, nS, rowD: rW, rowS: rW + rD, fm: !!(fr && fr.fm), b: (fr && fr.b) || b || DEFB, sb: (fr && fr.sb) || null, alive: fr ? frameAlive(fr, show) : 0 });
     perf.up = performance.now() - t0; perf.upBytes = by; perf.upN++;
     return true;
   }
@@ -193,7 +193,7 @@
     uw.uNA.value = A.nW; uw.uNB.value = w > 0 ? B.nW : 0; uw.uFmA.value = A.fm ? 1 : 0; uw.uFmB.value = B.fm ? 1 : 0; uw.uBlend.value = w; uw.uK1.value = kW;
     boxU(uw.uB0A, uw.uQA, A.b || DEFB); boxU(uw.uB0B, uw.uQB, B.b || DEFB);
     const ud = matD.uniforms; ud.tP.value = tp(N); ud.tS.value = ts(N); qb(ud.uQb.value, N); ud.uBase.value = N.rowD * TEXW; ud.uN.value = N.nD; ud.uK1.value = kD; boxU(ud.uB0, ud.uQ, N.b || DEFB);
-    const us = matS.uniforms; us.tP.value = tp(N); us.tK.value = N.T.k; qb(us.uQb.value, N); us.uBase.value = N.rowS * TEXW; us.uN.value = N.nS; us.uK1.value = kS; boxU(us.uB0, us.uQ, N.b || DEFB);
+    const us = matS.uniforms; us.tP.value = tp(N); us.tK.value = N.T.k; qb(us.uQb.value, N); us.uBase.value = N.rowS * TEXW; us.uN.value = N.nS; us.uK1.value = kS; boxU(us.uB0, us.uQ, N.sb || N.b || DEFB);   // whitewater is quantized across the whitewater area
     geoW.setDrawRange(0, vW); geoD.setDrawRange(0, vD); geoS.setDrawRange(0, vS); shownN = N.nW + N.nD + N.nS;
   }
   function hideSlots() { geoW.setDrawRange(0, 0); geoD.setDrawRange(0, 0); geoS.setDrawRange(0, 0); shownN = 0; }
@@ -255,6 +255,19 @@
   const gridGeo = new THREE.BufferGeometry();
   const gridMat = new THREE.LineBasicMaterial({ color: 0x8a949e, transparent: true, opacity: 0.2 });
   scene.add(new THREE.LineSegments(gridGeo, gridMat));
+  // the whitewater area (dashed): spray and mist fly on past the tank walls up to here; the water itself stays in the tank
+  const areaMat = new THREE.LineDashedMaterial({ color: 0xb8c4d0, transparent: true, opacity: 0.45, dashSize: 0.1, gapSize: 0.08 });
+  const areaBox = new THREE.LineSegments(new THREE.BufferGeometry(), areaMat); areaBox.frustumCulled = false; areaBox.visible = false; scene.add(areaBox);
+  function updateAreaViz() {
+    const a = wwArea(), on = S.sprOn && S.engine === 'flip' && (a.k > 1 || a.up > 1);
+    areaBox.visible = on; if (!on) return;
+    const A = wwAreaBox(b, a), X = [A.x0, A.x1], Y = [A.y0, A.y1], Z = [A.z0, A.z1], p = [];
+    for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) {
+      p.push(X[0], Y[i], Z[j], X[1], Y[i], Z[j]); p.push(X[i], Y[0], Z[j], X[i], Y[1], Z[j]); p.push(X[i], Y[j], Z[0], X[i], Y[j], Z[1]);
+    }
+    areaBox.geometry.setAttribute('position', new THREE.Float32BufferAttribute(p, 3)); areaBox.computeLineDistances();
+    const ds = Math.max(A.x1 - A.x0, A.z1 - A.z0) * 0.015; areaMat.dashSize = ds; areaMat.gapSize = ds * 0.8;
+  }
   const openMat = new THREE.LineBasicMaterial({ color: 0xe0a030 });
   const openLines = [];
   for (let i = 0; i < 6; i++) { const l = new THREE.LineLoop(new THREE.BufferGeometry(), openMat); l.frustumCulled = false; l.visible = false; scene.add(l); openLines.push(l); }
@@ -373,6 +386,7 @@
     };
     const names = ['x0', 'x1', 'y0', 'y1', 'z0', 'z1'];
     names.forEach((nm, i) => { openLines[i].geometry.setAttribute('position', face(quad[nm])); openLines[i].visible = !!S.open[nm]; });
+    updateAreaViz();
   }
   updateDomainViz();
 

@@ -37,6 +37,7 @@
   function onBakeFrame(fr, info, cache) {
     if (cache.q === undefined) cache.q = compactBits(cache.b, cache.d);
     if (cache.q) fr = compactFrame(fr, cache.q);   // a quarter smaller in memory, on the GPU and in the file
+    else if (fr.pos && cache.d) fr = compactFrameBox(fr, cache.b, cache.d) || fr;   // a big tank: the box around this frame's water
     if (fr.sp && fr.sp.n) fr.wws = 1;   // whitewater that came with the water bake (2: made by Bake whitewater)
     cache.frames.push(fr);
     if (S.cache === cache && S.cfollow) S.ct = cache.frames.length - 1;
@@ -237,7 +238,7 @@
   function findSlot(key) { for (const i of BAKE) if (SLOTS[i].key === key) { SLOTS[i].used = ++useTick; return i; } return -1; }
   // as many bake slots as the budget holds for this cache's biggest frame (at least five, at most one per frame)
   function bakeSlots(c) {
-    let per = c.maxN * (c.q ? 6 : 8) + 65536; for (const i of BAKE) if (SLOTS[i].key && SLOTS[i].key.startsWith(c.uid + ':')) per = Math.max(per, slotBytes(SLOTS[i]));
+    let per = c.maxN * (c.q || (c.frames[0] && c.frames[0].p32) ? 6 : 8) + 65536; for (const i of BAKE) if (SLOTS[i].key && SLOTS[i].key.startsWith(c.uid + ':')) per = Math.max(per, slotBytes(SLOTS[i]));
     // while baking the view only follows the newest frame: five slots; finished, the frames are loaded at their exact size
     const want = c.partial ? 5 : Math.max(5, Math.min(c.frames.length, gpuCap, Math.floor((S.gpuKeepMB || 2048) * 1048576 / per)));
     while (BAKE.length < want) { SLOTS.push(newSlot()); BAKE.push(SLOTS.length - 1); }

@@ -319,12 +319,22 @@
   const gbx = $('#g-box');
   function commitBox() { makeSim(); resetSim(S.tl.t); updateDomainViz(); renderUI(); updateEst(); buildBoxUI(); }
   // move one face of the box (world coordinate v), keeping the box between 0.6 and 14 m
+  // the box size and what it costs at the live spacing: grid cells, and points to fill it a third deep (narrow band: one band-deep layer)
+  function boxSizeText() {
+    const c = gridCost(S.liveD, S.cellRatio, S.cap), d3 = S.liveD ** 3;
+    let n = S.dom.w * S.dom.d * S.dom.h / 3 / d3;
+    if (nbActive()) n = Math.min(n, S.dom.w * S.dom.d * S.nbBand * S.liveD * S.cellRatio / d3);
+    const over = n > S.cap;
+    return 'size <b>' + S.dom.w.toFixed(2) + '</b> × <b>' + S.dom.h.toFixed(2) + '</b> × <b>' + S.dom.d.toFixed(2) + '</b> m. Changing the box restarts the particles.<br>' +
+      'At spacing ' + S.liveD.toFixed(3) + ': grid ' + c.nx + ' × ' + c.ny + ' × ' + c.nz + ' (' + (c.ncell / 1e6).toFixed(1) + 'M cells); water a third deep is about <b' + (over ? ' class="warn"' : '') + '>' + fmtN(Math.round(n)) + '</b> points' +
+      (over ? ', more than Max points (' + fmtN(S.cap) + ')' : '') + '. The solver\'s time grows with the number of points.';
+  }
   function setFaceCoord(k, v) {
     const B = { x0: b.x0, x1: b.x1, y0: b.y0, y1: b.y1, z0: b.z0, z1: b.z1 }, lo = k.endsWith('0');
     const other = B[lo ? k[0] + '1' : k[0] + '0'];
     B[k] = lo ? clamp(v, other - 14, other - 0.6) : clamp(v, other + 0.6, other + 14);
     S.min = { x: B.x0, y: B.y0, z: B.z0 }; S.dom = { w: B.x1 - B.x0, h: B.y1 - B.y0, d: B.z1 - B.z0 };
-    updateDomainViz();
+    updateDomainViz(); const bs = $('#box-size'); if (bs) bs.innerHTML = boxSizeText();
   }
   function setDomain(w, h, d) {
     S.dom = { w, h, d }; S.min = { x: -w / 2, y: 0, z: -d / 2 }; updateDomainViz();
@@ -344,7 +354,7 @@
       gbx.appendChild(row);
     });
     const sz = document.createElement('div'); sz.className = 'pos'; sz.id = 'box-size';
-    sz.innerHTML = 'size <b>' + S.dom.w.toFixed(2) + '</b> × <b>' + S.dom.h.toFixed(2) + '</b> × <b>' + S.dom.d.toFixed(2) + '</b> m. Changing the box restarts the particles.'; gbx.appendChild(sz);
+    sz.innerHTML = boxSizeText(); gbx.appendChild(sz);
     const fr = document.createElement('div'); fr.className = 'row face';
     fr.innerHTML = '<label for="fill-h">Fill tank</label><input type="number" id="fill-h" step="0.1" value="' + (+Math.min(1, S.dom.h * 0.4).toFixed(2)) + '"><button type="button" class="btn flat" id="btn-filltank">to height</button>';
     fr.querySelector('button').addEventListener('click', () => {
@@ -353,6 +363,11 @@
       select(o); fillNow(o);
     });
     gbx.appendChild(fr);
+    const AREA = [['1', 'Tank only'], ['1.5', '1.5 × tank'], ['2', '2 × tank'], ['3', '3 × tank'], ['4', '4 × tank']];
+    addSelect(gbx, 'ww-area', 'Whitewater area', AREA, String(S.wwArea), 'Spray, mist and foam may fly on past the tank walls, up to this many times the tank\'s width and depth (the dashed box). The water itself stays in the tank. A bigger area costs almost nothing.',
+      (v) => { S.wwArea = +v; updateDomainViz(); buildBoxUI(); }).classList.toggle('nd', S.wwArea !== dv('wwArea'));
+    addSelect(gbx, 'ww-area-up', 'Spray height', AREA.map(([v, l]) => [v, v === '1' ? 'Tank top' : l.replace('tank', 'height')]), String(S.wwAreaUp), 'How high spray may fly above the tank floor, in tank heights.',
+      (v) => { S.wwAreaUp = +v; updateDomainViz(); buildBoxUI(); }).classList.toggle('nd', S.wwAreaUp !== dv('wwAreaUp'));
     const hl = document.createElement('label'); hl.className = 'check';
     hl.innerHTML = '<input type="checkbox" id="show-handles"' + (S.handles ? ' checked' : '') + '><span>Show face arrows</span>';
     hl.querySelector('input').addEventListener('change', (e) => { S.handles = e.target.checked; });

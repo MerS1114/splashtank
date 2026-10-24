@@ -121,7 +121,7 @@ async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
     const diag = Object.assign(bakeDiag(dst, n, sim.b, desc.vmaxW), { sub, objectSpeed: objV, fastestParticle: st.vmax, fluidCells: st.fluid, blocksUsed: st.sc, blockPool: sim.scap,
       blocksNoRoom: (sim.ovfTotal || 0) - ovf0, ms: performance.now() - tf0 });
     const frame = packFrameBuf(dst, n, sim.b, sampleAll(f * dtF), desc.scale);
-    if (sim.sprayCap) { const sd = await sim.readSpray(); if (sd) { frame.sp = packSprayFrame(sd, sim.b, 200000, (desc.spr && desc.spr.ww && desc.spr.ww.foamLife) || 3); diag.sprayPoints = frame.sp.alive; } }
+    if (sim.sprayCap) { const sd = await sim.readSpray(); if (sd) { frame.sp = packSprayFrame(sd, sim.ab || sim.b, 200000, (desc.spr && desc.spr.ww && desc.spr.ww.foamLife) || 3); diag.sprayPoints = frame.sp.alive; frame.sb = Object.assign({}, sim.ab || sim.b); } }
     if (desc.nbLook) { const dd = await sim.readDeep(); if (dd && dd.n) { frame.dp = packDeep(dd.p, dd.n, sim.b, desc.scale); diag.deepPoints = dd.n; } }
     onFrame(frame, { f, F, n, elapsed: (Date.now() - t0) / 1000, full: sim.N >= sim.cap, sub, diag });
     if (isCancelled()) { ok = false; break; }
@@ -184,9 +184,9 @@ async function runWhitewaterPass(c, desc, gpu, onProgress, isCancelled) {
     const sub = Math.max(2, Math.min(8, Math.ceil(dtF * Math.sqrt(vmax) / (1.5 * h)))), dt = dtF / sub;
     for (let s = 0; s < sub; s++) { const t = (f - 1) * dtF + (s + 1) * dt; runner.step(dt, meshes.map((o) => sampleObjState(o, t)), par(t)); }
     const sd = await sim.readSpray();
-    let sp = sd ? packSprayFrame(sd, sim.b, 200000, foamLife) : null;
-    if (sp && c.q) sp = { n: sp.n, p32: packPos32(sp.pos, sp.n, c.q), pk: sp.pk, alive: sp.alive };
-    if (sp && sp.n) Bf.sp = sp; else delete Bf.sp;
+    let sp = sd ? packSprayFrame(sd, sim.ab || sim.b, 200000, foamLife) : null;
+    const fq = Bf.p32 ? Bf.q || c.q : null; if (sp && fq) sp = { n: sp.n, p32: packPos32(sp.pos, sp.n, fq), pk: sp.pk, alive: sp.alive };
+    if (sp && sp.n) { Bf.sp = sp; Bf.sb = Object.assign({}, sim.ab || sim.b); } else { delete Bf.sp; delete Bf.sb; }
     Bf.wws = 2;   // made by Bake whitewater
     onProgress(f, F);
     if (isCancelled()) { ok = false; break; }

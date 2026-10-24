@@ -61,7 +61,7 @@ fn airSplatW(@builtin(global_invocation_id) g: vec3<u32>) {
 @compute @workgroup_size(256)
 fn airSplatS(@builtin(global_invocation_id) g: vec3<u32>) {
   let j = gid1(g); if (j >= P.smax) { return; }
-  let sp = sPos[j]; if (sp.w <= 0.0 || sVel[j].w > 1.5) { return; }
+  let sp = sPos[j]; if (sp.w <= 0.0 || sVel[j].w > 1.5 || !inTank(sp.xyz)) { return; }
   airPush(sp.xyz, sVel[j].xyz, 0.25);
 }
 // each air cell: spreads a little to its neighbours, is pulled towards what pushed it, moves with an object it is inside, and settles back to the wind
@@ -93,6 +93,7 @@ fn wwSample(@builtin(global_invocation_id) g: vec3<u32>) {
   let j = gid1(g); if (j >= P.smax) { return; }
   let sp = sPos[j]; if (sp.w <= 0.0) { return; }
   let p = sp.xyz; var vf = vec3<f32>(0.0);
+  if (!inTank(p)) { sAux[j] = vec4<f32>(0.0); return; }   // out in the whitewater area: no water, still air
   if (hasStorage(particleCell(p))) { vf = sampleBoth(p).vn; }
   // for foam: how fast the surface spreads apart (positive) or gathers (negative) there. Foam thins out where it spreads and collects
   // in lines and patches where the flow converges (what makes foam look lacy instead of an even sheet).
@@ -256,7 +257,9 @@ fn sprayStep(@builtin(global_invocation_id) g: vec3<u32>) {
     life -= 0.3 * P.dt;
   }
   let np = p + v * P.dt;
-  if (np.x < P.x0 || np.x > P.x1 || np.y < P.y0 || np.y > P.y1 || np.z < P.z0 || np.z > P.z1) { life = 0.0; }
+  // gone at the walls of the whitewater area (at least the tank); outside the tank over an ocean, gone below the sea's level
+  if (np.x < P.wwA0.x || np.x > P.wwA1.x || np.y < P.wwA0.y || np.y > P.wwA1.y || np.z < P.wwA0.z || np.z > P.wwA1.z) { life = 0.0; }
+  else if (P.ocean != 0u && !inTank(np) && np.y < P.olevel) { life = 0.0; }
   else if (P.ncols > 0u && colAt(np) >= 0) { life = 0.0; }
   else if (P.ocean != 0u && kind >= 2u && layerW(np) > 0.6) { life = 0.0; }
   sPos[j] = vec4<f32>(np, life); sVel[j] = vec4<f32>(v, f32(kind) + 0.4 * tk / WWHOLD);
@@ -294,6 +297,7 @@ fn dispBegin() { atomicStore(&sctl[2], 0u); }
 // The live view as a cache frame: every thread packs four points of one part (water, whitewater or deep water). Positions are 16 bits
 // across the box (three per point, so four points fill six words), water gets a speed byte (16ths, 255 = gone) and a white-water byte,
 // whitewater its 32-bit code (0 = none), deep water a speed byte. Word 0 and 1 hold how many whitewater and deep points there are.
+fn q16s(p: vec3<f32>) -> vec3<u32> { return vec3<u32>(clamp(round((p - vec3<f32>(PK.sx0, PK.sy0, PK.sz0)) * vec3<f32>(PK.skx, PK.sky, PK.skz)), vec3<f32>(0.0), vec3<f32>(65535.0))); }
 fn q16(p: vec3<f32>) -> vec3<u32> { return vec3<u32>(clamp(round((p - vec3<f32>(PK.x0, PK.y0, PK.z0)) * vec3<f32>(PK.kx, PK.ky, PK.kz)), vec3<f32>(0.0), vec3<f32>(65535.0))); }
 fn put6(o: u32, q: array<vec3<u32>, 4>) {
   packOut[o] = q[0].x | (q[0].y << 16u); packOut[o + 1u] = q[0].z | (q[1].x << 16u); packOut[o + 2u] = q[1].y | (q[1].z << 16u);
@@ -320,7 +324,7 @@ fn packDisp(@builtin(global_invocation_id) g: vec3<u32>) {
   if (ts < gS) {
     for (var m = 0u; m < 4u; m++) {
       let k = ts * 4u + m; var code = 0u; q[m] = vec3<u32>(0u);
-      if (k < nS) { let v = disp[PK.srcS + k]; if (v.y > DEADY) { q[m] = q16(v.xyz); code = bitcast<u32>(v.w); } }
+      if (k < nS) { let v = disp[PK.srcS + k]; if (v.y > DEADY) { q[m] = q16s(v.xyz); code = bitcast<u32>(v.w); } }
       packOut[PK.oSk + k] = code;
     }
     put6(PK.oSp + ts * 6u, q); return;

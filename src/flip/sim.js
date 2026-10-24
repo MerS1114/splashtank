@@ -9,8 +9,14 @@
 function flipWGSL() { return FLIP_WGSL_CORE + FLIP_WGSL_BLOCKS + FLIP_WGSL_SOLVER + FLIP_WGSL_WHITEWATER + FLIP_WGSL_NARROWBAND; }
 
 const FLIP_SLOT = { cells: 512 };   // one block of the sparse grid: 8 x 8 x 8 cells
-const FLIP_PARAMS_BYTES = 1632;      // the solver's uniform block: settings, whitewater, air and drips (words 68-83), starting-water shapes (84), ocean waves (148)
-const FLIP_DEEPMAX = 200000;          // deep water points drawn at most (narrow band, look only); matches DEEPMAX in the shader
+const FLIP_PARAMS_BYTES = 1664;      // the solver's uniform block: settings, whitewater, air and drips (words 68-83), starting-water shapes (84), ocean waves (148), more whitewater (404), whitewater area (408)
+const FLIP_DEEPMAX = 200000;
+// the whitewater area: the tank widened k times about its centre and raised to up times its height (floor kept); never smaller than the tank
+function wwAreaBox(b, a) {
+  const k = Math.max(1, (a && a.k) || 1), up = Math.max(1, (a && a.up) || 1), cx = (b.x0 + b.x1) / 2, cz = (b.z0 + b.z1) / 2;
+  const hx = (b.x1 - b.x0) / 2 * k, hz = (b.z1 - b.z0) / 2 * k;
+  return { x0: cx - hx, x1: cx + hx, y0: b.y0, y1: b.y0 + (b.y1 - b.y0) * up, z0: cz - hz, z1: cz + hz };
+}          // deep water points drawn at most (narrow band, look only); matches DEEPMAX in the shader
 // The bindings each kernel uses (makeGroups says which buffer each number is). Keep every kernel within 8 storage buffers.
 const FLIP_L = {
   tileReset: [12], tileNeedClear: [0, 17], tileMark: [0, 1, 17], tileMarkPhi: [0, 7, 12, 17, 18, 19], tileMarkFill: [0, 10, 11, 17], phiInitAll: [0, 7, 10, 11, 12, 18, 19, 31], tileFree: [0, 12, 16, 17, 20, 21], argsNew: [12, 14], tileAlloc: [0, 12, 16, 19, 20, 21], tileFix: [0, 12],
@@ -80,7 +86,7 @@ class FlipSim {
     this.bGro = mk(16);
     this.dispMax = 300000; this.stride = 1;
     this.bDisp = mk(Math.min(this.MAXN, this.dispMax + 1) * 16 + 16);
-    this.bPack = mk(16); this.bPackU = device.createBuffer({ size: 96, usage: U.UNIFORM | U.COPY_DST }); this.packWords = 4;
+    this.bPack = mk(16); this.bPackU = device.createBuffer({ size: 128, usage: U.UNIFORM | U.COPY_DST }); this.packWords = 4;
     this.bArgs = device.createBuffer({ size: 128, usage: U.STORAGE | U.INDIRECT | U.COPY_DST });
     this.sdfCap = 16; this.sdfSig = null; this.bSdf = mk(64);
     this.bParams = device.createBuffer({ size: FLIP_PARAMS_BYTES, usage: U.UNIFORM | U.COPY_DST });
@@ -233,6 +239,7 @@ class FlipSim {
     u32[76] = ad ? ad.nx : 1; u32[77] = ad ? ad.ny : 1; u32[78] = ad ? ad.nz : 1;
     if (dr) this.dripUpdate(o.cols.slice(0, nc)); u32[79] = dr ? this.ndrip : 0;
     f32[80] = dr ? dr.rate : 0; f32[81] = dr ? dr.dry : 1; f32[82] = airo ? (airo.blur === undefined ? 0.35 : airo.blur) : 0;
+    this.ab = wwAreaBox(b, ww.area); f32.set([this.ab.x0, this.ab.y0, this.ab.z0, 0, this.ab.x1, this.ab.y1, this.ab.z1, 0], 408);
     f32[83] = ww.spin === undefined ? 0.5 : ww.spin; f32[404] = Math.cos((ww.edge === undefined ? 70 : ww.edge) * Math.PI / 180); f32[405] = ww.erode === undefined ? 0.25 : ww.erode;
     f32[406] = ww.land === undefined ? 1 : ww.land; f32[407] = ww.trail === undefined ? 1 : ww.trail;
     this.airOnStep = !!(airo && ad); this.dripOnStep = !!(dr && this.ndrip > 0);
@@ -422,7 +429,8 @@ class FlipSim {
     const nW = fromPos ? Math.min(this.N, this.dispMax + 1, this.MAXN) : Math.ceil(this.lastN / this.stride);
     this.dispWaterN = nW;
     const L = this.packLayout(nW, spr ? this.sprDispMax : 0, deep ? FLIP_DEEPMAX : 0);
-    const b = this.b, u = new ArrayBuffer(96), u32 = new Uint32Array(u), f32 = new Float32Array(u);
+    const b = this.b, ab = this.ab || b, u = new ArrayBuffer(128), u32 = new Uint32Array(u), f32 = new Float32Array(u);
+    f32.set([ab.x0, ab.y0, ab.z0, 65535 / (ab.x1 - ab.x0), 65535 / (ab.y1 - ab.y0), 65535 / (ab.z1 - ab.z0), 0, 0], 24); L.sb = Object.assign({}, ab);
     u32.set([L.nW, L.nS, L.nD, fromPos ? 1 : 0, nW, deep ? Math.round(this.pf32[62]) : 0, L.oWp, L.oWs, L.oWf, L.oSp, L.oSk, L.oDp, L.oDs, 0, 0, 0]);
     f32.set([b.x0, b.y0, b.z0, 65535 / (b.x1 - b.x0), 65535 / (b.y1 - b.y0), 65535 / (b.z1 - b.z0), this.vs || 1, 0], 16);
     this.dev.queue.writeBuffer(this.bPackU, 0, u);
@@ -569,7 +577,7 @@ function unpackLive(range, L, b) {
   const cp = (k, from) => { if (sz[k]) new Uint8Array(ab, off[k], sz[k]).set(src.subarray(from, from + sz[k])); };
   cp(0, L.oSk * 4); cp(1, L.oWp * 4); cp(2, L.oSp * 4); cp(3, L.oDp * 4); cp(4, L.oWs * 4); cp(5, L.oWf * 4); cp(6, L.oDs * 4);
   const fr = { n: nW, pos: new Uint16Array(ab, off[1], nW * 3), spd: new Uint8Array(ab, off[4], nW), fm: new Uint8Array(ab, off[5], nW), b, bytes: ab.byteLength };
-  if (nS) fr.sp = { n: nS, pos: new Uint16Array(ab, off[2], nS * 3), pk: new Uint32Array(ab, off[0], nS), alive: nS };
+  if (nS) { fr.sp = { n: nS, pos: new Uint16Array(ab, off[2], nS * 3), pk: new Uint32Array(ab, off[0], nS), alive: nS }; fr.sb = L.sb; }   // whitewater across the whitewater area
   if (nD) fr.dp = { n: nD, pos: new Uint16Array(ab, off[3], nD * 3), spd: new Uint8Array(ab, off[6], nD) };
   return fr;
 }
