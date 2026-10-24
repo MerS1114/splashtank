@@ -15,8 +15,8 @@ const wait=(ms)=>new Promise(r=>setTimeout(r,ms));
  const info = await pg.evaluate(()=>{ const c=window.__splash.S.cache; const f=c.frames; const dps=f.map(x=>x.dp?x.dp.n:0);
    const parts=writeCacheParts(c); const tot=parts.reduce((a,p)=>a+p.byteLength,0); const buf=new Uint8Array(tot); let o=0; for(const p of parts){ buf.set(new Uint8Array(p.buffer,p.byteOffset,p.byteLength),o); o+=p.byteLength; }
    const back=parseCache(buf.buffer); const dps2=back.frames.map(x=>x.dp?x.dp.n:0); const same = back.frames.every((x,i)=>x.n===f[i].n) && JSON.stringify(dps)===JSON.stringify(dps2);
-   const a=f[f.length-1].dp, b=back.frames[f.length-1].dp; let eq = !a || (a.pos.every((v,i)=>v===b.pos[i]) && a.spd.every((v,i)=>v===b.spd[i]));
-   return { F:f.length, dps: dps.slice(0,6).concat(['…', dps[dps.length-1]]), nbLook:c.desc.nbLook, roundtrip: same && eq }; });
+   const a=f[f.length-1].dp, b=back.frames[f.length-1].dp; const P=a&&(a.p32?'p32':'pos'), Q=a&&(a.sf?'sf':'spd'); let eq = !a || (a[P].every((v,i)=>v===b[P][i]) && a[Q].every((v,i)=>v===b[Q][i]));
+   return { F:f.length, dps: dps.slice(0,6).concat(['…', dps[dps.length-1]]), nbLook:c.desc.nbLook, roundtrip: same && eq, compact: !!f[0].p32 }; });
  console.log('cache', JSON.stringify(info));
  await pg.evaluate(()=>{ window.__splash.S.ct = 20; window.__splash.snapView('front'); }); await wait(1500);
  console.log('draw', await pg.evaluate(()=>window.__splash.drawCount()));

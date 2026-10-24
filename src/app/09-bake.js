@@ -14,7 +14,10 @@
     $('#seg-mode').querySelectorAll('button').forEach((x) => { x.disabled = running; });
   }
   function fmtTime(s) { s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
-  function frameBytes(f) { return f.pos.byteLength + f.spd.byteLength + (f.objs ? f.objs.byteLength : 0) + (f.fm ? f.fm.byteLength : 0) + (f.sp ? f.sp.pos.byteLength + f.sp.pk.byteLength : 0) + (f.dp ? f.dp.pos.byteLength + f.dp.spd.byteLength : 0); }
+  function frameBytes(f) {
+    const by = (o, ks) => (o ? ks.reduce((t, k) => t + (o[k] ? o[k].byteLength : 0), 0) : 0);
+    return by(f, ['pos', 'p32', 'spd', 'sf', 'fm', 'objs']) + by(f.sp, ['pos', 'p32', 'pk']) + by(f.dp, ['pos', 'p32', 'spd', 'sf']);
+  }
   function cacheBytes(c) { let n = 0; for (const f of c.frames) n += frameBytes(f); return n; }
 
   // the bake settings without the heavy parts (distance grids, recorded motion), for the cache file and the report
@@ -25,6 +28,8 @@
     return d;
   }
   function onBakeFrame(fr, info, cache) {
+    if (cache.q === undefined) cache.q = compactBits(cache.b, cache.d);
+    if (cache.q) fr = compactFrame(fr, cache.q);   // a quarter smaller in memory, on the GPU and in the file
     cache.frames.push(fr);
     if (S.cache === cache && S.cfollow) S.ct = cache.frames.length - 1;
     if (S.cache === cache && (cache.frames.length < 4 || cache.frames.length % 6 === 0)) updateCacheInfo();
@@ -121,10 +126,10 @@
     const b = c.b || DEFB, qx = (b.x1 - b.x0) / 65535, qy = (b.y1 - b.y0) / 65535, qz = (b.z1 - b.z0) / 65535, H = 16, hist = new Array(H).fill(0);
     let alive = 0, sx = 0, sy = 0, sz = 0, ss = 0, smax = 0, fl = 0, x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
     for (let i = 0; i < fr.n; i++) {
-      if (fr.spd[i] === 255) continue;
+      const P = framePoint(fr, b, i); if (P[3] === 255) continue;
       alive++;
-      const x = fr.pos[i * 3] * qx + b.x0, y = fr.pos[i * 3 + 1] * qy + b.y0, z = fr.pos[i * 3 + 2] * qz + b.z0, sp = fr.spd[i] / 16 / (c.spdMs ? c.scale || 1 : 1);
-      sx += x; sy += y; sz += z; ss += sp; if (sp > smax) smax = sp; if (fr.fm) fl += fr.fm[i] / 255;
+      const x = P[0], y = P[1], z = P[2], sp = P[3] / 16 / (c.spdMs ? c.scale || 1 : 1);
+      sx += x; sy += y; sz += z; ss += sp; if (sp > smax) smax = sp; fl += P[4] / 15;
       if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; if (z < z0) z0 = z; if (z > z1) z1 = z;
       hist[Math.max(0, Math.min(H - 1, Math.floor((y - b.y0) / ((b.y1 - b.y0) / H))))]++;
     }
@@ -141,7 +146,7 @@
     for (let k = 0; k < 10; k++) picks.add(Math.round((k / 9) * (F - 1)));
     const snapshots = [...picks].map((f) => {
       const fr = c.frames[f], step = Math.max(1, Math.ceil(fr.n / 3000)), pts = [];
-      for (let i = 0; i < fr.n; i += step) { if (fr.spd[i] === 255) continue; pts.push([fr.pos[i * 3] * qx + b.x0, fr.pos[i * 3 + 1] * qy + b.y0, fr.pos[i * 3 + 2] * qz + b.z0, fr.spd[i] / 16 * (c.spdMs ? 1 : c.scale || 1), fr.fm ? fr.fm[i] / 255 : 0]); }
+      for (let i = 0; i < fr.n; i += step) { const P = framePoint(fr, b, i); if (P[3] === 255) continue; pts.push([P[0], P[1], P[2], P[3] / 16 * (c.spdMs ? 1 : c.scale || 1), P[4] / 15]); }
       return { f, t: f / c.fps, points: fr.n, every: step, sample: pts };
     });
     const rep = {
@@ -176,8 +181,9 @@
   function findSlot(key) { for (const i of BAKE) if (SLOTS[i].key === key) { SLOTS[i].used = ++useTick; return i; } return -1; }
   // as many bake slots as the budget holds for this cache's biggest frame (at least five, at most one per frame)
   function bakeSlots(c) {
-    let per = c.maxN * 8 + 65536; for (const i of BAKE) if (SLOTS[i].key && SLOTS[i].key.startsWith(c.uid + ':')) per = Math.max(per, slotBytes(SLOTS[i]));
-    const want = Math.max(5, Math.min(c.frames.length, gpuCap, Math.floor((S.gpuKeepMB || 2048) * 1048576 / per)));
+    let per = c.maxN * (c.q ? 6 : 8) + 65536; for (const i of BAKE) if (SLOTS[i].key && SLOTS[i].key.startsWith(c.uid + ':')) per = Math.max(per, slotBytes(SLOTS[i]));
+    // while baking the view only follows the newest frame: five slots; finished, the frames are loaded at their exact size
+    const want = c.partial ? 5 : Math.max(5, Math.min(c.frames.length, gpuCap, Math.floor((S.gpuKeepMB || 2048) * 1048576 / per)));
     while (BAKE.length < want) { SLOTS.push(newSlot()); BAKE.push(SLOTS.length - 1); }
     while (BAKE.length > want) {   // budget lowered: free the least recently used
       let v = 0; for (let j = 1; j < BAKE.length; j++) if (SLOTS[BAKE[j]].used < SLOTS[BAKE[v]].used) v = j;

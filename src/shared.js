@@ -636,6 +636,39 @@ function sampleObjState(o, t) {
   return s;
 }
 
+// Compact frames (bakes and their cache files; cache.q set): a position in one 32-bit word, q = [bits x, y, z] across the box (the
+// shortest side gets 10 bits, the others 11), and a water point's speed byte and white-water level (0-15) in one 16-bit word (sf:
+// speed | level << 8; 255 = gone). 6 bytes a water point instead of 8, 8 a whitewater point instead of 10, 6 a deep water point instead of 7.
+// Only used when those steps are at most a quarter of the particle spacing (compactBits null otherwise: 16 bits an axis as before).
+function compactBits(b, d) {
+  const e = [b.x1 - b.x0, b.y1 - b.y0, b.z1 - b.z0], s = e.indexOf(Math.min(e[0], e[1], e[2])), q = [11, 11, 11]; q[s] = 10;
+  for (let k = 0; k < 3; k++) if (e[k] / ((1 << q[k]) - 1) > d / 4) return null;
+  return q;
+}
+function packPos32(pos, n, q) {
+  const out = new Uint32Array(n), kx = ((1 << q[0]) - 1) / 65535, ky = ((1 << q[1]) - 1) / 65535, kz = ((1 << q[2]) - 1) / 65535, sy = q[0], sz = q[0] + q[1];
+  for (let i = 0, j = 0; i < n; i++, j += 3) out[i] = (Math.round(pos[j] * kx) | (Math.round(pos[j + 1] * ky) << sy) | (Math.round(pos[j + 2] * kz) << sz)) >>> 0;
+  return out;
+}
+function compactFrame(fr, q) {
+  const n = fr.n, sf = new Uint16Array(n), s = fr.spd, f = fr.fm;
+  if (f) for (let i = 0; i < n; i++) sf[i] = s[i] | (Math.round(f[i] / 17) << 8); else sf.set(s);
+  const out = { n, q, p32: packPos32(fr.pos, n, q), sf, objs: fr.objs };
+  if (fr.b) out.b = fr.b;
+  if (fr.sp) out.sp = { n: fr.sp.n, p32: packPos32(fr.sp.pos, fr.sp.n, q), pk: fr.sp.pk, alive: fr.sp.alive };
+  if (fr.dp) { const ds = new Uint16Array(fr.dp.n); ds.set(fr.dp.spd); out.dp = { n: fr.dp.n, p32: packPos32(fr.dp.pos, fr.dp.n, q), sf: ds }; }
+  return out;
+}
+// point i of a frame in either layout: [x, y, z] in the box, the speed byte (255 = gone) and the white-water level 0-15
+function framePoint(fr, b, i) {
+  if (fr.p32) {
+    const q = fr.q, v = fr.p32[i], mx = (1 << q[0]) - 1, my = (1 << q[1]) - 1, mz = (1 << q[2]) - 1, w = fr.sf[i];
+    return [(v & mx) / mx * (b.x1 - b.x0) + b.x0, ((v >>> q[0]) & my) / my * (b.y1 - b.y0) + b.y0, ((v >>> (q[0] + q[1])) & mz) / mz * (b.z1 - b.z0) + b.z0, w & 255, w >> 8];
+  }
+  const j = i * 3;
+  return [fr.pos[j] / 65535 * (b.x1 - b.x0) + b.x0, fr.pos[j + 1] / 65535 * (b.y1 - b.y0) + b.y0, fr.pos[j + 2] / 65535 * (b.z1 - b.z0) + b.z0, fr.spd[i], fr.fm ? Math.round(fr.fm[i] / 17) : 0];
+}
+
 function packFrame(sim, states, vs) {
   const k = 16 * (vs || 1), n = sim.N, b = sim.b, P = sim.P, S = sim.S;
   const pos = new Uint16Array(n * 3), spd = new Uint8Array(n);
@@ -688,12 +721,20 @@ async function runBake(desc, onFrame, isCancelled) {
 // Cache file, version 2: 'SPLC', 2, length of a JSON block (spacing, fps, object ids, box, scene, bake settings and measurements),
 // the JSON, padding to 4 bytes, frame count, then per frame: points, flags (1 = white water levels follow, 2 = spray follows, 4 = deep water points follow), object poses (6 floats each),
 // positions (3 x uint16 across the box), speed (uint8, 16ths of m/s; 16ths of a scene unit per second when the JSON has no spdMs), white water (uint8), padding to 4 bytes.
+// Flag 8 = a compact frame (see compactBits; the JSON's q gives the bits): positions as uint32, speed and white-water level as uint16,
+// padding; spray: count, uint32 positions, codes; deep: count, uint32 positions, uint16 speeds, padding.
 function writeCacheParts(c) {
-  const meta = { d: c.d, fps: c.fps, ids: c.ids, b: c.b, org: c.org, maxN: c.maxN, seconds: c.seconds, engine: c.engine, scene: c.scene, desc: c.desc, diag: c.diag, stableIds: !!c.stableIds, scale: c.scale || 1, spdMs: !!c.spdMs };
+  const meta = { d: c.d, fps: c.fps, ids: c.ids, b: c.b, org: c.org, maxN: c.maxN, seconds: c.seconds, engine: c.engine, scene: c.scene, desc: c.desc, diag: c.diag, stableIds: !!c.stableIds, scale: c.scale || 1, spdMs: !!c.spdMs, q: c.q || null };
   const mj = new TextEncoder().encode(JSON.stringify(meta)), pad = (k) => (4 - (k % 4)) % 4;
   const parts = [new Uint8Array([83, 80, 76, 67]), new Uint32Array([2, mj.length]), mj, new Uint8Array(pad(mj.length)), new Uint32Array([c.frames.length])];
   for (const fr of c.frames) {
     const sp = fr.sp && fr.sp.n ? fr.sp : null, dp = fr.dp && fr.dp.n ? fr.dp : null;
+    if (fr.p32) {
+      parts.push(new Uint32Array([fr.n, 8 | (sp ? 2 : 0) | (dp ? 4 : 0)]), fr.objs, fr.p32, fr.sf, new Uint8Array(pad(fr.n * 2)));
+      if (sp) parts.push(new Uint32Array([sp.n]), sp.p32, sp.pk);
+      if (dp) parts.push(new Uint32Array([dp.n]), dp.p32, dp.sf, new Uint8Array(pad(dp.n * 2)));
+      continue;
+    }
     parts.push(new Uint32Array([fr.n, (fr.fm ? 1 : 0) | (sp ? 2 : 0) | (dp ? 4 : 0)]), fr.objs, fr.pos, fr.spd);
     let bytes = fr.n * 7; if (fr.fm) { parts.push(fr.fm); bytes += fr.n; }
     parts.push(new Uint8Array(pad(bytes)));
@@ -710,6 +751,16 @@ function parseCache2(buf, dv) {
   for (let f = 0; f < nf; f++) {
     if (o + 8 > buf.byteLength) break;
     const n = dv.getUint32(o, true), fl = dv.getUint32(o + 4, true); o += 8;
+    if (fl & 8) {   // compact frame
+      if (o + nobj * 24 + n * 6 > buf.byteLength) break;
+      const objs = new Float32Array(buf.slice(o, o + nobj * 24)); o += nobj * 24;
+      const fr = { n, q: meta.q, p32: new Uint32Array(buf.slice(o, o + n * 4)), objs }; o += n * 4;
+      fr.sf = new Uint16Array(buf.slice(o, o + n * 2)); o += n * 2 + (n % 2) * 2;
+      if (fl & 2) { const ns = dv.getUint32(o, true); o += 4; fr.sp = { n: ns, p32: new Uint32Array(buf.slice(o, o + ns * 4)), pk: new Uint32Array(buf.slice(o + ns * 4, o + ns * 8)), alive: ns }; o += ns * 8; }
+      if (fl & 4) { const nd = dv.getUint32(o, true); o += 4; fr.dp = { n: nd, p32: new Uint32Array(buf.slice(o, o + nd * 4)), sf: new Uint16Array(buf.slice(o + nd * 4, o + nd * 6)) }; o += nd * 6 + (nd % 2) * 2; }
+      frames.push(fr); if (n > maxN) maxN = n;
+      continue;
+    }
     const need = nobj * 24 + n * ((fl & 1) ? 8 : 7);
     if (o + need > buf.byteLength) break;
     const objs = new Float32Array(buf.slice(o, o + nobj * 24)); o += nobj * 24;

@@ -18,8 +18,8 @@
   // how many points of a frame are really there (counted once per frame)
   function frameAlive(fr, show) {
     if (fr._alive === undefined) {
-      let a = 0; const s = fr.spd; for (let i = 0; i < fr.n; i++) if (s[i] !== 255) a++;
-      if (fr.dp) { const d = fr.dp.spd; for (let i = 0; i < fr.dp.n; i++) if (d[i] !== 255) a++; }
+      let a = 0; const s = fr.spd || fr.sf; for (let i = 0; i < fr.n; i++) if ((s[i] & 255) !== 255) a++;
+      if (fr.dp) { const d = fr.dp.spd || fr.dp.sf; for (let i = 0; i < fr.dp.n; i++) if ((d[i] & 255) !== 255) a++; }
       fr._alive = a;
     }
     return fr._alive + (show && fr.sp ? fr.sp.n : 0);
