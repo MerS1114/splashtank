@@ -16,7 +16,7 @@ const FLIP_L = {
   tileReset: [12], tileNeedClear: [0, 17], tileMark: [0, 1, 17], tileMarkPhi: [0, 7, 12, 17, 18, 19], tileMarkFill: [0, 10, 11, 17], phiInitAll: [0, 7, 10, 11, 12, 18, 19, 31], tileFree: [0, 12, 16, 17, 20, 21], argsNew: [12, 14], tileAlloc: [0, 12, 16, 19, 20, 21], tileFix: [0, 12],
   initNew: [0, 7, 8, 10, 11, 12, 21, 31], slotListBuild: [0, 12, 16, 18], argsSlots: [12, 14], growFree: [12, 20, 25],
   sortClear: [22], sortHist: [0, 1, 22], sortScan: [22], sortScatter: [0, 1, 2, 22, 23, 24, 26, 27], sortCopy: [0, 1, 2, 23, 24, 26, 27], unsort: [0, 1, 23, 26],
-  clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], spinEmit: [0, 1, 2, 3, 6, 16, 28, 29, 30], wwAdvect: [0, 1, 2], sprayStep: [0, 10, 11, 28, 29, 32, 33], sprayDisp: [0, 15, 28, 29, 30], dispBegin: [30], packDisp: [1, 12, 15, 30, 37, 38], wwSample: [0, 3, 5, 6, 7, 16, 28, 29, 33], wwArgs: [0, 14, 30],
+  clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], spinEmit: [0, 1, 2, 3, 6, 16, 28, 29, 30], wwAdvect: [0, 1, 2], sprayStep: [0, 10, 11, 28, 29, 30, 32, 33], sprayDisp: [0, 15, 28, 29, 30], dispBegin: [30], packDisp: [1, 12, 15, 30, 37, 38], wwSample: [0, 3, 5, 6, 7, 16, 28, 29, 33], wwArgs: [0, 14, 30],
   airClear: [0, 34], airSplatW: [0, 1, 2, 6, 16, 34], airSplatS: [0, 28, 29, 34], airUpdate: [0, 10, 11, 32, 34, 35], airCopy: [0, 32, 35], dripStep: [0, 6, 7, 10, 16, 28, 29, 30, 36],
   normFaces: [0, 3, 5, 7, 10, 12, 16, 18, 19], divergence: [0, 3, 6, 7, 9, 12, 16, 18, 19],
   listClear: [12], buildList: [0, 7, 12, 13, 18, 19], listArgs: [0, 12, 14], rbRed: [0, 7, 8, 9, 12, 13, 16, 19], rbBlack: [0, 7, 8, 9, 12, 13, 16, 19],
@@ -233,7 +233,8 @@ class FlipSim {
     u32[76] = ad ? ad.nx : 1; u32[77] = ad ? ad.ny : 1; u32[78] = ad ? ad.nz : 1;
     if (dr) this.dripUpdate(o.cols.slice(0, nc)); u32[79] = dr ? this.ndrip : 0;
     f32[80] = dr ? dr.rate : 0; f32[81] = dr ? dr.dry : 1; f32[82] = airo ? (airo.blur === undefined ? 0.35 : airo.blur) : 0;
-    f32[83] = ww.spin === undefined ? 0.5 : ww.spin; f32[404] = Math.cos((ww.edge === undefined ? 70 : ww.edge) * Math.PI / 180); f32[405] = ww.erode === undefined ? 0.5 : ww.erode;
+    f32[83] = ww.spin === undefined ? 0.5 : ww.spin; f32[404] = Math.cos((ww.edge === undefined ? 70 : ww.edge) * Math.PI / 180); f32[405] = ww.erode === undefined ? 0.25 : ww.erode;
+    f32[406] = ww.land === undefined ? 1 : ww.land; f32[407] = ww.trail === undefined ? 1 : ww.trail;
     this.airOnStep = !!(airo && ad); this.dripOnStep = !!(dr && this.ndrip > 0);
     this.dev.queue.writeBuffer(this.bParams, 0, this.pu);
     const iters = Math.max(1, (this.opt.iters || o.iters) | 0);

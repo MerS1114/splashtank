@@ -12,6 +12,7 @@
   function setBakeUI(running) {
     $('#btn-bake').disabled = running; $('#btn-cancel').hidden = !running; $('#bake-progress').hidden = !running;
     $('#seg-mode').querySelectorAll('button').forEach((x) => { x.disabled = running; });
+    wwButtons();
   }
   function fmtTime(s) { s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
   function frameBytes(f) {
@@ -30,15 +31,30 @@
   function onBakeFrame(fr, info, cache) {
     if (cache.q === undefined) cache.q = compactBits(cache.b, cache.d);
     if (cache.q) fr = compactFrame(fr, cache.q);   // a quarter smaller in memory, on the GPU and in the file
+    if (fr.sp && fr.sp.n) fr.wws = 1;   // whitewater that came with the water bake (2: made by Bake whitewater)
     cache.frames.push(fr);
     if (S.cache === cache && S.cfollow) S.ct = cache.frames.length - 1;
     if (S.cache === cache && (cache.frames.length < 4 || cache.frames.length % 6 === 0)) updateCacheInfo();
+    if (info.diag) {   // the fastest water and the substeps against their limits, reported when the bake ends
+      const d = info.diag, sc = cache.scale || 1;
+      cache.vpeak = Math.max(cache.vpeak || 0, (d.fastestParticle || 0) * sc, (d.maxSpeed || 0) * sc);
+      if (d.atWaterSpeedLimit > 0) cache.vcapFrames = (cache.vcapFrames || 0) + 1;
+      if (d.sub && d.sub >= ((cache.desc && cache.desc.maxSub) || 16)) cache.subCapFrames = (cache.subCapFrames || 0) + 1;
+    }
     if (info.diag && cache.diag) cache.diag.push(Object.assign({ f: info.f, t: info.f / cache.fps, n: info.n, elapsed: info.elapsed }, info.diag));
     cache.maxN = Math.max(cache.maxN, fr.n);
     const pct = (info.f / info.F) * 100; S.bakeT = info.f / cache.fps; lcUi();
     $('#bake-prog').style.width = pct + '%';
     const eta = info.f > 0 ? (info.elapsed / info.f) * (info.F - info.f) : 0;
     $('#bake-status').innerHTML = 'Frame <b>' + info.f + '</b> of ' + info.F + ' · <b>' + fmtN(info.n) + '</b> points · ' + fmtTime(info.elapsed) + ' elapsed, about ' + fmtTime(eta) + ' left' + (info.full ? '<br>Max points reached, emission stopped.' : '');
+  }
+  // the fastest water and the substeps against their limits during a bake: says which limit to raise when one held the water back
+  function bakeLimits(c) {
+    const vmax = (c.desc && c.desc.vmaxW ? c.desc.vmaxW * (c.scale || 1) : S.vmaxW), ms = (c.desc && c.desc.maxSub) || 16;
+    let t = 'Fastest water ' + Math.round(c.vpeak || 0) + ' m/s (limit ' + Math.round(vmax) + ').';
+    if (c.vcapFrames) t += ' <span class="warn">The water reached its speed limit in ' + c.vcapFrames + ' frames: raise Max water speed (Simulation, Physics).</span>';
+    if (c.subCapFrames) t += ' <span class="warn">' + c.subCapFrames + ' frames needed the most substeps the bake allows (' + ms + '): raise its Max substeps.</span>';
+    return t;
   }
   function finishBake(cache, cancelled) {
     S.baking = false; setBakeUI(false); S.bakeT = 0;
@@ -55,13 +71,16 @@
     buildTicks(); updateCacheInfo();
     $('#bake-status').innerHTML = cancelled ? 'Cancelled. Kept the <b>' + (cache.frames.length - 1) + '</b> frames baked so far (' + (cache.frames.length / cache.fps).toFixed(1) + ' s); they play and save like a full bake.'
       : 'Baked <b>' + (cache.frames.length - 1) + '</b> frames in ' + fmtTime(cache.seconds) + '.';
+    $('#bake-status').innerHTML += ' ' + bakeLimits(cache);
     applyMode(); lcUi();
   }
-  function startBake() {
-    if (S.baking) return;
+  // waterOnly: the water without whitewater (faster); Bake whitewater makes it afterwards
+  function startBake(waterOnly) {
+    if (S.baking || S.wwPass) return;
     setPlaying(false);
     const desc = buildDesc();
     if (!desc.frames) return;
+    if (waterOnly === true) { desc.spr = null; desc.sprayCap = 0; desc.air = null; desc.drip = null; }
     if (isGpu() && gridCost(desc.d, S.cellRatio, desc.maxN).biggest > (S.gpu ? S.gpu.maxBuf : 1 << 27)) { $('#bake-status').textContent = 'That bake does not fit in one GPU buffer here. Pick less detail or lower Max points.'; flash('Bake too big for this GPU.'); return; }
     const cache = { b: { x0: -W / 2, x1: W / 2, y0: 0, y1: Hh, z0: -Dd / 2, z1: Dd / 2 }, org: Object.assign({}, S.org), fps: desc.fps, d: desc.d, frames: [], maxN: 0, ids: desc.objs.map((o) => o.id), seconds: 0, startedAt: Date.now(),
       engine: S.engine, scene: sceneData(), desc: lightDesc(desc), diag: [], stableIds: true, scale: S.scale || 1, spdMs: true };
@@ -97,7 +116,7 @@
       runBake(desc, (fr, info) => onBakeFrame(fr, info, cache), () => S.cancelPage).then((ok) => done(!ok));
     }
   }
-  $('#btn-bake').addEventListener('click', startBake);
+  $('#btn-bake').addEventListener('click', () => startBake(false));
   $('#btn-cancel').addEventListener('click', () => { S.cancelPage = true; if (worker) worker.postMessage({ type: 'cancel' }); });
 
   function updateCacheInfo() {
@@ -107,29 +126,38 @@
     const g = gpuKept();
     el.innerHTML = '<b>' + (c.frames.length - 1) + '</b> frames at ' + c.fps + ' fps, up to <b>' + fmtN(c.maxN) + '</b> points, spacing ' + c.d.toFixed(3) + ', <b>' + (cacheBytes(c) / 1048576).toFixed(0) + ' MB</b> in memory, ' + g.n + ' frames on the GPU (' + g.mb.toFixed(0) + ' MB).';
   }
-  setInterval(() => { if (S.cache && viewMode() === 'cache') updateCacheInfo(); }, 1000);
+  setInterval(() => { if (S.cache && viewMode() === 'cache') { updateCacheInfo(); lcUi(); } }, 1000);
   addSlider($('#g-cache'), { id: 'c-gpukeep', label: 'GPU memory', min: 256, max: 8192, step: 256, value: S.gpuKeepMB, def: dv('gpuKeepMB'), fmt: (v) => (v >= 1024 ? (v / 1024).toFixed(v % 1024 ? 2 : 0) + ' GB' : v + ' MB'), tip: 'How much GPU memory baked frames may keep. A bake that fits is sent to the GPU once (while it plays the first time, or while it is paused) and then plays smoothly without moving any data. Frames that do not fit are sent again each time they are shown. If the GPU runs out of memory first, fewer frames are kept.', onInput: (v) => { S.gpuKeepMB = v; } });
   // whitewater pass over the shown bake (runWhitewaterPass in flip/bake.js), with the scene's colliders and whitewater settings as they are now
   let wwStop = false;
-  $('#c-ww').addEventListener('click', async (e) => {
-    e.currentTarget.blur(); const c = S.cache, st = $('#ww-status');
+  async function bakeWhitewater() {
+    const c = S.cache, st = $('#ww-status');
     if (!c || c.partial || S.baking || S.wwPass) { flash(c ? 'Wait for the bake to finish.' : 'Bake something first.'); return; }
     if (!S.gpu) { st.textContent = 'This needs WebGPU.'; return; }
     const desc = buildDesc();
     if (!desc.spr) { st.textContent = 'Turn Whitewater on first (Simulation tab).'; return; }
     desc.sprayCap = S.sprCap;
-    setPlaying(false); S.wwPass = true; wwStop = false; $('#c-ww').disabled = true; $('#btn-bake').disabled = true; $('#c-ww-stop').hidden = false;
+    setPlaying(false); S.wwPass = true; wwStop = false; wwButtons();
     const t0 = performance.now();
     let ok = false;
     try {
       ok = await runWhitewaterPass(c, desc, S.gpu, (f, F) => {
-        st.textContent = 'Whitewater: frame ' + f + ' of ' + (F - 1) + '…';
+        st.textContent = 'Whitewater: frame ' + f + ' of ' + (F - 1) + '…'; S.wwProg = f / (F - 1); if (f % 4 === 0) lcUi();
         const i = findSlot(slotKey(c, f)); if (i > 0) SLOTS[i].key = null;   // show the new whitewater as it comes
       }, () => wwStop);
       st.textContent = (ok ? 'Whitewater made for ' : 'Stopped: whitewater remade for the first frames of ') + (c.frames.length - 1) + ' frames in ' + fmtTime((performance.now() - t0) / 1000) + (ok ? '. Save the cache to keep it.' : '; the rest keep the old whitewater.');
     } catch (err) { st.textContent = 'The whitewater pass failed: ' + (err && err.message || err); }
-    c.uid = ++cacheUid; S.wwPass = false; $('#c-ww').disabled = false; $('#btn-bake').disabled = false; $('#c-ww-stop').hidden = true; updateCacheInfo();
-  });
+    c.uid = ++cacheUid; S.wwPass = false; wwButtons(); updateCacheInfo(); lcUi();
+  }
+  function wwButtons() {
+    const busy = S.baking || S.wwPass;
+    for (const id of ['#c-ww', '#tb-bakeww', '#btn-bake', '#btn-bakew', '#tb-bakew']) { const b = $(id); if (b) b.disabled = busy; }
+    $('#c-ww-stop').hidden = !S.wwPass;
+  }
+  $('#c-ww').addEventListener('click', (e) => { e.currentTarget.blur(); bakeWhitewater(); });
+  $('#tb-bakeww').addEventListener('click', (e) => { e.currentTarget.blur(); S.tab = 'bake'; applyMode(); setPtab('bake'); bakeWhitewater(); });
+  $('#btn-bakew').addEventListener('click', (e) => { e.currentTarget.blur(); startBake(true); });
+  $('#tb-bakew').addEventListener('click', (e) => { e.currentTarget.blur(); S.tab = 'bake'; applyMode(); setPtab('bake'); startBake(true); });
   $('#c-ww-stop').addEventListener('click', () => { wwStop = true; });
   $('#c-loop').addEventListener('change', (e) => { S.cloop = e.target.checked; });
   seg('#seg-cspeed', (v) => { S.cspeed = +v; });

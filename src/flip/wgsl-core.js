@@ -17,7 +17,7 @@ struct Params {
   dripRate: f32, dripDry: f32, airBlur: f32, wwSpin: f32,
   fills: array<vec4<f32>, 16>,
   waves: array<vec4<f32>, 64>,
-  wwEdge: f32, wwErode: f32, wwPad2: f32, wwPad3: f32,   // words 404-407: cosine of the leading-edge angle, foam spreading fade
+  wwEdge: f32, wwErode: f32, wwLand: f32, wwTrail: f32,   // words 404-407: cosine of the leading-edge angle, foam spreading fade, foam from landing water, mist trails
 };
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read_write> pos: array<vec4<f32>>;

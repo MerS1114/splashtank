@@ -57,8 +57,8 @@
     kfTracks.appendChild(ruler);
     // cache lanes, coloured like Houdini's: blue cached in memory, orange out of date, purple baked, stripes baking now
     const lanes = document.createElement('div'); lanes.className = 'kf-cache'; lanes.dataset.role = 'ruler';
-    lanes.dataset.tipTitle = 'Cache'; lanes.dataset.tip = 'Blue: cached in memory, plays back without simulating. Orange: out of date because something changed; Reset simulates it again. Purple: baked frames (click to play the bake). Stripes: baking now.';
-    lanes.innerHTML = '<i id="bk-bar" data-role="bake" hidden></i><i id="bk-prog" hidden></i><i id="lc-stale" hidden></i><i id="lc-bar" hidden></i>';
+    lanes.dataset.tipTitle = 'Cache'; lanes.dataset.tip = 'Blue: cached in memory, plays back without simulating. Orange: out of date because something changed; Reset simulates it again. Purple: baked frames (click to play the bake). Stripes: baking now. The thin bottom line is the whitewater: green made by the live sim, lilac made while the water was baked, white made by Bake whitewater.';
+    lanes.innerHTML = '<i id="bk-bar" data-role="bake" hidden></i><i id="bk-prog" hidden></i><i id="lc-stale" hidden></i><i id="lc-bar" hidden></i><i id="ww-lane" hidden></i>';
     kfTracks.appendChild(lanes);
     for (const o of objs) {
       const nm = document.createElement('div'); nm.textContent = o.name; nm.className = o === selected ? 'cur' : '';

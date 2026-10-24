@@ -721,7 +721,7 @@ async function runBake(desc, onFrame, isCancelled) {
 // Cache file, version 2: 'SPLC', 2, length of a JSON block (spacing, fps, object ids, box, scene, bake settings and measurements),
 // the JSON, padding to 4 bytes, frame count, then per frame: points, flags (1 = white water levels follow, 2 = spray follows, 4 = deep water points follow), object poses (6 floats each),
 // positions (3 x uint16 across the box), speed (uint8, 16ths of m/s; 16ths of a scene unit per second when the JSON has no spdMs), white water (uint8), padding to 4 bytes.
-// Flag 8 = a compact frame (see compactBits; the JSON's q gives the bits): positions as uint32, speed and white-water level as uint16,
+// Flag 16: the frame's whitewater was made by Bake whitewater (afterwards, from the water). Flag 8 = a compact frame (see compactBits; the JSON's q gives the bits): positions as uint32, speed and white-water level as uint16,
 // padding; spray: count, uint32 positions, codes; deep: count, uint32 positions, uint16 speeds, padding.
 function writeCacheParts(c) {
   const meta = { d: c.d, fps: c.fps, ids: c.ids, b: c.b, org: c.org, maxN: c.maxN, seconds: c.seconds, engine: c.engine, scene: c.scene, desc: c.desc, diag: c.diag, stableIds: !!c.stableIds, scale: c.scale || 1, spdMs: !!c.spdMs, q: c.q || null };
@@ -730,12 +730,12 @@ function writeCacheParts(c) {
   for (const fr of c.frames) {
     const sp = fr.sp && fr.sp.n ? fr.sp : null, dp = fr.dp && fr.dp.n ? fr.dp : null;
     if (fr.p32) {
-      parts.push(new Uint32Array([fr.n, 8 | (sp ? 2 : 0) | (dp ? 4 : 0)]), fr.objs, fr.p32, fr.sf, new Uint8Array(pad(fr.n * 2)));
+      parts.push(new Uint32Array([fr.n, 8 | (sp ? 2 : 0) | (dp ? 4 : 0) | (fr.wws === 2 ? 16 : 0)]), fr.objs, fr.p32, fr.sf, new Uint8Array(pad(fr.n * 2)));
       if (sp) parts.push(new Uint32Array([sp.n]), sp.p32, sp.pk);
       if (dp) parts.push(new Uint32Array([dp.n]), dp.p32, dp.sf, new Uint8Array(pad(dp.n * 2)));
       continue;
     }
-    parts.push(new Uint32Array([fr.n, (fr.fm ? 1 : 0) | (sp ? 2 : 0) | (dp ? 4 : 0)]), fr.objs, fr.pos, fr.spd);
+    parts.push(new Uint32Array([fr.n, (fr.fm ? 1 : 0) | (sp ? 2 : 0) | (dp ? 4 : 0) | (fr.wws === 2 ? 16 : 0)]), fr.objs, fr.pos, fr.spd);
     let bytes = fr.n * 7; if (fr.fm) { parts.push(fr.fm); bytes += fr.n; }
     parts.push(new Uint8Array(pad(bytes)));
     if (sp) parts.push(new Uint32Array([sp.n]), sp.pos, new Uint8Array(pad(sp.n * 6)), sp.pk);
@@ -758,6 +758,7 @@ function parseCache2(buf, dv) {
       fr.sf = new Uint16Array(buf.slice(o, o + n * 2)); o += n * 2 + (n % 2) * 2;
       if (fl & 2) { const ns = dv.getUint32(o, true); o += 4; fr.sp = { n: ns, p32: new Uint32Array(buf.slice(o, o + ns * 4)), pk: new Uint32Array(buf.slice(o + ns * 4, o + ns * 8)), alive: ns }; o += ns * 8; }
       if (fl & 4) { const nd = dv.getUint32(o, true); o += 4; fr.dp = { n: nd, p32: new Uint32Array(buf.slice(o, o + nd * 4)), sf: new Uint16Array(buf.slice(o + nd * 4, o + nd * 6)) }; o += nd * 6 + (nd % 2) * 2; }
+      fr.wws = fl & 16 ? 2 : fr.sp ? 1 : 0;
       frames.push(fr); if (n > maxN) maxN = n;
       continue;
     }
@@ -781,6 +782,7 @@ function parseCache2(buf, dv) {
       const spd3 = new Uint8Array(buf.slice(o, o + nd)); o += nd + (4 - ((nd * 7) % 4)) % 4;
       fr.dp = { n: nd, pos: pos3, spd: spd3 };
     }
+    fr.wws = fl & 16 ? 2 : fr.sp ? 1 : 0;
     frames.push(fr); if (n > maxN) maxN = n;
   }
   return Object.assign({}, meta, { frames, maxN: Math.max(maxN, meta.maxN || 0) });

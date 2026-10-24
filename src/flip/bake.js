@@ -187,11 +187,12 @@ async function runWhitewaterPass(c, desc, gpu, onProgress, isCancelled) {
     let sp = sd ? packSprayFrame(sd, sim.b, 200000, foamLife) : null;
     if (sp && c.q) sp = { n: sp.n, p32: packPos32(sp.pos, sp.n, c.q), pk: sp.pk, alive: sp.alive };
     if (sp && sp.n) Bf.sp = sp; else delete Bf.sp;
+    Bf.wws = 2;   // made by Bake whitewater
     onProgress(f, F);
     if (isCancelled()) { ok = false; break; }
     await new Promise((r) => setTimeout(r, 0));
   }
-  if (ok) delete fr[0].sp;
+  if (ok) { delete fr[0].sp; fr[0].wws = 2; }
   sim.destroy();
   return ok;
 }

@@ -42,6 +42,15 @@
     }
   }
 
+  // the fastest water and the substeps it needed, against their limits, so it shows when a limit is holding the water back
+  function limitInfo() {
+    const el = $('#vmax-info'); if (!el || S.engine !== 'flip' || !sim.stats) return;
+    const v = sim.stats.vmax * (S.scale || 1); S.vpeak = Math.max(S.vpeak || 0, v); S.subPeak = Math.max(S.subPeak || 0, S.lastSub || 1);
+    const atV = S.vpeak >= 0.97 * S.vmaxW, atS = S.subPeak >= S.subMax;
+    const t = 'Fastest water ' + Math.round(v) + ' m/s now, ' + Math.round(S.vpeak) + ' m/s at most since the start (limit ' + Math.round(S.vmaxW) + '). Substeps up to ' + S.subPeak + ' of ' + S.subMax + '.' +
+      (atV ? ' The water reached its speed limit: raise Max water speed.' : '') + (atS ? ' It needed the most substeps allowed: raise Max substeps for fast moments.' : '');
+    if (el._t !== t) { el._t = t; el.textContent = t; el.classList.toggle('warn', atV || atS); }
+  }
   let last = performance.now(), acc = 0, fpsE = 60, uiT = 0, recUi = 0;
   const PREP = 'Preparing the GPU solver…';
   // While the sim plays, the live view is redrawn only when something changed: a new frame from the sim, the camera moving, or any input in the last moments
@@ -138,6 +147,7 @@
         updatePlayhead();
         const simN = isGpu() ? sim.N : count; $('#count').textContent = simN; $('#fps').textContent = Math.round(fpsE); $('#ms').textContent = prep ? 'preparing' : S.ms.toFixed(1) + ((S.lastSub || 1) > 1 ? ' ×' + S.lastSub : '');
         if (LC.frames.length && Math.random() < 0.25) lcUi();
+        limitInfo();
         $('#meter').style.width = Math.min(100, (simN / S.cap) * 100) + '%';
       }
       recUi += dt; if (S.rec && recUi > 0.5) { recUi = 0; updateRecInfo(); updateEst(); }

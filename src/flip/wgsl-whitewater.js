@@ -137,19 +137,27 @@ fn sprayEmit(@builtin(global_invocation_id) g: vec3<u32>) {
     crest = smoothstep(0.55, 0.85, open) * lead * fast * (0.3 + 0.7 * foam);
   }
   let churn = (1.0 - smoothstep(0.8, 1.0, rho)) * clamp((foam - 0.55) / 0.45, 0.0, 1.0) * smoothstep(0.5, 1.5, spd * P.vs);   // moving water only: settling at the start is not churn
-  let e = (P.wwCrest * crest + P.wwImpact * churn) * smoothstep(0.1, 0.5, P.q8);   // none while the starting water settles
+  // water falling onto water: fast downwards at the surface (some water around it, not deep inside) leaves foam where it lands
+  let land = smoothstep(0.5, 2.0, -v.y * P.vs / max(P.sprMin, 0.1)) * smoothstep(0.25, 0.5, rho) * (1.0 - smoothstep(0.85, 1.0, rho));
+  // the fastest water throws more, and more of it as mist
+  let vfast = smoothstep(3.0, 8.0, spd * P.vs / max(P.sprMin, 0.1));
+  let settle = smoothstep(0.1, 0.5, P.q8);   // none while the starting water settles
+  let e = (P.wwCrest * crest * (1.0 + 2.0 * vfast) + P.wwImpact * churn + P.wwLand * land) * settle;
   if (e <= 0.0) { return; }
+  let fromLand = P.wwLand * land * settle / e;   // the share from landing water: made as foam on the surface
   let k = min(u32(floor(P.sprRate * e * P.dt + hash1(h0))), 4u);
   for (var m = 0u; m < k; m++) {
     let hh = h0 ^ ((m + 1u) * 0x9E3779B9u);
     let z = hash1(hh + 1u) * 2.0 - 1.0; let a = hash1(hh + 2u) * 6.2831853; let s = sqrt(max(0.0, 1.0 - z * z));
     let dir = vec3<f32>(s * cos(a), s * sin(a), z);
-    let under = rho > 0.7 && hash1(hh + 7u) < 0.7;
-    let mist = !under && hash1(hh + 3u) < P.mistFrac * fast;
+    let onTop = hash1(hh + 9u) < fromLand;
+    let under = !onTop && rho > 0.7 && hash1(hh + 7u) < 0.7;
+    let mist = !under && !onTop && hash1(hh + 3u) < min(0.9, P.mistFrac * (fast + 2.0 * vfast));
     var nv = v * (0.9 + 0.2 * hash1(hh + 4u)) + dir * spd * select(0.06, 0.2, mist);   // mostly the water's own velocity: a wide random spread looks like a sparkler
     var life = P.sprLife * (0.6 + 0.8 * hash1(hh + 5u)) * select(1.0, 1.6, mist);
     var kind = select(0.0, 1.0, mist);
     if (under) { nv = v + dir * spd * 0.05; life = P.wwFoamLife * (0.6 + 0.8 * hash1(hh + 5u)); kind = 3.0; }
+    if (onTop) { nv = vec3<f32>(v.x * 0.5, 0.0, v.z * 0.5) + vec3<f32>(dir.x, 0.0, dir.z) * spd * 0.15; life = P.wwFoamLife * (0.6 + 0.8 * hash1(hh + 5u)); kind = 2.0; }
     let slot = atomicAdd(&sctl[0], 1u) % P.smax;
     if (sPos[slot].w > 0.0) { continue; }   // never replace a living point: when the pool is full, new whitewater waits for room
     sPos[slot] = vec4<f32>(q.xyz + nv * P.dt + dir * P.h * 0.3 * hash1(hh + 6u), life);
@@ -214,6 +222,18 @@ fn sprayStep(@builtin(global_invocation_id) g: vec3<u32>) {
   else if (kind == 3u && wet < 0.6 && settled) { kind = 2u; life = max(life, 0.5 * P.wwFoamLife); }                   // a bubble reaching the surface: foam
   if (kind != k0) { tk = 0.0; } else { tk = min(tk + P.dt, WWHOLD); }
   let p = sp.xyz;
+  // fast spray leaves a trail of mist behind it (drops shed fine droplets as the air tears at them)
+  if (kind == 0u && P.wwTrail > 0.0 && life > 0.0) {
+    let sp2 = length(v) * P.vs / max(P.sprMin, 0.1);
+    let pr = P.wwTrail * P.sprRate * P.mistFrac * smoothstep(1.5, 5.0, sp2) * P.dt;
+    if (hash1(h0 + 31u) < pr) {
+      let slot = atomicAdd(&sctl[0], 1u) % P.smax;
+      if (slot != j && sPos[slot].w <= 0.0) {
+        sPos[slot] = vec4<f32>(sp.xyz, P.sprLife * 1.6 * (0.6 + 0.8 * hash1(h0 + 32u)));
+        sVel[slot] = vec4<f32>(v * (0.2 + 0.2 * hash1(h0 + 33u)), 1.0);
+      }
+    }
+  }
   if (kind <= 1u) {
     let mist = kind == 1u;
     var gust = vec3<f32>(0.0);
@@ -229,7 +249,7 @@ fn sprayStep(@builtin(global_invocation_id) g: vec3<u32>) {
   } else if (kind == 2u) {
     let vy = vf.y + clamp((wet - 0.5) * 4.0, -1.0, 1.0) * P.h * 4.0;   // held at the surface: pushed up when under, pulled down when above
     v = mix(v, vec3<f32>(vf.x, vy, vf.z), 1.0 - exp(-10.0 * P.dt));
-    life -= P.dt * clamp(1.0 + P.wwErode * spread, 0.3, 4.0);   // fades faster where the surface spreads apart, lasts where it gathers
+    life -= P.dt * clamp(1.0 + P.wwErode * spread, 0.3, 2.0);   // fades faster where the surface spreads apart, lasts where it gathers
   } else {
     // bubbles of different sizes: big ones rise fast, small ones hang in the water and keep it white longer
     v = mix(v, vf + vec3<f32>(0.0, P.wwRise * (0.4 + 1.2 * hash1(j * 7919u + 3u)), 0.0), 1.0 - exp(-6.0 * P.dt));
