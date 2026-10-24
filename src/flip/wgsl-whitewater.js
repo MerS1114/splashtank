@@ -159,8 +159,8 @@ fn sprayEmit(@builtin(global_invocation_id) g: vec3<u32>) {
     var kind = select(0.0, 1.0, mist);
     if (under) { nv = v + dir * spd * 0.05; life = P.wwFoamLife * (0.6 + 0.8 * hash1(hh + 5u)); kind = 3.0; }
     if (onTop) { nv = vec3<f32>(v.x * 0.5, 0.0, v.z * 0.5) + vec3<f32>(dir.x, 0.0, dir.z) * spd * 0.15; life = P.wwFoamLife * (0.6 + 0.8 * hash1(hh + 5u)); kind = 2.0; }
-    let slot = atomicAdd(&sctl[0], 1u) % P.smax;
-    if (sPos[slot].w > 0.0) { continue; }   // never replace a living point: when the pool is full, new whitewater waits for room
+    let slot = wwAlloc(); if (slot >= P.smax) { break; }   // the pool is full: new whitewater waits for room
+    if (sPos[slot].w > 0.0) { continue; }   // never replace a living point
     sPos[slot] = vec4<f32>(q.xyz + nv * P.dt + dir * P.h * 0.3 * hash1(hh + 6u), life);
     sVel[slot] = vec4<f32>(nv, kind);
   }
@@ -190,7 +190,7 @@ fn spinEmit(@builtin(global_invocation_id) g: vec3<u32>) {
     let hh = h0 ^ ((m + 1u) * 0x9E3779B9u);
     let z = hash1(hh + 1u) * 2.0 - 1.0; let a = hash1(hh + 2u) * 6.2831853; let s = sqrt(max(0.0, 1.0 - z * z));
     let dir = vec3<f32>(s * cos(a), s * sin(a), z);
-    let slot = atomicAdd(&sctl[0], 1u) % P.smax;
+    let slot = wwAlloc(); if (slot >= P.smax) { break; }
     if (sPos[slot].w > 0.0) { continue; }   // never replace a living point
     sPos[slot] = vec4<f32>(p + v * P.dt + dir * h * 0.4 * hash1(hh + 6u), P.wwFoamLife * (0.6 + 0.8 * hash1(hh + 5u)));
     sVel[slot] = vec4<f32>(v + dir * spd * 0.05, 3.0);
@@ -228,8 +228,8 @@ fn sprayStep(@builtin(global_invocation_id) g: vec3<u32>) {
     let sp2 = length(v) * P.vs / max(P.sprMin, 0.1);
     let pr = P.wwTrail * P.sprRate * P.mistFrac * smoothstep(1.5, 5.0, sp2) * P.dt;
     if (hash1(h0 + 31u) < pr) {
-      let slot = atomicAdd(&sctl[0], 1u) % P.smax;
-      if (slot != j && sPos[slot].w <= 0.0) {
+      let slot = atomicAdd(&sctl[0], 1u);   // a fresh slot: the free list is being filled in this same dispatch
+      if (slot < P.smax && sPos[slot].w <= 0.0) {
         sPos[slot] = vec4<f32>(sp.xyz, P.sprLife * 1.6 * (0.6 + 0.8 * hash1(h0 + 32u)));
         sVel[slot] = vec4<f32>(v * (0.2 + 0.2 * hash1(h0 + 33u)), 1.0);
       }
@@ -263,6 +263,18 @@ fn sprayStep(@builtin(global_invocation_id) g: vec3<u32>) {
   else if (P.ncols > 0u && colAt(np) >= 0) { life = 0.0; }
   else if (P.ocean != 0u && kind >= 2u && layerW(np) > 0.6) { life = 0.0; }
   sPos[j] = vec4<f32>(np, life); sVel[j] = vec4<f32>(v, f32(kind) + 0.4 * tk / WWHOLD);
+  if (life <= 0.0) { let f = atomicAdd(&sctl[3], 1u); if (f < P.smax) { atomicStore(&sctl[WWFREE + f], j); } }   // its slot goes on the free list
+}
+// Whitewater slots: sctl[0] is how many have ever been handed out (the kernels work over just those), sctl[3] how many dead slots wait on
+// the free list (sctl[WWFREE...]). New points take a dead slot first, so the slots in use stay about as many as are alive at the busiest
+// moment instead of growing to the whole pool. Pushes happen only in sprayStep and pops only in later dispatches, so they never overlap;
+// popping an empty list wraps the count below zero for a moment, and every such pop puts its one back.
+const WWFREE: u32 = 16u;
+fn wwAlloc() -> u32 {
+  let f = atomicSub(&sctl[3], 1u);
+  if (f > 0u && f <= P.smax) { return atomicLoad(&sctl[WWFREE + f - 1u]); }
+  atomicAdd(&sctl[3], 1u);
+  return atomicAdd(&sctl[0], 1u);
 }
 const WWHOLD: f32 = 0.2;
 // packed for drawing: top bit marks whitewater, the next two bits the kind (00 spray, 10 mist, 01 foam, 11 bubble), 8 bits of speed in quarter
@@ -278,7 +290,7 @@ fn packSpray(v: vec3<f32>, kind: u32, lifeFrac: f32) -> u32 {
   let u = u32(clamp(round((p.x * 0.5 + 0.5) * 1023.0), 0.0, 1023.0)); let w = u32(clamp(round((p.y * 0.5 + 0.5) * 1023.0), 0.0, 1023.0));
   return code | (w << 10u) | u;
 }
-// whitewater slots are handed out in order (a ring), so until the ring wraps only the first sctl[0] can be alive: work over just those
+// only the first sctl[0] whitewater slots have ever been handed out (wwAlloc): work over just those
 @compute @workgroup_size(1)
 fn wwArgs() { split((min(atomicLoad(&sctl[0]), P.smax) + 255u) / 256u, 28u); }
 // an even sample of the whitewater slots for the live view, written after the water points
@@ -359,8 +371,7 @@ fn dripStep(@builtin(global_invocation_id) g: vec3<u32>) {
   let rate = P.dripRate * wetness * wetness * (0.15 + 0.85 * down);
   let h0 = s * 747796405u + P.seed * 2891336453u + 17u;
   if (hash1(h0) >= rate * P.dt) { return; }
-  let slot = atomicAdd(&sctl[0], 1u) % P.smax;
-  if (sPos[slot].w > 0.0) { return; }
+  let slot = wwAlloc(); if (slot >= P.smax || sPos[slot].w > 0.0) { return; }
   sPos[slot] = vec4<f32>(probe, P.sprLife * 2.0);
   sVel[slot] = vec4<f32>(colSurfVel(k, wp) + wn * P.h * 2.0 * hash1(h0 + 1u), 0.0);
 }

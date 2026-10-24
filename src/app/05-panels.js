@@ -289,6 +289,7 @@
     if (flip) {
       const su = sub(gs, 'speedups', 'Speed-ups', false);
       addCheck(su, 'c-sort', 'Sort particles', S.sortP, 'Reorders particles by position every 16 steps so neighbours sit together in memory. Same result. Clearly faster with a million or more points; about even on small scenes. Costs 32 bytes per point of GPU memory.', (on) => { S.sortP = on; if (sim && sim.opt) sim.opt.sort = on; }, dv('sortP'));
+      addCheck(su, 'c-p2gwin', 'Grouped transfer', S.p2gWin, 'Particles add their velocity to the grid in workgroup memory first, then each grid face once, instead of every particle adding to the grid directly. Exactly the same result. Usually faster on real GPUs when particles are sorted; the Solver benchmark compares both (row G) on this computer.', (on) => { S.p2gWin = on; if (sim && sim.opt) sim.opt.p2gWin = on; }, dv('p2gWin'));
     }
     if (searching) filterPanel($('#psearch').value);
   }
@@ -300,6 +301,12 @@
   addSlider(gd, { id: 'd-foam', label: 'White water', min: 0, max: 1, step: 0.05, value: S.foam, def: dv('foam'), fmt: (v) => v === 0 ? 'off' : v.toFixed(2), tip: 'How strongly churned water is drawn white.', onInput: (v) => { S.foam = v; pmat.uniforms.uFoam.value = v; } });
   addCheck(gd, 'c-gizmo', 'Transform gizmo', S.gizmo, 'Arrows move along an axis, rings rotate, small cubes scale, the centre ball moves freely. Hold V while moving to snap to points.', (on) => { setTool(on ? 'transform' : 'select'); $('#c-gizmo').blur(); }, false);
   addCheck(gd, 'c-literun', 'Lighter while running', S.liteRun, 'While the live sim runs, draws each point once, without the look-only extra points, so the GPU has more time for the sim. The full look comes back when it stops, and in bakes. Drawing only.', (on) => { S.liteRun = on; }, true);
+  {   // water as points or as a smooth surface (renderView in 02-viewport.js)
+    const r = document.createElement('div'); r.className = 'row plain';
+    r.innerHTML = '<label data-tip="Points draws every water point. Surface melts them into one smooth, shaded surface with sky reflections, like a mesh but made on the fly each frame (whitewater stays as points). Drawing only: the simulation is the same.">Draw water</label><div class="seg" id="seg-surf" role="group" aria-label="Draw water"><button type="button" data-v="0">Points</button><button type="button" data-v="1">Surface</button></div>';
+    gd.appendChild(r); setSeg($('#seg-surf'), S.surface ? '1' : '0'); seg('#seg-surf', (v) => { S.surface = v === '1'; r.classList.toggle('nd', S.surface); lastGen = -1; });
+    addSlider(gd, { id: 'd-surfsm', label: 'Surface smoothing', min: 0.3, max: 3, step: 0.05, value: S.surfSmooth, def: dv('surfSmooth'), fmt: (v) => v.toFixed(2) + '×', tip: 'How far the surface is smoothed, compared with the point size. More melts small bumps and drops into the surface; less keeps detail. Only with Draw water: Surface.', onInput: (v) => { S.surfSmooth = v; } });
+  }
   {   // how a bake plays back: Full always draws everything; Smooth drops look-only points while frames come late; Fast always drops them
     const r = document.createElement('div'); r.className = 'row plain';
     r.innerHTML = '<label data-tip="Full draws everything while a bake plays. Smooth (auto) keeps playback at the frame rate: when frames come late it draws fewer look-only points, and the full look comes back when it is paused or keeps up again. Fast always draws each point once while a bake plays. Drawing only.">Bake playback</label><div class="seg" id="seg-pbq" role="group" aria-label="Bake playback"><button type="button" data-v="full">Full</button><button type="button" data-v="smooth">Smooth (auto)</button><button type="button" data-v="fast">Fast</button></div>';

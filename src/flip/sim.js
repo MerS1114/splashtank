@@ -22,7 +22,7 @@ const FLIP_L = {
   tileReset: [12], tileNeedClear: [0, 17], tileMark: [0, 1, 17], tileMarkPhi: [0, 7, 12, 17, 18, 19], tileMarkFill: [0, 10, 11, 17], phiInitAll: [0, 7, 10, 11, 12, 18, 19, 31], tileFree: [0, 12, 16, 17, 20, 21], argsNew: [12, 14], tileAlloc: [0, 12, 16, 19, 20, 21], tileFix: [0, 12],
   initNew: [0, 7, 8, 10, 11, 12, 21, 31], slotListBuild: [0, 12, 16, 18], argsSlots: [12, 14], growFree: [12, 20, 25],
   sortClear: [22], sortHist: [0, 1, 22], sortScan: [22], sortScatter: [0, 1, 2, 22, 23, 24, 26, 27], sortCopy: [0, 1, 2, 23, 24, 26, 27], unsort: [0, 1, 23, 26],
-  clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], spinEmit: [0, 1, 2, 3, 6, 16, 28, 29, 30], wwAdvect: [0, 1, 2], sprayStep: [0, 10, 11, 28, 29, 30, 32, 33], sprayDisp: [0, 15, 28, 29, 30], dispBegin: [30], packDisp: [1, 12, 15, 30, 37, 38], wwSample: [0, 3, 5, 6, 7, 16, 28, 29, 33], wwArgs: [0, 14, 30],
+  clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], p2gWin: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], spinEmit: [0, 1, 2, 3, 6, 16, 28, 29, 30], wwAdvect: [0, 1, 2], sprayStep: [0, 10, 11, 28, 29, 30, 32, 33], sprayDisp: [0, 15, 28, 29, 30], dispBegin: [30], packDisp: [1, 12, 15, 30, 37, 38], wwSample: [0, 3, 5, 6, 7, 16, 28, 29, 33], wwArgs: [0, 14, 30],
   airClear: [0, 34], airSplatW: [0, 1, 2, 6, 16, 34], airSplatS: [0, 28, 29, 34], airUpdate: [0, 10, 11, 32, 34, 35], airCopy: [0, 32, 35], dripStep: [0, 6, 7, 10, 16, 28, 29, 30, 36],
   normFaces: [0, 3, 5, 7, 10, 12, 16, 18, 19], divergence: [0, 3, 6, 7, 9, 12, 16, 18, 19],
   listClear: [12], buildList: [0, 7, 12, 13, 18, 19], listArgs: [0, 12, 14], rbRed: [0, 7, 8, 9, 12, 13, 16, 19], rbBlack: [0, 7, 8, 9, 12, 13, 16, 19],
@@ -299,7 +299,7 @@ class FlipSim {
       ...(this.opt.sort ? [sortStage] : []),
       tiles,
       { name: 'clear', fn: (ps) => indirect(ps, 'clearSlots', 80) },
-      { name: 'p2g', fn: (ps) => dispatch(ps, 'p2g', N) },
+      { name: 'p2g', fn: (ps) => dispatch(ps, this.opt.p2gWin ? 'p2gWin' : 'p2g', N) },
       ...(nb ? [{ name: 'narrow band', fn: (ps) => {
         indirect(ps, 'nbPhi', 64); indirect(ps, 'nbJacA', 64); indirect(ps, 'nbJacB', 64); indirect(ps, 'nbJacA', 64);
       } }] : []),
@@ -380,6 +380,7 @@ class FlipSim {
     [this.bSPos, this.bSVel, this.bSAux].forEach((x) => x.destroy());
     this.sprayCap = n; this.sprDispMax = Math.min(n, 200000);
     this.bSPos = this.mk(Math.max(n, 1) * 16); this.bSVel = this.mk(Math.max(n, 1) * 16); this.bSAux = this.mk(Math.max(n, 1) * 16);
+    this.bSctl.destroy(); this.bSctl = this.mk((16 + n) * 4);   // counters, then the free list of dead whitewater slots (wwAlloc)
     if (this.sstage) { this.sstage.destroy(); this.sstage = null; }
     this.dispAlloc();
   }

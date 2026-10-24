@@ -94,10 +94,10 @@
   const TYPE_COL = { water: [0.16, 0.46, 0.96], churn: [0.55, 0.85, 0.97], foam: [0.98, 0.98, 0.98], spray: [1.0, 0.6, 0.16], mist: [0.86, 0.56, 1.0], deep: [0.07, 0.2, 0.52], bubble: [0.25, 0.85, 0.6] };
   const v3 = (c) => 'vec3(' + c.map((x) => x.toFixed(3)).join(',') + ')';
   const U = { uSize: { value: 0.1 }, uScale: { value: 600 }, uMax: { value: S.vmax }, uFoam: { value: S.foam }, uOrtho: { value: 0 }, uMode: { value: 0 },
-    uD: { value: 0.04 }, uCR: { value: 2 }, uKw: { value: 0 }, uKs: { value: 4 }, uStreak: { value: 0.02 }, uVs: { value: 1 }, uCull: { value: 2 } };
+    uD: { value: 0.04 }, uCR: { value: 2 }, uKw: { value: 0 }, uKs: { value: 4 }, uStreak: { value: 0.02 }, uVs: { value: 1 }, uCull: { value: 2 }, uSzK: { value: 1 } };
   const tex = () => ({ value: null }), num = (v) => ({ value: v || 0 }), vec = () => ({ value: new THREE.Vector3() });
   const VHEAD = 'uniform float uSize; uniform float uScale; uniform float uFoam; uniform float uOrtho; uniform float uD; uniform float uCR; uniform float uKw; uniform float uKs; uniform float uStreak; uniform float uK1; uniform float uVs; uniform float uCull;' +
-    ' varying float vS; varying float vF; varying float vK; varying float vL;' +
+    ' varying float vS; varying float vF; varying float vK; varying float vL; varying vec3 vMV; varying float vRad; uniform float uSzK;' +
     ' uint hsh(uint x) { x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u; return x; }' +
     ' vec3 ball(uint s) { vec3 r = vec3(float(hsh(s) & 65535u), float(hsh(s + 7919u) & 65535u), float(hsh(s + 104729u) & 65535u)) / 32767.5 - 1.0; float l = length(r); return l > 1.0 ? r / l : r; }' +
     ' void hide() { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; vK = 0.0; vS = 0.0; vF = 0.0; vL = 0.0; }' +
@@ -108,7 +108,8 @@
     '  return vec3(float(v & mx) / float(mx), float((v >> bx) & my) / float(my), float((v >> (bx + by)) & mz) / float(mz)) * 65535.0; }' +
     // look-only copies smaller than uCull pixels on screen add nothing a viewer can see: far away they are left out
     ' float pxAt(vec3 p, float sz) { vec4 mv = modelViewMatrix * vec4(p, 1.0); return (uOrtho > 0.0 ? uSize * uOrtho : uSize * uScale / max(-mv.z, 1e-4)) * sz; }' +
-    ' void place(vec3 p, float sz, float minPx) { vec4 mv = modelViewMatrix * vec4(p, 1.0); gl_Position = projectionMatrix * mv; gl_PointSize = max((uOrtho > 0.0 ? uSize * uOrtho : uSize * uScale / (-mv.z)) * sz, minPx); }';
+    // vMV and vRad (the point's centre in view space and its radius) are for the surface's depth pass; uSzK enlarges the points there
+    ' void place(vec3 p, float sz, float minPx) { vec4 mv = modelViewMatrix * vec4(p, 1.0); gl_Position = projectionMatrix * mv; sz *= uSzK; vMV = mv.xyz; vRad = 0.5 * uSize * sz; gl_PointSize = max((uOrtho > 0.0 ? uSize * uOrtho : uSize * uScale / (-mv.z)) * sz, minPx); }';
   // water: blended between frame A and frame B (the same particle has the same number in both). A particle only in B shows at once;
   // one only in A shows until halfway.
   const VW = VHEAD + ' uniform highp usampler2D tPA; uniform highp usampler2D tSA; uniform highp usampler2D tFA; uniform highp usampler2D tPB; uniform highp usampler2D tSB; uniform highp usampler2D tFB;' +
@@ -189,9 +190,9 @@
     // a bake playing: Fast always draws the lite look; Smooth steps down (S.pbLvl, set by the frame loop) while frames come late
     const bakePlay = viewMode() === 'cache' && S.cplay, lvl = bakePlay ? (S.pbQ === 'fast' ? 2 : S.pbQ === 'smooth' ? S.pbLvl | 0 : 0) : 0;
     const lite = (S.liteRun && viewMode() === 'live' && S.playing && !S.lcPlay) || lvl >= 2;
-    const dW = lite ? 0 : lvl === 1 ? (S.detail | 0) >> 1 : S.detail | 0, dS = lite ? Math.min(S.sprDetail | 0, 1) : lvl === 1 ? (S.sprDetail | 0) >> 1 : S.sprDetail | 0;
+    const dW = lite || S.surface ? 0 : lvl === 1 ? (S.detail | 0) >> 1 : S.detail | 0, dS = lite ? Math.min(S.sprDetail | 0, 1) : lvl === 1 ? (S.sprDetail | 0) >> 1 : S.sprDetail | 0;
     U.uCull.value = lvl >= 3 ? 4 : 2; uw.uHide.value = S.hideIn ? 1 : 0;
-    const kW = 1 + Math.min(dW, LKMAX - 1), kS = 1 + Math.min(dS, LKMAX - 1), kD = lite ? 1 : 5;
+    const kW = 1 + Math.min(dW, LKMAX - 1), kS = 1 + Math.min(dS, LKMAX - 1), kD = lite || S.surface ? 1 : 5;
     const vW = (w > 0 ? Math.max(A.nW, B.nW) : A.nW) * kW, vD = N.nD * kD, vS = N.nS * kS, need = Math.max(vW, vD, vS);
     if (dummyPos.count < need) { dummyPos = new THREE.BufferAttribute(new Uint8Array(Math.ceil(need * 1.25)), 1); [geoW, geoD, geoS].forEach((g) => g.setAttribute('position', dummyPos)); }
     U.uKw.value = dW; U.uKs.value = Math.min(dS, LKMAX - 1); U.uStreak.value = S.streak;
@@ -208,6 +209,81 @@
   SLOTS.forEach((sl) => slotAlloc(sl, null));
   const points = new THREE.Group(), pointsW = new THREE.Points(geoW, matW), pointsD = new THREE.Points(geoD, matD), pointsS = new THREE.Points(geoS, matS);
   [pointsW, pointsD, pointsS].forEach((q) => { q.frustumCulled = false; points.add(q); }); scene.add(points);
+
+  // ---------- water drawn as a surface (Display > Draw water: Surface) ----------
+  // Screen-space fluid surface: the water points are drawn as spheres into a depth target (the nearest wins), the depth is smoothed
+  // with a bilateral filter so neighbouring spheres melt into one surface but separate sheets stay apart, then one full-screen pass shades
+  // it (normals from the smoothed depth, sky reflection by Fresnel, a highlight, the speed colours) and writes its depth, so objects and
+  // whitewater (still points, drawn after it) sit in it correctly.
+  const fsVert = 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }';
+  const SPH = 'uniform mat4 projectionMatrix; varying float vS; varying float vF; varying float vK; varying float vL; varying vec3 vMV; varying float vRad;' +
+    'void main() { vec2 c = gl_PointCoord * 2.0 - 1.0; float r2 = dot(c, c); if (r2 > 1.0) discard; vec3 e = vMV + vec3(c.x, -c.y, sqrt(1.0 - r2)) * vRad;' +
+    ' vec4 cl = projectionMatrix * vec4(e, 1.0); gl_FragDepthEXT = cl.z / cl.w * 0.5 + 0.5; gl_FragColor = vec4(-e.z, vS, vF, vRad); }';
+  const ext = { fragDepth: true };
+  const matWS = new THREE.ShaderMaterial({ uniforms: matW.uniforms, vertexShader: VW, fragmentShader: SPH, extensions: ext });
+  const matDS = new THREE.ShaderMaterial({ uniforms: matD.uniforms, vertexShader: VD, fragmentShader: SPH, extensions: ext });
+  const sScene = new THREE.Scene(), sGroup = new THREE.Group(), sW = new THREE.Points(geoW, matWS), sD = new THREE.Points(geoD, matDS);
+  [sW, sD].forEach((q) => { q.frustumCulled = false; sGroup.add(q); }); sScene.add(sGroup);
+  // separable bilateral blur of the depth: the radius follows the point size on screen; samples much nearer or further are left out
+  const blurMat = new THREE.ShaderMaterial({ uniforms: { tD: { value: null }, uDir: { value: new THREE.Vector2() }, uScale: U.uScale, uOrtho: U.uOrtho, uK: { value: 1 } }, vertexShader: fsVert, depthTest: false, depthWrite: false,
+    fragmentShader: 'uniform sampler2D tD; uniform vec2 uDir; uniform float uScale; uniform float uOrtho; uniform float uK; varying vec2 vUv;' +
+      'void main() { vec4 c = texture2D(tD, vUv); if (c.r <= 0.0) { gl_FragColor = c; return; }' +
+      ' float rpx = clamp((uOrtho > 0.0 ? c.a * uOrtho : c.a * uScale / c.r) * 4.0 * uK, 1.0, 28.0); float st = max(1.0, rpx / 10.0); float sr = c.a * 4.0;' +
+      ' float sum = 0.0; float ws = 0.0; for (int i = -10; i <= 10; i++) { float x = float(i) * st; vec4 q = texture2D(tD, vUv + uDir * x); if (q.r <= 0.0) continue;' +
+      '  float dz = (q.r - c.r) / sr; float w = exp(-x * x / (2.0 * rpx * rpx * 0.25)) * exp(-dz * dz); sum += q.r * w; ws += w; }' +
+      ' gl_FragColor = vec4(sum / max(ws, 1e-6), c.gba); }' });
+  const fsScene = new THREE.Scene(), fsCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1), fsQuad = new THREE.Mesh(new THREE.PlaneBufferGeometry(2, 2), blurMat);
+  fsQuad.frustumCulled = false; fsScene.add(fsQuad);
+  const compMat = new THREE.ShaderMaterial({ uniforms: { uDbg: { value: 0 }, tD: { value: null }, uTex: { value: new THREE.Vector2() }, uProj: { value: new THREE.Matrix4() }, uPersp: { value: 1 }, uMax: U.uMax, uFoam: U.uFoam, uMode: U.uMode, uVs: U.uVs },
+    vertexShader: fsVert, extensions: ext,
+    fragmentShader: 'uniform float uDbg; uniform sampler2D tD; uniform vec2 uTex; uniform mat4 uProj; uniform float uPersp; uniform float uMax; uniform float uFoam; uniform float uMode; varying vec2 vUv;' +
+      'vec3 ramp(float t){ vec3 a = vec3(0.03,0.12,0.95); vec3 b = vec3(0.0,0.82,0.98); vec3 c = vec3(1.0); return t < 0.5 ? mix(a,b,t*2.0) : mix(b,c,(t-0.5)*2.0); }' +
+      'vec3 eyeAt(vec2 uv) { float d = texture2D(tD, uv).r; vec2 n = uv * 2.0 - 1.0; if (d <= 0.0) return vec3(0.0, 0.0, 1.0);' +
+      ' if (uPersp > 0.5) return vec3((n.x + uProj[2][0]) * d / uProj[0][0], (n.y + uProj[2][1]) * d / uProj[1][1], -d);' +
+      ' return vec3((n.x - uProj[3][0]) / uProj[0][0], (n.y - uProj[3][1]) / uProj[1][1], -d); }' +
+      'vec3 side(vec3 e, vec3 a, vec3 b) { bool ga = a.z <= 0.0; bool gb = b.z <= 0.0; if (ga && (!gb || abs(a.z - e.z) < abs(e.z - b.z))) return a - e; if (gb) return e - b; return vec3(0.0); }' +
+      'void main() { vec4 t = texture2D(tD, vUv); if (t.r <= 0.0) discard; vec3 e = eyeAt(vUv);' +
+      // normals over two pixels each way: one-pixel differences magnify what little noise the blur leaves
+      ' vec3 dx = side(e, eyeAt(vUv + vec2(2.0 * uTex.x, 0.0)), eyeAt(vUv - vec2(2.0 * uTex.x, 0.0))); vec3 dy = side(e, eyeAt(vUv + vec2(0.0, 2.0 * uTex.y)), eyeAt(vUv - vec2(0.0, 2.0 * uTex.y)));' +
+      ' vec3 n = normalize(cross(dx, dy)); if (dot(dx, dx) * dot(dy, dy) == 0.0 || any(isnan(n))) n = vec3(0.0, 0.0, 1.0);' +
+      ' vec3 v = uPersp > 0.5 ? normalize(-e) : vec3(0.0, 0.0, 1.0); if (dot(n, v) < 0.0) n = -n;' +
+      ' float foam = clamp(t.b, 0.0, 1.0); vec3 base = uMode > 0.5 ? (foam > 0.3 ? vec3(0.55,0.85,0.97) : vec3(0.16,0.46,0.96)) : mix(ramp(clamp(t.g / uMax, 0.0, 1.0)), vec3(0.97,0.99,1.0), foam);' +
+      ' vec3 L = normalize(vec3(0.35, 0.75, 0.55)); float dif = 0.45 + 0.55 * max(dot(n, L), 0.0); float fr = 0.03 + 0.97 * pow(1.0 - max(dot(n, v), 0.0), 5.0);' +
+      ' float sp = pow(max(dot(n, normalize(L + v)), 0.0), 90.0); vec3 sky = vec3(0.78, 0.86, 0.95);' +
+      ' vec3 col = mix(base * dif, sky, fr * 0.7) + sp * 0.55 * (1.0 - foam); gl_FragColor = vec4(col, 1.0);' +
+      // uDbg (tests): 1 shows the smoothed depth as bands, 2 the normals
+      ' if (uDbg > 0.5) gl_FragColor = vec4(uDbg > 1.5 ? n * 0.5 + 0.5 : vec3(fract(t.r * 4.0)), 1.0);' +
+      ' vec4 cl = uProj * vec4(e, 1.0); gl_FragDepthEXT = cl.z / cl.w * 0.5 + 0.5; }' });
+  const surfQuad = new THREE.Mesh(new THREE.PlaneBufferGeometry(2, 2), compMat); surfQuad.frustumCulled = false; surfQuad.visible = false; surfQuad.renderOrder = -1; scene.add(surfQuad);
+  const surfType = renderer.extensions.get('EXT_color_buffer_float') ? THREE.FloatType : THREE.HalfFloatType, surfSz = new THREE.Vector2(), clr = new THREE.Color();
+  let surfA = null, surfB = null;
+  function surfTargets(w, h) {
+    if (surfA && surfA.width === w && surfA.height === h) return;
+    [surfA, surfB].forEach((r) => r && r.dispose());
+    const mk = () => { const r = new THREE.WebGLRenderTarget(w, h, { type: surfType, format: THREE.RGBAFormat, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, depthBuffer: true, stencilBuffer: false }); r.texture.generateMipmaps = false; return r; };
+    surfA = mk(); surfB = mk();
+  }
+  // draws the view: water as points, or as a surface when Display > Draw water is Surface
+  function renderView(cam) {
+    const on = S.surface && points.visible && (geoW.drawRange.count > 0 || geoD.drawRange.count > 0);
+    if (!on) { renderer.render(scene, cam); return; }
+    renderer.getDrawingBufferSize(surfSz); surfTargets(surfSz.x, surfSz.y);
+    renderer.getClearColor(clr); const ca = renderer.getClearAlpha();
+    sGroup.position.copy(points.position); sGroup.updateMatrixWorld();
+    U.uSzK.value = 1.25;   // a little larger than drawn as points, so neighbours overlap into one surface
+    renderer.setClearColor(0x000000, 0); renderer.setRenderTarget(surfA); renderer.clear(); renderer.render(sScene, cam);
+    U.uSzK.value = 1;
+    blurMat.uniforms.uK.value = S.surfSmooth;
+    for (let it = 0; it < 2; it++) {
+      blurMat.uniforms.tD.value = surfA.texture; blurMat.uniforms.uDir.value.set(1 / surfSz.x, 0); renderer.setRenderTarget(surfB); renderer.render(fsScene, fsCam);
+      blurMat.uniforms.tD.value = surfB.texture; blurMat.uniforms.uDir.value.set(0, 1 / surfSz.y); renderer.setRenderTarget(surfA); renderer.render(fsScene, fsCam);
+    }
+    renderer.setRenderTarget(null); renderer.setClearColor(clr, ca);
+    const cu = compMat.uniforms; cu.tD.value = surfA.texture; cu.uTex.value.set(1 / surfSz.x, 1 / surfSz.y); cu.uProj.value.copy(cam.projectionMatrix); cu.uPersp.value = cam.isPerspectiveCamera ? 1 : 0;
+    pointsW.visible = false; pointsD.visible = false; surfQuad.visible = true;
+    renderer.render(scene, cam);
+    pointsW.visible = true; pointsD.visible = true; surfQuad.visible = false;
+  }
 
   // the ocean around the box: a grid of look-only points on the wave surface, worked out on the GPU from the same waves the solver uses.
   // It covers the boundary at the sides (which holds no particles) and runs out past the box; the inside of the box is the simulated water.

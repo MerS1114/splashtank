@@ -13,6 +13,72 @@ fn clearSlots(@builtin(global_invocation_id) g: vec3<u32>) {
   for (var a = 0u; a < 3u; a++) { atomicStore(&accV[c * 3u + a], 0); atomicStore(&accW[c * 3u + a], 0); }
   if (s == 0u) { rhs[c] = 8.0; }   // the spare slot reads as air in the narrow band depth passes
 }
+// Particle to grid, grouped (Speed-ups > Grouped transfer; p2g below is the plain one). Sorted particles (Speed-ups > Sort particles) lie close together, so the 256 of a workgroup usually fall within a few
+// cells: they first add into a 9x9x9 window of faces in workgroup memory, and each touched face is then added to the grid once, instead
+// of 48 global atomic adds per particle fighting over the same faces. The sums are integers, so the result is exactly the same.
+// A workgroup whose particles spread wider (unsorted, or at the edge of a sort run) adds straight to the grid as before.
+var<workgroup> p2gAcc: array<atomic<i32>, 1458>;   // 729 faces of one axis: velocity, weight
+var<workgroup> p2gLo: array<atomic<i32>, 3>;
+var<workgroup> p2gHi: array<atomic<i32>, 3>;
+var<workgroup> p2gOk: u32;
+var<workgroup> p2gO: vec3<i32>;
+fn p2gFace(axis: u32, c: vec3<i32>, vc: f32, w: f32) {
+  let idx = faceIndex(axis, c.x, c.y, c.z);
+  atomicAdd(&accV[idx], i32(round(w * vc * P.scale)));
+  atomicAdd(&accW[idx], i32(round(w * P.scale)));
+}
+@compute @workgroup_size(256)
+fn p2gWin(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+  let i = gid1(g);
+  var ok = i < P.n; var p = vec3<f32>(0.0); var v = vec3<f32>(0.0); var cc = vec3<i32>(0);
+  if (ok) { p = pos[i].xyz; ok = pos[i].y >= DEADY; }
+  if (ok) { cc = particleCell(p); ok = hasStorage(cc); }   // no storage only when the block pool is full; it grows on the next steps
+  if (ok) { v = vel[i].xyz; }
+  if (lid == 0u) { for (var k = 0u; k < 3u; k++) { atomicStore(&p2gLo[k], 1 << 30); atomicStore(&p2gHi[k], -(1 << 30)); } }
+  workgroupBarrier();
+  if (ok) { for (var k = 0u; k < 3u; k++) { atomicMin(&p2gLo[k], cc[k]); atomicMax(&p2gHi[k], cc[k]); } }
+  workgroupBarrier();
+  if (lid == 0u) {
+    let lo = vec3<i32>(atomicLoad(&p2gLo[0]), atomicLoad(&p2gLo[1]), atomicLoad(&p2gLo[2])); let hi = vec3<i32>(atomicLoad(&p2gHi[0]), atomicLoad(&p2gHi[1]), atomicLoad(&p2gHi[2]));
+    p2gOk = select(0u, 1u, all(hi - lo <= vec3<i32>(6)) && all(hi >= lo)); p2gO = lo - vec3<i32>(1);
+  }
+  let win = workgroupUniformLoad(&p2gOk);
+  let o = p2gO;
+  for (var axis = 0u; axis < 3u; axis++) {
+    if (win == 1u) {
+      for (var e = lid; e < 1458u; e += 256u) { atomicStore(&p2gAcc[e], 0); }
+      workgroupBarrier();
+    }
+    if (ok) {
+      var q = (p - vec3<f32>(P.x0, P.y0, P.z0)) * P.ih;
+      if (axis == 0u) { q.y -= 0.5; q.z -= 0.5; } else if (axis == 1u) { q.x -= 0.5; q.z -= 0.5; } else { q.x -= 0.5; q.y -= 0.5; }
+      let f0 = floor(q); let fr = q - f0; let i0 = vec3<i32>(f0);
+      var vc = v.x; if (axis == 1u) { vc = v.y; } else if (axis == 2u) { vc = v.z; }
+      for (var c = 0u; c < 8u; c++) {
+        let dx = i32(c & 1u); let dy = i32((c >> 1u) & 1u); let dz = i32((c >> 2u) & 1u);
+        let w = select(1.0 - fr.x, fr.x, dx == 1) * select(1.0 - fr.y, fr.y, dy == 1) * select(1.0 - fr.z, fr.z, dz == 1);
+        if (w <= 0.0) { continue; }
+        let gc = i0 + vec3<i32>(dx, dy, dz); let l = gc - o;
+        if (win == 1u && all(l >= vec3<i32>(0)) && all(l < vec3<i32>(9))) {
+          let e = u32(l.x + 9 * (l.y + 9 * l.z)) * 2u;
+          atomicAdd(&p2gAcc[e], i32(round(w * vc * P.scale))); atomicAdd(&p2gAcc[e + 1u], i32(round(w * P.scale)));
+        } else { p2gFace(axis, gc, vc, w); }
+      }
+    }
+    if (win == 1u) {
+      workgroupBarrier();
+      for (var e = lid; e < 729u; e += 256u) {
+        let sv = atomicLoad(&p2gAcc[e * 2u]); let sw = atomicLoad(&p2gAcc[e * 2u + 1u]);
+        if (sv == 0 && sw == 0) { continue; }
+        let gc = o + vec3<i32>(i32(e % 9u), i32((e / 9u) % 9u), i32(e / 81u));
+        let idx = faceIndex(axis, gc.x, gc.y, gc.z);
+        atomicAdd(&accV[idx], sv); atomicAdd(&accW[idx], sw);
+      }
+      workgroupBarrier();
+    }
+  }
+  if (ok) { atomicMax(&ctl[6], bitcast<u32>(length(v))); atomicAdd(&cnt[cellIdx(cc.x, cc.y, cc.z)], 1); }
+}
 @compute @workgroup_size(256)
 fn p2g(@builtin(global_invocation_id) g: vec3<u32>) {
   let i = gid1(g); if (i >= P.n) { return; }

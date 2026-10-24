@@ -65,6 +65,7 @@
       };
       await measure('A. reference: everything on (particles sorted every 16th step)', {});
       await trio('S. particles not sorted', { sort: false });
+      await trio('G. grouped transfer ' + (S.p2gWin ? 'off' : 'on') + ' (p2g adds in workgroup memory first; Speed-ups)', { p2gWin: !S.p2gWin });
       const pi = S.iters > 20 ? 20 : 40;
       await trio('P. ' + pi + ' pressure iterations instead of ' + S.iters, { iters: pi });
       await trio('C. white water and air drag skipped (for comparison)', { noFoam: true });

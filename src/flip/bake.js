@@ -81,7 +81,7 @@ function bakeDiag(dst, n, b, vcap) {
 async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
   const sim = new FlipSim(gpu.dev, { d: desc.d, maxN: desc.maxN, size: desc.size, open: desc.open, ratio: desc.cellRatio });
   await sim.whenReady;   // the shared pipelines, compiled once per device
-  sim.recycle = false; sim.cap = desc.maxN; sim.opt.fastAir = !!desc.fastAir; sim.opt.sort = !!desc.sortP;
+  sim.recycle = false; sim.cap = desc.maxN; sim.opt.fastAir = !!desc.fastAir; sim.opt.sort = !!desc.sortP; sim.opt.p2gWin = !!desc.p2gWin;
   if (desc.spr && desc.sprayCap) sim.setSprayCap(desc.sprayCap);
   if (desc.nbLook) sim.setDeepLook(true);
   const runner = new SceneRunner(sim);

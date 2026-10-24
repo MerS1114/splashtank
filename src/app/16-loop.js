@@ -209,7 +209,7 @@
     // while the live sim plays, or a bake runs on the GPU (drawing shares it: three times the cost in the benchmark), redraw only when something changed
     const quiet = isGpu() && ((mode === 'live' && S.playing && !S.lcPlay && !fresh) || ((S.baking || S.wwPass) && !S.cplay));
     const draw = !noDraw && (!quiet || moved || t1 - lastInput < 400 || t1 - lastDraw > 500 || tf);
-    if (draw) { const tr = performance.now(); renderer.render(scene, camera); lastDraw = performance.now(); perf.render = lastDraw - tr; perf.draws = (perf.draws || 0) + 1; }
+    if (draw) { const tr = performance.now(); renderView(camera); lastDraw = performance.now(); perf.render = lastDraw - tr; perf.draws = (perf.draws || 0) + 1; }
     perf.frame = performance.now() - fs;
     if (frameHook && draw) frameHook(performance.now());
   }
