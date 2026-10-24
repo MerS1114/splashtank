@@ -28,21 +28,28 @@
   // [format, values per point, texels per point]. Positions are one-channel 16-bit, three texels per point (a texture 3 x TEXW wide):
   // three-channel textures have no native format on D3D (Chrome on Windows), so each upload of them was converted to four channels on the CPU.
   const TFMT = { p: [gl.R16UI, gl.RED_INTEGER, gl.UNSIGNED_SHORT, 3, 3], s: [gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE, 1, 1], f: [gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE, 1, 1], k: [gl.R32UI, gl.RED_INTEGER, gl.UNSIGNED_INT, 1, 1] };
-  function slotAlloc(sl, rows) {
-    rows = Math.max(16, rows); if (sl.gl && sl.rows >= rows) return;
-    rows = Math.min(Math.ceil(rows * 1.25 / 16) * 16, gl.getParameter(gl.MAX_TEXTURE_SIZE));
-    if (sl.gl) for (const k in sl.gl) gl.deleteTexture(sl.gl[k]);
-    sl.gl = {}; sl.T = sl.T || {};
+  // each texture of a slot sized to what it holds (rows of TEXW points: positions for all, speed for water and deep, white water for water,
+  // whitewater codes for whitewater only), grown with 25% to spare. False when the GPU is out of memory (the slot is then left empty).
+  const TBYTES = { p: 6, s: 1, f: 1, k: 4 };
+  function slotAlloc(sl, need) {
+    if (!sl.gl) { sl.gl = {}; sl.T = sl.T || {}; sl.rows = {}; }
     for (const k of ['p', 's', 'f', 'k']) {
+      const want = Math.max(16, (need && need[k]) || 0); if (sl.gl[k] && sl.rows[k] >= want) continue;
+      const rows = Math.min(Math.ceil(want * 1.25 / 16) * 16, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+      if (sl.gl[k]) { gl.deleteTexture(sl.gl[k]); sl.gl[k] = null; sl.rows[k] = 0; }
+      sl.key = null;
       const t = gl.createTexture(); renderer.state.bindTexture(gl.TEXTURE_2D, t);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.texStorage2D(gl.TEXTURE_2D, 1, TFMT[k][0], TEXW * TFMT[k][4], rows);
+      if (gl.getError() === gl.OUT_OF_MEMORY) { gl.deleteTexture(t); return false; }
       sl.gl[k] = t; if (!sl.T[k]) sl.T[k] = new THREE.Texture();
-      renderer.properties.get(sl.T[k]).__webglTexture = t;
+      renderer.properties.get(sl.T[k]).__webglTexture = t; sl.rows[k] = rows;
     }
-    sl.rows = rows; sl.key = null;
+    return true;
   }
+  function slotBytes(sl) { let b = 0; if (sl.gl) for (const k in TBYTES) if (sl.gl[k]) b += sl.rows[k] * TEXW * TBYTES[k]; return b; }
+  function slotFree(sl) { if (sl.gl) for (const k in sl.gl) if (sl.gl[k]) gl.deleteTexture(sl.gl[k]); sl.gl = null; sl.rows = {}; sl.key = null; sl.nW = sl.nD = sl.nS = 0; }
   // n values of a frame array into rows from row0: the whole rows, then the part of the last one
   function upTex(t, k, row0, data, n) {
     if (!n) return 0;
@@ -57,14 +64,15 @@
     const t0 = performance.now(), show = S.showSpray !== false;
     const nW = fr ? fr.n : 0, nD = fr && fr.dp ? fr.dp.n : 0, nS = fr && show && fr.sp ? fr.sp.n : 0;
     const rW = Math.ceil(nW / TEXW), rD = Math.ceil(nD / TEXW), rS = Math.ceil(nS / TEXW);
-    slotAlloc(sl, rW + rD + rS + 1);
+    if (!slotAlloc(sl, { p: rW + rD + rS, s: rW + rD, f: fr && fr.fm ? rW : 0, k: rS })) { perf.oom = (perf.oom || 0) + 1; return false; }
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     let by = 0;
     if (nW) { by += upTex(sl.gl.p, 'p', 0, fr.pos, nW) + upTex(sl.gl.s, 's', 0, fr.spd, nW); if (fr.fm) by += upTex(sl.gl.f, 'f', 0, fr.fm, nW); }
     if (nD) by += upTex(sl.gl.p, 'p', rW, fr.dp.pos, nD) + upTex(sl.gl.s, 's', rW, fr.dp.spd, nD);
-    if (nS) by += upTex(sl.gl.p, 'p', rW + rD, fr.sp.pos, nS) + upTex(sl.gl.k, 'k', rW + rD, fr.sp.pk, nS);
+    if (nS) by += upTex(sl.gl.p, 'p', rW + rD, fr.sp.pos, nS) + upTex(sl.gl.k, 'k', 0, fr.sp.pk, nS);   // whitewater codes from row 0 of their own texture
     Object.assign(sl, { nW, nD, nS, rowD: rW, rowS: rW + rD, fm: !!(fr && fr.fm), b: (fr && fr.b) || b || DEFB, alive: fr ? frameAlive(fr, show) : 0 });
     perf.up = performance.now() - t0; perf.upBytes = by; perf.upN++;
+    return true;
   }
   // three draws: water (blended between two frames), deep water and whitewater (from the nearer frame). The vertex count is points x copies;
   // the only vertex attribute is a dummy that three.js needs to know how many vertices to draw.
@@ -116,7 +124,7 @@
   // surface, fading with its life) and bubbles
   const VS = VHEAD + ' uniform highp usampler2D tP; uniform highp usampler2D tK; uniform float uBase; uniform float uN; uniform vec3 uB0; uniform vec3 uQ;' +
     ' void main() { int k1 = int(uK1 + 0.5); int bi = gl_VertexID / k1; float lk = float(gl_VertexID - bi * k1); if (bi >= int(uN + 0.5)) { hide(); return; }' +
-    '  int idx = int(uBase + 0.5) + bi; ivec2 tc = tcOf(idx); uint pk = texelFetch(tK, tc, 0).r; if (pk == 0u) { hide(); return; }' +
+    '  int idx = int(uBase + 0.5) + bi; ivec2 tc = tcOf(idx); uint pk = texelFetch(tK, tcOf(bi), 0).r; if (pk == 0u) { hide(); return; }' +
     '  vec3 p = vec3(pAt(tP, tc)) * uQ + uB0; uint kc = (pk >> 29u) & 3u; float spd = float((pk >> 21u) & 255u) / 4.0; float life = float(pk & 1023u) / 1023.0;' +
     '  vF = 0.0; vL = 0.0; uint hs = uint(idx) * 16u + uint(lk);' +
     '  if (kc == 0u) { vK = 1.0; vS = spd; if (lk > uKs + 0.5) { hide(); return; }' +
@@ -170,7 +178,7 @@
     geoW.setDrawRange(0, vW); geoD.setDrawRange(0, vD); geoS.setDrawRange(0, vS); shownN = N.nW + N.nD + N.nS;
   }
   function hideSlots() { geoW.setDrawRange(0, 0); geoD.setDrawRange(0, 0); geoS.setDrawRange(0, 0); shownN = 0; }
-  SLOTS.forEach((sl) => slotAlloc(sl, 16));
+  SLOTS.forEach((sl) => slotAlloc(sl, null));
   const points = new THREE.Group(), pointsW = new THREE.Points(geoW, matW), pointsD = new THREE.Points(geoD, matD), pointsS = new THREE.Points(geoS, matS);
   [pointsW, pointsD, pointsS].forEach((q) => { q.frustumCulled = false; points.add(q); }); scene.add(points);
 

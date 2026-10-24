@@ -141,7 +141,12 @@
         say(''); say('Bake playback, ' + (window.__smoothSecs || 10) + ' seconds (' + (c.frames.length - 1) + ' frames at ' + c.fps + ' a second, up to ' + fmtN(c.maxN) + ' water points):');
         const P = await record(window.__smoothSecs || 10);
         report(P);
-        say('  Frames needed before they had been loaded ahead: ' + P.late + (P.late ? ' (each of those loads during the frame that shows it)' : '') + '.');
+        say('  Frames needed before they had been loaded ahead: ' + P.late + (P.late ? ' (each of those loads during the frame that shows it)' : '') + '. The playback went round ' + (P.wrapped + 1) + ' times.');
+        { const g = gpuKept(); say('  Frames kept on the GPU: ' + g.n + ' of ' + c.frames.length + ' (' + f0(g.mb) + ' MB, budget ' + S.gpuKeepMB + ' MB' + (perf.oom ? ', the GPU ran out of memory' : '') + ').'); }
+        // the same bake paused: drawing alone, nothing uploaded
+        setCPlay(false); S.ct = Math.floor(c.frames.length / 2) + 0.5; await new Promise((r) => setTimeout(r, 400));
+        const Q = await record(3);
+        say('  Drawing alone (paused between two frames, nothing sent): ' + f1(Q.gaps.length / Q.secs) + ' frames a second, typical ' + f0(pctl(Q.gaps, 0.5)) + ' ms.');
       } else { say(''); say('No bake to play (bake something first to test playback).'); }
       // 3. collision shapes
       const ms = objs.filter((o) => o.kind === 'mesh');

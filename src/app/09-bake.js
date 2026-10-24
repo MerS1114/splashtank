@@ -99,11 +99,14 @@
     const c = S.cache, el = $('#cache-info');
     if (!c) { el.textContent = 'No cache yet.'; return; }
     if (!c.frames.length) { el.textContent = 'Baking…'; return; }
-    el.innerHTML = '<b>' + (c.frames.length - 1) + '</b> frames at ' + c.fps + ' fps, up to <b>' + fmtN(c.maxN) + '</b> points, spacing ' + c.d.toFixed(3) + ', <b>' + (cacheBytes(c) / 1048576).toFixed(0) + ' MB</b> in memory.';
+    const g = gpuKept();
+    el.innerHTML = '<b>' + (c.frames.length - 1) + '</b> frames at ' + c.fps + ' fps, up to <b>' + fmtN(c.maxN) + '</b> points, spacing ' + c.d.toFixed(3) + ', <b>' + (cacheBytes(c) / 1048576).toFixed(0) + ' MB</b> in memory, ' + g.n + ' frames on the GPU (' + g.mb.toFixed(0) + ' MB).';
   }
+  setInterval(() => { if (S.cache && viewMode() === 'cache') updateCacheInfo(); }, 1000);
+  addSlider($('#g-cache'), { id: 'c-gpukeep', label: 'GPU memory', min: 256, max: 8192, step: 256, value: S.gpuKeepMB, def: dv('gpuKeepMB'), fmt: (v) => (v >= 1024 ? (v / 1024).toFixed(v % 1024 ? 2 : 0) + ' GB' : v + ' MB'), tip: 'How much GPU memory baked frames may keep. A bake that fits is sent to the GPU once (while it plays the first time, or while it is paused) and then plays smoothly without moving any data. Frames that do not fit are sent again each time they are shown. If the GPU runs out of memory first, fewer frames are kept.', onInput: (v) => { S.gpuKeepMB = v; } });
   $('#c-loop').addEventListener('change', (e) => { S.cloop = e.target.checked; });
   seg('#seg-cspeed', (v) => { S.cspeed = +v; });
-  $('#c-clear').addEventListener('click', () => { S.cache = null; updateCacheInfo(); applyMode(); lcUi(); });
+  $('#c-clear').addEventListener('click', () => { S.cache = null; for (const i of BAKE.slice(5)) slotFree(SLOTS[i]); BAKE.length = 5; updateCacheInfo(); applyMode(); lcUi(); });
   function download(blob, name) {
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 8000);
@@ -163,25 +166,49 @@
   $('#scrub').addEventListener('input', (e) => { S.ct = +e.target.value; if (S.cache && S.cache.partial) S.cfollow = S.ct >= S.cache.frames.length - 1.5; });
 
   const DEFB = { x0: -1.5, x1: 1.5, y0: 0, y1: 2.6, z0: -1.5, z1: 1.5 };
-  // Baked frames live in slots 1 to 5: the frame at the playhead, the next one (to blend towards) and, while playing, up to two after that,
-  // loaded ahead one per display frame that had nothing else to load, so crossing into a new frame never has to load at that moment.
+  // Baked frames live in the BAKE slots: the frame at the playhead, the next one (to blend towards) and, while playing, up to two after
+  // that, loaded ahead one per display frame that had nothing else to load, so crossing into a new frame never has to load at that moment.
+  // Uploading is what limits dense playback (16 MB a frame took about 100 ms on Mer's UHD 730), so there are as many slots as the GPU memory
+  // budget holds: a bake that fits is uploaded once (while playing, or while paused and idle) and then plays without moving any data.
   // perf.late counts frames that were needed before they were loaded ahead (what makes playback hitch).
-  let useTick = 0;
+  let useTick = 0, gpuCap = Infinity;   // gpuCap: slots that fit after the GPU ran out of memory
   function slotKey(c, k) { return c.uid + ':' + k + ':' + (S.showSpray !== false); }
-  function findSlot(key) { for (let i = 1; i < NBSLOT; i++) if (SLOTS[i].key === key) { SLOTS[i].used = ++useTick; return i; } return -1; }
+  function findSlot(key) { for (const i of BAKE) if (SLOTS[i].key === key) { SLOTS[i].used = ++useTick; return i; } return -1; }
+  // as many bake slots as the budget holds for this cache's biggest frame (at least five, at most one per frame)
+  function bakeSlots(c) {
+    let per = c.maxN * 8 * 1.25 + 65536; for (const i of BAKE) per = Math.max(per, slotBytes(SLOTS[i]));
+    const want = Math.max(5, Math.min(c.frames.length, gpuCap, Math.floor((S.gpuKeepMB || 2048) * 1048576 / per)));
+    while (BAKE.length < want) { SLOTS.push(newSlot()); BAKE.push(SLOTS.length - 1); }
+    while (BAKE.length > want) {   // budget lowered: free the least recently used
+      let v = 0; for (let j = 1; j < BAKE.length; j++) if (SLOTS[BAKE[j]].used < SLOTS[BAKE[v]].used) v = j;
+      slotFree(SLOTS[BAKE[v]]); BAKE.splice(v, 1);
+    }
+  }
+  function gpuKept() { let n = 0, b = 0; for (const i of BAKE) { if (SLOTS[i].key) n++; b += slotBytes(SLOTS[i]); } return { n, mb: b / 1048576 }; }
   function slotFor(c, k, keep, ahead) {
     const key = slotKey(c, k); let i = findSlot(key); if (i > 0) return i;
     if (!ahead && S.cplay) perf.late = (perf.late || 0) + 1;
-    let v = -1; for (let j = 1; j < NBSLOT; j++) if (!keep.includes(j) && (v < 0 || SLOTS[j].used < SLOTS[v].used)) v = j;
-    slotLoad(SLOTS[v], c.frames[k], c.b || DEFB); SLOTS[v].key = key; SLOTS[v].used = ++useTick; loadedNow = true;
-    return v;
+    for (;;) {
+      let v = -1; for (const j of BAKE) if (!keep.includes(j) && (v < 0 || SLOTS[j].used < SLOTS[v].used)) v = j;
+      if (slotLoad(SLOTS[v], c.frames[k], c.b || DEFB)) { SLOTS[v].key = key; SLOTS[v].used = ++useTick; loadedNow = true; return v; }
+      // out of GPU memory: drop this slot, keep the budget to what fitted and use one that already has its textures
+      slotFree(SLOTS[v]); BAKE.splice(BAKE.indexOf(v), 1); gpuCap = BAKE.length;
+      if (!S.gpuWarned) { S.gpuWarned = true; flash('The GPU is out of memory: keeping ' + BAKE.length + ' frames on it.'); }
+      if (BAKE.length <= keep.length) return keep[0] || BAKE[0];
+    }
+  }
+  // paused and idle: fill free slots with the frames after the playhead, one per display frame, so playing starts from the GPU
+  function idleFill(c, a, last) {
+    if (S.cplay || loadedNow || benching || performance.now() - lastInput < 1000) return;
+    const free = BAKE.find((j) => !SLOTS[j].key); if (free === undefined) return;
+    for (let j = 1; j <= last; j++) { const nx = (a + j) % (last + 1); if (findSlot(slotKey(c, nx)) < 0) { slotFor(c, nx, [], true); return; } }
   }
   let cacheUid = 0, loadedNow = false;
   function showCache(t) {
     const c = S.cache, fr = c.frames, last = fr.length - 1; lastGen = -1;
     if (!c.uid) c.uid = ++cacheUid;
     if (last < 0) { hideSlots(); return 0; }   // a bake that has not finished its first frame yet
-    t = clamp(t, 0, last); loadedNow = false;
+    t = clamp(t, 0, last); loadedNow = false; bakeSlots(c);
     // blend between frames only when the same slot is the same particle in both (older caches with sorting were not saved that way)
     const a = Math.floor(t), bi = Math.min(a + 1, last), w = c.stableIds && bi !== a ? t - a : 0, A = fr[a], B = fr[bi], og = c.org || { x: 0, y: 0, z: 0 };
     // when playback falls behind and neither frame is loaded, show the one at the playhead without blending rather than load two at once
@@ -197,6 +224,7 @@
         keep.push(have);
       }
     }
+    if (!c.partial) idleFill(c, a, last);
     pmat.uniforms.uD.value = c.d; pmat.uniforms.uCR.value = (c.desc && c.desc.cellRatio) || 2; matW.uniforms.uFdt.value = 1 / c.fps;
     showSlots(sa, sb, sb === sa ? 0 : w);
     c.ids.forEach((id, k) => {
