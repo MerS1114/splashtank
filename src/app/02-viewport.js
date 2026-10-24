@@ -94,9 +94,9 @@
   const TYPE_COL = { water: [0.16, 0.46, 0.96], churn: [0.55, 0.85, 0.97], foam: [0.98, 0.98, 0.98], spray: [1.0, 0.6, 0.16], mist: [0.86, 0.56, 1.0], deep: [0.07, 0.2, 0.52], bubble: [0.25, 0.85, 0.6] };
   const v3 = (c) => 'vec3(' + c.map((x) => x.toFixed(3)).join(',') + ')';
   const U = { uSize: { value: 0.1 }, uScale: { value: 600 }, uMax: { value: S.vmax }, uFoam: { value: S.foam }, uOrtho: { value: 0 }, uMode: { value: 0 },
-    uD: { value: 0.04 }, uCR: { value: 2 }, uKw: { value: 0 }, uKs: { value: 4 }, uStreak: { value: 0.02 }, uVs: { value: 1 } };
+    uD: { value: 0.04 }, uCR: { value: 2 }, uKw: { value: 0 }, uKs: { value: 4 }, uStreak: { value: 0.02 }, uVs: { value: 1 }, uCull: { value: 2 } };
   const tex = () => ({ value: null }), num = (v) => ({ value: v || 0 }), vec = () => ({ value: new THREE.Vector3() });
-  const VHEAD = 'uniform float uSize; uniform float uScale; uniform float uFoam; uniform float uOrtho; uniform float uD; uniform float uCR; uniform float uKw; uniform float uKs; uniform float uStreak; uniform float uK1; uniform float uVs;' +
+  const VHEAD = 'uniform float uSize; uniform float uScale; uniform float uFoam; uniform float uOrtho; uniform float uD; uniform float uCR; uniform float uKw; uniform float uKs; uniform float uStreak; uniform float uK1; uniform float uVs; uniform float uCull;' +
     ' varying float vS; varying float vF; varying float vK; varying float vL;' +
     ' uint hsh(uint x) { x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u; return x; }' +
     ' vec3 ball(uint s) { vec3 r = vec3(float(hsh(s) & 65535u), float(hsh(s + 7919u) & 65535u), float(hsh(s + 104729u) & 65535u)) / 32767.5 - 1.0; float l = length(r); return l > 1.0 ? r / l : r; }' +
@@ -106,18 +106,24 @@
     ' vec3 pAt(highp usampler2D t, ivec2 tc, vec3 qb) { if (qb.x < 0.5) { int x = tc.x * 3; return vec3(uvec3(texelFetch(t, ivec2(x, tc.y), 0).r, texelFetch(t, ivec2(x + 1, tc.y), 0).r, texelFetch(t, ivec2(x + 2, tc.y), 0).r)); }' +
     '  uint v = texelFetch(t, tc, 0).r; uint bx = uint(qb.x + 0.5); uint by = uint(qb.y + 0.5); uint bz = uint(qb.z + 0.5); uint mx = (1u << bx) - 1u; uint my = (1u << by) - 1u; uint mz = (1u << bz) - 1u;' +
     '  return vec3(float(v & mx) / float(mx), float((v >> bx) & my) / float(my), float((v >> (bx + by)) & mz) / float(mz)) * 65535.0; }' +
+    // look-only copies smaller than uCull pixels on screen add nothing a viewer can see: far away they are left out
+    ' float pxAt(vec3 p, float sz) { vec4 mv = modelViewMatrix * vec4(p, 1.0); return (uOrtho > 0.0 ? uSize * uOrtho : uSize * uScale / max(-mv.z, 1e-4)) * sz; }' +
     ' void place(vec3 p, float sz, float minPx) { vec4 mv = modelViewMatrix * vec4(p, 1.0); gl_Position = projectionMatrix * mv; gl_PointSize = max((uOrtho > 0.0 ? uSize * uOrtho : uSize * uScale / (-mv.z)) * sz, minPx); }';
   // water: blended between frame A and frame B (the same particle has the same number in both). A particle only in B shows at once;
   // one only in A shows until halfway.
   const VW = VHEAD + ' uniform highp usampler2D tPA; uniform highp usampler2D tSA; uniform highp usampler2D tFA; uniform highp usampler2D tPB; uniform highp usampler2D tSB; uniform highp usampler2D tFB;' +
-    ' uniform float uNA; uniform float uNB; uniform float uFmA; uniform float uFmB; uniform float uBlend; uniform float uFdt; uniform vec3 uB0A; uniform vec3 uQA; uniform vec3 uB0B; uniform vec3 uQB; uniform vec3 uQbA; uniform vec3 uQbB;' +
+    ' uniform float uHide; uniform float uNA; uniform float uNB; uniform float uFmA; uniform float uFmB; uniform float uBlend; uniform float uFdt; uniform vec3 uB0A; uniform vec3 uQA; uniform vec3 uB0B; uniform vec3 uQB; uniform vec3 uQbA; uniform vec3 uQbB;' +
     ' void main() { int k1 = int(uK1 + 0.5); int bi = gl_VertexID / k1; float lk = float(gl_VertexID - bi * k1); ivec2 tc = tcOf(bi); bool bl = uBlend > 0.0;' +
     // compact frames hold speed | white-water level << 8 in one texel; the others a speed texel and a white-water texel (level x 17)
     '  uint ra = bi < int(uNA + 0.5) ? texelFetch(tSA, tc, 0).r : 255u; uint rb = (bl && bi < int(uNB + 0.5)) ? texelFetch(tSB, tc, 0).r : 255u;' +
     '  bool cA = uQbA.x > 0.5; bool cB = uQbB.x > 0.5; uint sa = cA ? (ra & 255u) : ra; uint sb = cB ? (rb & 255u) : rb;' +
     '  bool va = sa != 255u; bool vb = sb != 255u; vec3 p; float spd; float lv;' +
-    '  float la = !va ? 0.0 : cA ? float(ra >> 8u) : uFmA > 0.5 ? floor(float(texelFetch(tFA, tc, 0).r) / 17.0 + 0.5) : 0.0;' +
-    '  float lb = !vb ? 0.0 : cB ? float(rb >> 8u) : uFmB > 0.5 ? floor(float(texelFetch(tFB, tc, 0).r) / 17.0 + 0.5) : 0.0;' +
+    '  float la = !va ? 0.0 : cA ? float((ra >> 8u) & 15u) : uFmA > 0.5 ? floor(float(texelFetch(tFA, tc, 0).r) / 17.0 + 0.5) : 0.0;' +
+    '  float lb = !vb ? 0.0 : cB ? float((rb >> 8u) & 15u) : uFmB > 0.5 ? floor(float(texelFetch(tFB, tc, 0).r) / 17.0 + 0.5) : 0.0;' +
+    // buried water (compact bake frames mark it, bit 12): no view can see it, so only 1 in 16 is drawn, twice the size and without
+    // copies, as a backstop behind gaps between surface points (with none the inside was hollow and the gaps showed as dark specks)
+    '  bool bur = uHide > 0.5 && (!va || !cA || ((ra >> 12u) & 1u) == 1u) && (!vb || !cB || ((rb >> 12u) & 1u) == 1u) && (va || vb) && (cA || cB);' +
+    '  if (bur && ((hsh(uint(bi)) & 15u) != 0u || lk > 0.5)) { hide(); return; }' +
     // a slot can be a different particle in the next frame (narrow band reseeding reuses slots): if it is further than it could have moved,
     // it is not blended but switches halfway, so nothing streaks across the water
     '  vec3 pa = va ? pAt(tPA, tc, uQbA) * uQA + uB0A : vec3(0.0); vec3 pb = vb ? pAt(tPB, tc, uQbB) * uQB + uB0B : vec3(0.0);' +
@@ -128,14 +134,14 @@
     '  else { hide(); return; }' +
     '  vK = 0.0; vS = spd; vL = lv / 15.0; vF = vL * uFoam;' +
     '  if (lk > uKw + 0.5) { hide(); return; }' +
-    '  if (lk > 0.5) p += ball(uint(bi) * 16u + uint(lk)) * 0.5 * uD;' +
-    '  place(p, 1.0 - 0.3 * vF, 1.5); }';
+    '  if (lk > 0.5) { p += ball(uint(bi) * 16u + uint(lk)) * 0.5 * uD; if (pxAt(p, 1.0) < uCull) { hide(); return; } }' +
+    '  place(p, (1.0 - 0.3 * vF) * (bur ? 2.0 : 1.0), 1.5); }';
   // deep water (narrow band, look only): the centre of each deep cell and four extras spread over the cell
   const VD = VHEAD + ' uniform highp usampler2D tP; uniform highp usampler2D tS; uniform float uBase; uniform float uN; uniform vec3 uB0; uniform vec3 uQ; uniform vec3 uQb;' +
     ' void main() { int k1 = int(uK1 + 0.5); int bi = gl_VertexID / k1; float lk = float(gl_VertexID - bi * k1); if (bi >= int(uN + 0.5)) { hide(); return; }' +
     '  int idx = int(uBase + 0.5) + bi; ivec2 tc = tcOf(idx); uint s = texelFetch(tS, tc, 0).r & 255u; if (s == 255u) { hide(); return; }' +
     '  vec3 p = pAt(tP, tc, uQb) * uQ + uB0; vK = 3.0; vS = float(s) / 16.0; vL = 0.0; vF = 0.0;' +
-    '  if (lk > 0.5) p += ball(uint(idx) * 16u + uint(lk)) * 0.5 * uD * uCR;' +
+    '  if (lk > 0.5) { p += ball(uint(idx) * 16u + uint(lk)) * 0.5 * uD * uCR; if (pxAt(p, 1.3) < uCull) { hide(); return; } }' +
     '  place(p, 1.3, 1.5); }';
   // whitewater from its 32-bit code: spray (its copies trail back along its motion as a short streak), mist (a soft cloud), foam (flat on the
   // surface, fading with its life) and bubbles
@@ -169,7 +175,7 @@
     ' if (uMode > 0.5) { vec3 c = vK > 2.5 ? ' + v3(TYPE_COL.deep) + ' : (vL > 0.3 ? ' + v3(TYPE_COL.churn) + ' : ' + v3(TYPE_COL.water) + '); gl_FragColor = vec4(c*sh,1.0); return; }' +
     ' float t = clamp(vS/uMax,0.0,1.0); vec3 col = vK > 2.5 ? ramp(t)*0.82 : mix(ramp(t), vec3(0.97,0.99,1.0), vF); gl_FragColor = vec4(col*sh,1.0);\n' +
     '#endif\n }';
-  const matW = new THREE.ShaderMaterial({ uniforms: Object.assign({}, U, { tPA: tex(), tSA: tex(), tFA: tex(), tPB: tex(), tSB: tex(), tFB: tex(), uNA: num(), uNB: num(), uFmA: num(), uFmB: num(), uBlend: num(), uFdt: num(1 / 24), uK1: num(1), uB0A: vec(), uQA: vec(), uB0B: vec(), uQB: vec(), uQbA: vec(), uQbB: vec() }), vertexShader: VW, fragmentShader: FRAG });
+  const matW = new THREE.ShaderMaterial({ uniforms: Object.assign({}, U, { tPA: tex(), tSA: tex(), tFA: tex(), tPB: tex(), tSB: tex(), tFB: tex(), uNA: num(), uNB: num(), uFmA: num(), uFmB: num(), uBlend: num(), uFdt: num(1 / 24), uK1: num(1), uHide: num(1), uB0A: vec(), uQA: vec(), uB0B: vec(), uQB: vec(), uQbA: vec(), uQbB: vec() }), vertexShader: VW, fragmentShader: FRAG });
   const matD = new THREE.ShaderMaterial({ uniforms: Object.assign({}, U, { tP: tex(), tS: tex(), uBase: num(), uN: num(), uK1: num(5), uB0: vec(), uQ: vec(), uQb: vec() }), vertexShader: VD, fragmentShader: FRAG });
   const matS = new THREE.ShaderMaterial({ uniforms: Object.assign({}, U, { tP: tex(), tK: tex(), uBase: num(), uN: num(), uK1: num(1), uB0: vec(), uQ: vec(), uQb: vec() }), vertexShader: VS, fragmentShader: FRAG,
     defines: { WW: 1 }, transparent: true, depthWrite: false });
@@ -177,16 +183,18 @@
   const boxU = (b0, q, b) => { b0.value.set(b.x0, b.y0, b.z0); q.value.set((b.x1 - b.x0) / 65535, (b.y1 - b.y0) / 65535, (b.z1 - b.z0) / 65535); };
   // show slot a (and slot bi to blend the water towards, by w)
   function showSlots(a, bi, w) {
-    const A = SLOTS[a], B = SLOTS[bi], N = w < 0.5 ? A : B;
+    const A = SLOTS[a], B = SLOTS[bi], N = w < 0.5 ? A : B, uw = matW.uniforms;
     // while the live sim runs, drawing shares the GPU with the solver (on Mer's UHD 730 a redraw cost more than half a step), so the
     // look-only copies are left out then: none for the water, at most one for whitewater
-    const lite = (S.liteRun && viewMode() === 'live' && S.playing && !S.lcPlay) || (S.liteBake && viewMode() === 'cache' && S.cplay);
-    const dW = lite ? 0 : S.detail | 0, dS = lite ? Math.min(S.sprDetail | 0, 1) : S.sprDetail | 0;
+    // a bake playing: Fast always draws the lite look; Smooth steps down (S.pbLvl, set by the frame loop) while frames come late
+    const bakePlay = viewMode() === 'cache' && S.cplay, lvl = bakePlay ? (S.pbQ === 'fast' ? 2 : S.pbQ === 'smooth' ? S.pbLvl | 0 : 0) : 0;
+    const lite = (S.liteRun && viewMode() === 'live' && S.playing && !S.lcPlay) || lvl >= 2;
+    const dW = lite ? 0 : lvl === 1 ? (S.detail | 0) >> 1 : S.detail | 0, dS = lite ? Math.min(S.sprDetail | 0, 1) : lvl === 1 ? (S.sprDetail | 0) >> 1 : S.sprDetail | 0;
+    U.uCull.value = lvl >= 3 ? 4 : 2; uw.uHide.value = S.hideIn ? 1 : 0;
     const kW = 1 + Math.min(dW, LKMAX - 1), kS = 1 + Math.min(dS, LKMAX - 1), kD = lite ? 1 : 5;
     const vW = (w > 0 ? Math.max(A.nW, B.nW) : A.nW) * kW, vD = N.nD * kD, vS = N.nS * kS, need = Math.max(vW, vD, vS);
     if (dummyPos.count < need) { dummyPos = new THREE.BufferAttribute(new Uint8Array(Math.ceil(need * 1.25)), 1); [geoW, geoD, geoS].forEach((g) => g.setAttribute('position', dummyPos)); }
     U.uKw.value = dW; U.uKs.value = Math.min(dS, LKMAX - 1); U.uStreak.value = S.streak;
-    const uw = matW.uniforms;
     // compact slots: positions in T.q, speed and white water in T.w (also bound as the unused white-water texture)
     const tp = (X) => (X.q ? X.T.q : X.T.p), ts = (X) => (X.q ? X.T.w : X.T.s), tff = (X) => (X.q ? X.T.w : X.T.f), qb = (v, X) => (X.q ? v.set(X.q[0], X.q[1], X.q[2]) : v.set(0, 0, 0));
     uw.tPA.value = tp(A); uw.tSA.value = ts(A); uw.tFA.value = tff(A); uw.tPB.value = tp(B); uw.tSB.value = ts(B); uw.tFB.value = tff(B); qb(uw.uQbA.value, A); qb(uw.uQbB.value, B);

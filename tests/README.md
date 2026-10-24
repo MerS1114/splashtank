@@ -18,5 +18,6 @@ All tests open `dist/SplashTank.html` in headless Chromium with a software GPU, 
 - `timeline.js`: the one timeline with a bake shown (frame stepping by buttons and arrow keys, ruler clicks, Shift+Left), stepping in the live view, and a short run of the in-page smoothness test.
 - `wwpass.js`: the whitewater pass over a bake (Make whitewater): whitewater per frame before and after, screenshots. Slow (about 5 min).
 - `wwarea.js`: the whitewater area: counts whitewater past the tank walls and above its top while Meteor lake runs, screenshot of the dashed area box; checks per-frame compact boxes (compactFrameBox) decode and survive a cache file. About 2 min.
+- `hidden.js`: buried water in compact bakes (markInterior): how many points are marked, the draw time with them skipped and drawn, and how many pixels differ. About 2 min.
 - `redraw.js`: while the sim plays the live view redraws only for new sim frames; stopped, every frame (asserts, exits non-zero).
 - `snap.js`, `gz.js`: older snapping and gizmo checks.

@@ -676,12 +676,39 @@ function compactFrameBox(fr, b, d) {
   if (out.dp) Object.assign(out.dp, { fb: true, b: fb, q });
   return out;
 }
+// Marks the water points of a compact frame that no view can see (sf bit 12), so playback can skip drawing them: points whose
+// grid cell lies at least three cells inside the water (two left specks where gaps between surface points showed deeper points) (cells of 1.25 x the spacing, filled = has a point; cells outside the tank or the
+// frame's box count as empty, so the sides stay drawn). Returns how many were marked.
+function markInterior(fr, b, d) {
+  if (!fr.p32 || !fr.n) return 0;
+  const bb = fr.fb ? fr.b : b, q = fr.q, mx = (1 << q[0]) - 1, my = (1 << q[1]) - 1, mz = (1 << q[2]) - 1, h = d * 1.25;
+  const nx = Math.max(1, Math.ceil((bb.x1 - bb.x0) / h)), ny = Math.max(1, Math.ceil((bb.y1 - bb.y0) / h)), nz = Math.max(1, Math.ceil((bb.z1 - bb.z0) / h));
+  if (nx * ny * nz > 64e6) return 0;
+  const kx = (bb.x1 - bb.x0) / h / mx, ky = (bb.y1 - bb.y0) / h / my, kz = (bb.z1 - bb.z0) / h / mz, sy = q[0], sz = q[0] + q[1];
+  const cellOf = new Int32Array(fr.n), g = new Uint8Array(nx * ny * nz);
+  for (let i = 0; i < fr.n; i++) {
+    if ((fr.sf[i] & 255) === 255) { cellOf[i] = -1; continue; }
+    const v = fr.p32[i], x = Math.min(nx - 1, ((v & mx) * kx) | 0), y = Math.min(ny - 1, (((v >>> sy) & my) * ky) | 0), z = Math.min(nz - 1, (((v >>> sz) & mz) * kz) | 0);
+    const c = x + nx * (y + ny * z); cellOf[i] = c; g[c] = 1;
+  }
+  // three erosions: 1 = filled, 2 = filled with all six neighbours filled, 3 and 4 = the same again
+  const sx = 1, syy = nx, szz = nx * ny;
+  for (let pass = 1; pass <= 3; pass++) {
+    for (let z = 1; z < nz - 1; z++) for (let y = 1; y < ny - 1; y++) {
+      let c = 1 + nx * (y + ny * z);
+      for (let x = 1; x < nx - 1; x++, c++) if (g[c] === pass && g[c - sx] >= pass && g[c + sx] >= pass && g[c - syy] >= pass && g[c + syy] >= pass && g[c - szz] >= pass && g[c + szz] >= pass) g[c] = pass + 1;
+    }
+  }
+  let m = 0;
+  for (let i = 0; i < fr.n; i++) { const c = cellOf[i]; if (c >= 0 && g[c] === 4) { fr.sf[i] |= 4096; m++; } else fr.sf[i] &= ~4096; }
+  return m;
+}
 // point i of a frame (or of its deep water, passing the frame's q) in either layout: [x, y, z] in the box, the speed byte (255 = gone) and the white-water level 0-15
 function framePoint(fr, b, i, q0) {
   if (fr.fb) b = fr.b;   // a compact frame measured across its own box
   if (fr.p32) {
     const q = fr.q || q0, v = fr.p32[i], mx = (1 << q[0]) - 1, my = (1 << q[1]) - 1, mz = (1 << q[2]) - 1, w = fr.sf[i];
-    return [(v & mx) / mx * (b.x1 - b.x0) + b.x0, ((v >>> q[0]) & my) / my * (b.y1 - b.y0) + b.y0, ((v >>> (q[0] + q[1])) & mz) / mz * (b.z1 - b.z0) + b.z0, w & 255, w >> 8];
+    return [(v & mx) / mx * (b.x1 - b.x0) + b.x0, ((v >>> q[0]) & my) / my * (b.y1 - b.y0) + b.y0, ((v >>> (q[0] + q[1])) & mz) / mz * (b.z1 - b.z0) + b.z0, w & 255, (w >> 8) & 15];
   }
   const j = i * 3;
   return [fr.pos[j] / 65535 * (b.x1 - b.x0) + b.x0, fr.pos[j + 1] / 65535 * (b.y1 - b.y0) + b.y0, fr.pos[j + 2] / 65535 * (b.z1 - b.z0) + b.z0, fr.spd[i], fr.fm ? Math.round(fr.fm[i] / 17) : 0];

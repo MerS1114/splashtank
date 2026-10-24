@@ -59,6 +59,7 @@
     if (cache.q === undefined) cache.q = compactBits(cache.b, cache.d);
     if (cache.q) fr = compactFrame(fr, cache.q);   // a quarter smaller in memory, on the GPU and in the file
     else if (fr.pos && cache.d) fr = compactFrameBox(fr, cache.b, cache.d) || fr;   // a big tank: the box around this frame's water
+    if (fr.p32) fr.hid = markInterior(fr, cache.b, cache.d);   // water no view can see, skipped when drawing
     if (fr.sp && fr.sp.n) fr.wws = 1;   // whitewater that came with the water bake (2: made by Bake whitewater)
     cache.frames.push(fr);
     if (S.cache === cache && S.cfollow) S.ct = cache.frames.length - 1;

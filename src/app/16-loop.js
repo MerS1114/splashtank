@@ -61,6 +61,18 @@
   // While the sim plays, the live view is redrawn only when something changed: a new frame from the sim, the camera moving, or any input in the last moments
   // (and at least twice a second). Drawing shares the GPU with the solver: on Mer's Intel UHD 730 not drawing made a step about 40% faster,
   // and redrawing the same water 33 times a second while the sim delivered 8 new frames only slowed the sim down.
+  // Smooth (auto) bake playback: frames drawn slower than the bake's rate step the look down (S.pbLvl 1: half the look-only points,
+  // 2: none, 3: also fewer far copies); comfortably fast steps it back up. Hysteresis keeps it from flickering between levels.
+  let pbIv = 0, pbSlow = 0, pbFast = 0, pbUid = -1;
+  function pbAuto(dt, c) {
+    if (pbUid !== c.uid) { pbUid = c.uid; S.pbLvl = 0; pbIv = 0; }
+    if (S.pbQ !== 'smooth' || !S.cplay || c.partial) { pbSlow = pbFast = 0; return; }
+    pbIv = pbIv ? pbIv * 0.85 + dt * 0.15 : dt;
+    const need = 1 / Math.min(30, c.fps * S.cspeed);
+    if (pbIv > need * 1.15) { pbSlow += dt; pbFast = 0; } else if (pbIv < need * 0.55) { pbFast += dt; pbSlow = 0; } else { pbSlow = Math.max(0, pbSlow - dt); pbFast = 0; }
+    if (pbSlow > 0.6 && S.pbLvl < 3) { S.pbLvl++; pbSlow = 0; pbIv = need; }
+    else if (pbFast > 3 && S.pbLvl > 0) { S.pbLvl--; pbFast = 0; pbIv = need; }
+  }
   // performance overlay (P): where the time goes, updated twice a second
   let ovT = 0, ovDraws = 0, ovSimT = 0, ovUp = 0;
   S.perfOv = lsGet('perfOv') === '1';
@@ -78,7 +90,12 @@
       if (rt !== null) L.push((rt < 0.5 ? '<span class="w">' : '<span>') + 'Running at ' + Math.round(rt * 100) + '% of real time</span>');
       L.push(fmtN(sim.N || 0) + ' particles' + (S.sprOn && sim.sprayCap ? ', whitewater pool ' + fmtN(sim.sprayCap) : ''));
     }
-    if (mode === 'cache' && S.cache) { const g = gpuKept(); L.push('<b>Bake</b>     ' + g.n + ' of ' + (S.cache.frames.length) + ' frames on the GPU (' + g.mb.toFixed(0) + ' MB), ' + (perf.late || 0) + ' loaded late'); }
+    if (mode === 'cache' && S.cache) {
+      const g = gpuKept(), lv = S.cplay ? (S.pbQ === 'fast' ? 'fast' : S.pbQ === 'smooth' ? ['full look', 'half the look-only points', 'no look-only points', 'fewest points'][S.pbLvl | 0] : 'full look') : 'paused, full look';
+      const fr = S.cache.frames[Math.round(S.ct)] || {};
+      L.push('<b>Bake</b>     ' + g.n + ' of ' + (S.cache.frames.length) + ' frames on the GPU (' + g.mb.toFixed(0) + ' MB), ' + (perf.late || 0) + ' loaded late');
+      L.push('Playback: ' + lv + (fr.hid ? ', ' + fmtN(fr.hid) + ' buried points skipped' + (S.hideIn ? '' : ' (off)') : ''));
+    }
     if (S.baking || S.wwPass) L.push('<span class="w">' + (S.baking ? 'Baking' : 'Baking whitewater') + ': the view redraws only twice a second</span>');
     L.push('<span style="color:#8a8a8a">P hides this</span>');
     const h = L.join('\n'); if (el._h !== h) { el._h = h; el.innerHTML = h; }
@@ -111,6 +128,7 @@
       }
       { const vs = c.spdMs ? c.scale || 1 : 1; pmat.uniforms.uVs.value = vs; pmat.uniforms.uMax.value = S.vmax * vs / (c.scale || 1); } pmat.uniforms.uSize.value = S.psize * c.d; points.position.set((c.org || S.org).x, (c.org || S.org).y, (c.org || S.org).z);
       count = showCache(S.ct);
+      pbAuto(dt, c);
       updatePlayhead();
       uiT += dt;
       if (uiT > 0.2) {
