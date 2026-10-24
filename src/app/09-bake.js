@@ -184,7 +184,9 @@
     t = clamp(t, 0, last); loadedNow = false;
     // blend between frames only when the same slot is the same particle in both (older caches with sorting were not saved that way)
     const a = Math.floor(t), bi = Math.min(a + 1, last), w = c.stableIds && bi !== a ? t - a : 0, A = fr[a], B = fr[bi], og = c.org || { x: 0, y: 0, z: 0 };
-    const sa = slotFor(c, a, []), sb = w > 0 ? slotFor(c, bi, [sa]) : sa;
+    // when playback falls behind and neither frame is loaded, show the one at the playhead without blending rather than load two at once
+    const behind = S.cplay && w > 0 && findSlot(slotKey(c, a)) < 0 && findSlot(slotKey(c, bi)) < 0;
+    const sa = slotFor(c, a, []), sb = w > 0 && !behind ? slotFor(c, bi, [sa]) : sa;
     if (!loadedNow && S.cplay && last > 1) {   // nothing loaded this time: load the first of the next two frames that is not loaded yet
       const keep = [sa, sb];
       for (let j = 1; j <= 2; j++) {
@@ -196,7 +198,7 @@
       }
     }
     pmat.uniforms.uD.value = c.d; pmat.uniforms.uCR.value = (c.desc && c.desc.cellRatio) || 2; matW.uniforms.uFdt.value = 1 / c.fps;
-    showSlots(sa, sb, w);
+    showSlots(sa, sb, sb === sa ? 0 : w);
     c.ids.forEach((id, k) => {
       const o = objs.find((q) => q.id === id); if (!o) return;
       const k4 = k * 6, ao = A.objs, bo = B.objs, L = (j) => ao[k4 + j] + (bo[k4 + j] - ao[k4 + j]) * w;

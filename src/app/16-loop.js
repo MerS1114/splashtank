@@ -99,9 +99,10 @@
       if (S.playing && !S.baking && !prep) {
         if (isGpu()) {
           // Steps stay queued until the browser reports them done, which can take far longer than the GPU work itself (seen on Mer's Intel
-          // UHD 730). So allow about 100 ms of GPU work in flight when the GPU's own step time is known (at least two frames' worth, at most
-          // eight), and up to three steps per drawn frame, so a slow report or a slow draw does not hold the sim back.
-          const sub = S.lastSub || 1, lim = Math.max(2 * sub, Math.min(8 * sub, sim.gpuMs ? Math.floor(100 / sim.gpuMs) : 0));
+          // UHD 730), so more than one frame may wait. But keep the queue to about half a second of steps at the rate they really finish
+          // (lastMs): a longer one made Stop take effect seconds late and kept the GPU busy after it (20 steps of 0.47 s each at spacing 0.02).
+          const sub = S.lastSub || 1, svc = Math.max(sim.lastMs || 0, sim.gpuMs || 0);
+          const lim = svc ? Math.max(sub, Math.min(8 * sub, Math.floor(500 / svc))) : 2 * sub;
           acc = Math.min(acc + dt, 3 * DT);
           for (let k = 0; k < 3 && acc >= DT && (sim.inflight || 0) < lim; k++) { acc -= DT; stepOnce(); sim.maxQ = Math.max(sim.maxQ || 0, sim.inflight || 0); }
         } else {

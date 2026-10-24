@@ -131,7 +131,9 @@
       const simS = (S.frame - L.frame0) / 60;
       say('  The sim got through ' + f1(simS) + ' s of its time (' + Math.round(100 * simS / L.secs) + '% of real time). ' + fmtN(sim.N) + ' particles now, solver step about ' + f1(sim.lastMs) + ' ms from start until the browser reports it done (median of the last 31, slowest ' + f0(sim.slowMs) + ' ms)' + (sim.gpuMs ? ', of which the GPU was busy ' + f1(sim.gpuMs) + ' ms' : '') + (sim.maxQ ? ', up to ' + sim.maxQ + ' steps queued' : '') + (S.lastSub > 1 ? ' with ' + S.lastSub + ' substeps a frame' : '') + ', ' + fmtN(shownN) + ' points drawn.');
       report(L);
-      // 2. the bake, if there is one
+      { const t0 = performance.now(); if (sim.dev) await sim.dev.queue.onSubmittedWorkDone(); const w = performance.now() - t0;
+        if (w > 100) say('  After Stop the GPU was still busy for ' + f1(w / 1000) + ' s with steps that were queued.'); }
+      // 2. the bake, if there is one (after the live sim's queued steps are done, so they do not slow the playback down)
       if (S.cache && S.cache.frames.length > 2) {
         const c = S.cache;
         S.tab = 'bake'; applyMode(); S.ct = 0; S.cfollow = false; setCPlay(true);
