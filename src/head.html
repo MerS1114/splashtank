@@ -549,6 +549,8 @@ kbd { font: 500 10px var(--font-mono); color: #e8e8e8; background: #3c3c3c; bord
                 </div>
               </div>
               <div class="btnrow"><button class="btn flat" id="c-save" type="button" data-tip="Keeps the bake, the scene it came from and its settings, so it reopens here exactly.">Save cache (.splc)</button><button class="btn flat" id="c-report" type="button" data-tip="A small file for troubleshooting: what every frame measured, where the water went, and samples of the points. Attach it in the chat.">Bake report</button></div>
+              <div class="btnrow"><button class="btn flat" id="c-ww" type="button" data-tip="Makes the whitewater again for this bake, from its water, with the Whitewater settings as they are now (Houdini style: the water is not simulated again). Change the settings and run it again to try another look. Replaces the bake's whitewater; save the cache to keep it.">Make whitewater</button><button class="btn flat" id="c-ww-stop" type="button" hidden>Stop</button></div>
+              <div class="pos" id="ww-status"></div>
               <div class="btnrow"><button class="btn flat danger" id="c-clear" type="button">Clear cache</button></div>
             </div>
             <div class="group" id="g-native" data-ptab="bake">

@@ -109,6 +109,28 @@
   }
   setInterval(() => { if (S.cache && viewMode() === 'cache') updateCacheInfo(); }, 1000);
   addSlider($('#g-cache'), { id: 'c-gpukeep', label: 'GPU memory', min: 256, max: 8192, step: 256, value: S.gpuKeepMB, def: dv('gpuKeepMB'), fmt: (v) => (v >= 1024 ? (v / 1024).toFixed(v % 1024 ? 2 : 0) + ' GB' : v + ' MB'), tip: 'How much GPU memory baked frames may keep. A bake that fits is sent to the GPU once (while it plays the first time, or while it is paused) and then plays smoothly without moving any data. Frames that do not fit are sent again each time they are shown. If the GPU runs out of memory first, fewer frames are kept.', onInput: (v) => { S.gpuKeepMB = v; } });
+  // whitewater pass over the shown bake (runWhitewaterPass in flip/bake.js), with the scene's colliders and whitewater settings as they are now
+  let wwStop = false;
+  $('#c-ww').addEventListener('click', async (e) => {
+    e.currentTarget.blur(); const c = S.cache, st = $('#ww-status');
+    if (!c || c.partial || S.baking || S.wwPass) { flash(c ? 'Wait for the bake to finish.' : 'Bake something first.'); return; }
+    if (!S.gpu) { st.textContent = 'This needs WebGPU.'; return; }
+    const desc = buildDesc();
+    if (!desc.spr) { st.textContent = 'Turn Whitewater on first (Simulation tab).'; return; }
+    desc.sprayCap = S.sprCap;
+    setPlaying(false); S.wwPass = true; wwStop = false; $('#c-ww').disabled = true; $('#btn-bake').disabled = true; $('#c-ww-stop').hidden = false;
+    const t0 = performance.now();
+    let ok = false;
+    try {
+      ok = await runWhitewaterPass(c, desc, S.gpu, (f, F) => {
+        st.textContent = 'Whitewater: frame ' + f + ' of ' + (F - 1) + '…';
+        const i = findSlot(slotKey(c, f)); if (i > 0) SLOTS[i].key = null;   // show the new whitewater as it comes
+      }, () => wwStop);
+      st.textContent = (ok ? 'Whitewater made for ' : 'Stopped: whitewater remade for the first frames of ') + (c.frames.length - 1) + ' frames in ' + fmtTime((performance.now() - t0) / 1000) + (ok ? '. Save the cache to keep it.' : '; the rest keep the old whitewater.');
+    } catch (err) { st.textContent = 'The whitewater pass failed: ' + (err && err.message || err); }
+    c.uid = ++cacheUid; S.wwPass = false; $('#c-ww').disabled = false; $('#btn-bake').disabled = false; $('#c-ww-stop').hidden = true; updateCacheInfo();
+  });
+  $('#c-ww-stop').addEventListener('click', () => { wwStop = true; });
   $('#c-loop').addEventListener('change', (e) => { S.cloop = e.target.checked; });
   seg('#seg-cspeed', (v) => { S.cspeed = +v; });
   $('#c-clear').addEventListener('click', () => { S.cache = null; for (const i of BAKE.slice(5)) slotFree(SLOTS[i]); BAKE.length = 5; updateCacheInfo(); applyMode(); lcUi(); });

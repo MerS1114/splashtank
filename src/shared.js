@@ -659,10 +659,10 @@ function compactFrame(fr, q) {
   if (fr.dp) { const ds = new Uint16Array(fr.dp.n); ds.set(fr.dp.spd); out.dp = { n: fr.dp.n, p32: packPos32(fr.dp.pos, fr.dp.n, q), sf: ds }; }
   return out;
 }
-// point i of a frame in either layout: [x, y, z] in the box, the speed byte (255 = gone) and the white-water level 0-15
-function framePoint(fr, b, i) {
+// point i of a frame (or of its deep water, passing the frame's q) in either layout: [x, y, z] in the box, the speed byte (255 = gone) and the white-water level 0-15
+function framePoint(fr, b, i, q0) {
   if (fr.p32) {
-    const q = fr.q, v = fr.p32[i], mx = (1 << q[0]) - 1, my = (1 << q[1]) - 1, mz = (1 << q[2]) - 1, w = fr.sf[i];
+    const q = fr.q || q0, v = fr.p32[i], mx = (1 << q[0]) - 1, my = (1 << q[1]) - 1, mz = (1 << q[2]) - 1, w = fr.sf[i];
     return [(v & mx) / mx * (b.x1 - b.x0) + b.x0, ((v >>> q[0]) & my) / my * (b.y1 - b.y0) + b.y0, ((v >>> (q[0] + q[1])) & mz) / mz * (b.z1 - b.z0) + b.z0, w & 255, w >> 8];
   }
   const j = i * 3;

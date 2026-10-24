@@ -130,3 +130,68 @@ async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
   sim.destroy();
   return ok;
 }
+
+// Whitewater made afterwards from a finished water bake, Houdini style: the water is not simulated again. For each baked frame the
+// particles are loaded with the velocity worked out from where they are in the next frame (a bake keeps every particle in its place),
+// deep water points (narrow band look) are loaded as still water so the grid knows the water is there, and the whitewater stages run
+// over the frame in substeps while the particles move on towards the next frame. The result replaces each frame's whitewater.
+// desc: the scene now (colliders with their distance grids, whitewater settings). onProgress(f, F); isCancelled() stops it.
+async function runWhitewaterPass(c, desc, gpu, onProgress, isCancelled) {
+  const fr = c.frames, F = fr.length, cd = c.desc || {}, b = c.b, fps = c.fps, dtF = 1 / fps;
+  if (F < 2 || !desc.spr || !desc.sprayCap) return false;
+  let maxD = 0; for (const f of fr) if (f.dp) maxD = Math.max(maxD, f.dp.n);
+  const ratio = cd.cellRatio || desc.cellRatio || 2, copies = Math.max(1, Math.min(8, Math.round(Math.pow(ratio, 3))));   // a deep cell holds as many particles as a full water cell
+  const sim = new FlipSim(gpu.dev, { d: c.d, maxN: c.maxN + maxD * copies + 16, size: cd.size || desc.size, open: cd.open !== undefined ? cd.open : desc.open, ratio });
+  await sim.whenReady;
+  sim.recycle = false; sim.cap = sim.MAXN; sim.opt.sort = false; sim.opt.fastAir = !!desc.fastAir; sim.wwOnly = true;
+  sim.setSprayCap(desc.sprayCap);
+  const runner = new SceneRunner(sim), h = sim.h, scale = desc.scale || 1, foamLife = (desc.spr.ww && desc.spr.ww.foamLife) || 3;
+  const meshes = desc.objs.filter((o) => o.kind === 'mesh');
+  const par = (t) => ({ g: desc.g, iters: 1, flip: 0.95, comp: 6, wind: desc.wind, drag: desc.drag, foamTau: desc.foamTau, gust: desc.gust, foamSens: desc.foamSens, colMax: desc.colMax,
+    vmax: desc.vmaxW, scale, vs: scale, tear: 0, spr: desc.spr, nb: null, ocean: null, time: t, air: desc.air || null, drip: desc.drip || null });
+  const spdK = c.spdMs ? 1 / 16 / (c.scale || 1) : 1 / 16;   // speed byte to scene units a second
+  const pS = sim.pS, vS = sim.vS, J = h * 0.25;
+  let ok = true;
+  for (let f = 1; f < F; f++) {
+    const A = fr[f - 1], Bf = fr[f]; let n = 0, vmax = 0;
+    for (let i = 0; i < A.n; i++, n++) {
+      const pa = framePoint(A, b, i), k = n * 4;
+      if (pa[3] === 255) { pS[k] = 0; pS[k + 1] = -1.0e6; pS[k + 2] = 0; pS[k + 3] = 0; vS[k] = vS[k + 1] = vS[k + 2] = vS[k + 3] = 0; continue; }
+      let vx = 0, vy = 0, vz = 0;
+      if (i < Bf.n) {
+        const pb = framePoint(Bf, b, i);
+        if (pb[3] !== 255) {
+          vx = (pb[0] - pa[0]) * fps; vy = (pb[1] - pa[1]) * fps; vz = (pb[2] - pa[2]) * fps;
+          // a slot the narrow band gave to another particle jumps further than either speed allows: no velocity for that frame
+          const u = Math.hypot(vx, vy, vz), s = Math.max(pa[3], pb[3]) * spdK;
+          if (Math.max(pa[3], pb[3]) < 191 && u > 2 * s + 2 * h * fps) { vx = vy = vz = 0; }
+        }
+      }
+      pS[k] = pa[0]; pS[k + 1] = pa[1]; pS[k + 2] = pa[2]; pS[k + 3] = 0;
+      vS[k] = vx; vS[k + 1] = vy; vS[k + 2] = vz; vS[k + 3] = pa[4] / 15;   // the white-water level the bake gave it (impacts, churn)
+      vmax = Math.max(vmax, vx * vx + vy * vy + vz * vz);
+    }
+    if (A.dp) for (let i = 0; i < A.dp.n; i++) {
+      const pd = framePoint(A.dp, b, i, A.q); if (pd[3] === 255) continue;
+      for (let m = 0; m < copies; m++, n++) {
+        const k = n * 4;
+        pS[k] = pd[0] + ((m & 1) ? J : -J); pS[k + 1] = pd[1] + ((m & 2) ? J : -J); pS[k + 2] = pd[2] + ((m & 4) ? J : -J); pS[k + 3] = 0;
+        vS[k] = vS[k + 1] = vS[k + 2] = vS[k + 3] = 0;
+      }
+    }
+    sim.N = n;
+    sim.dev.queue.writeBuffer(sim.bPos, 0, pS, 0, n * 4); sim.dev.queue.writeBuffer(sim.bVel, 0, vS, 0, n * 4);
+    const sub = Math.max(2, Math.min(8, Math.ceil(dtF * Math.sqrt(vmax) / (1.5 * h)))), dt = dtF / sub;
+    for (let s = 0; s < sub; s++) { const t = (f - 1) * dtF + (s + 1) * dt; runner.step(dt, meshes.map((o) => sampleObjState(o, t)), par(t)); }
+    const sd = await sim.readSpray();
+    let sp = sd ? packSprayFrame(sd, sim.b, 200000, foamLife) : null;
+    if (sp && c.q) sp = { n: sp.n, p32: packPos32(sp.pos, sp.n, c.q), pk: sp.pk, alive: sp.alive };
+    if (sp && sp.n) Bf.sp = sp; else delete Bf.sp;
+    onProgress(f, F);
+    if (isCancelled()) { ok = false; break; }
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  if (ok) delete fr[0].sp;
+  sim.destroy();
+  return ok;
+}

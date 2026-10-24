@@ -14,9 +14,10 @@ struct Params {
   wwFoamLife: f32, wwRise: f32, wwCrest: f32, wwImpact: f32,
   airOn: u32, airCouple: f32, airDecay: f32, airH: f32,
   aNx: u32, aNy: u32, aNz: u32, ndrip: u32,
-  dripRate: f32, dripDry: f32, airBlur: f32, wwPad: f32,
+  dripRate: f32, dripDry: f32, airBlur: f32, wwSpin: f32,
   fills: array<vec4<f32>, 16>,
   waves: array<vec4<f32>, 64>,
+  wwEdge: f32, wwErode: f32, wwPad2: f32, wwPad3: f32,   // words 404-407: cosine of the leading-edge angle, foam spreading fade
 };
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read_write> pos: array<vec4<f32>>;
@@ -60,7 +61,7 @@ fn gv0W(f: u32, v: f32) { atomicStore(&accW[f], bitcast<i32>(v)); }
 @group(0) @binding(31) var<storage, read_write> velG: array<f32>;
 // air field: a coarse grid of air velocity that the water, the spray and moving objects drag along; spray and mist drift with it
 @group(0) @binding(32) var<storage, read_write> air: array<vec4<f32>>;
-@group(0) @binding(33) var<storage, read_write> sAux: array<vec4<f32>>;      // per whitewater point: water velocity there (xyz), how wet (w)
+@group(0) @binding(33) var<storage, read_write> sAux: array<vec4<f32>>;      // per whitewater point: water velocity there (xyz), how wet + 4 x (surface spreading in half steps per second) (w)
 @group(0) @binding(34) var<storage, read_write> airAcc: array<atomic<i32>>;  // per air cell: momentum and weight pushed in this step (fixed point)
 @group(0) @binding(35) var<storage, read_write> air2: array<vec4<f32>>;
 @group(0) @binding(36) var<storage, read_write> drip: array<vec4<f32>>;
@@ -149,6 +150,23 @@ fn sampleBoth(p: vec3<f32>) -> VV {
       sn += w * gvR(f); so += w * gv0R(f);
     }
     r.vn[axis] = sn; r.vo[axis] = so;
+  }
+  return r;
+}
+// the new grid velocity alone (reads only accV, for kernels that cannot also bind accW)
+fn sampleNew(p: vec3<f32>) -> vec3<f32> {
+  var r = vec3<f32>(0.0);
+  for (var axis = 0u; axis < 3u; axis++) {
+    var g = (p - vec3<f32>(P.x0, P.y0, P.z0)) * P.ih;
+    if (axis == 0u) { g.y -= 0.5; g.z -= 0.5; } else if (axis == 1u) { g.x -= 0.5; g.z -= 0.5; } else { g.x -= 0.5; g.y -= 0.5; }
+    let f0 = floor(g); let fr = g - f0; let i0 = vec3<i32>(f0);
+    var sn = 0.0;
+    for (var c = 0u; c < 8u; c++) {
+      let dx = i32(c & 1u); let dy = i32((c >> 1u) & 1u); let dz = i32((c >> 2u) & 1u);
+      let w = select(1.0 - fr.x, fr.x, dx == 1) * select(1.0 - fr.y, fr.y, dy == 1) * select(1.0 - fr.z, fr.z, dz == 1);
+      sn += w * gvR(faceIndex(axis, i0.x + dx, i0.y + dy, i0.z + dz));
+    }
+    r[axis] = sn;
   }
   return r;
 }
