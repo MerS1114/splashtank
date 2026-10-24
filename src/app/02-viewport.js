@@ -31,11 +31,12 @@
   // each texture of a slot sized to what it holds (rows of TEXW points: positions for all, speed for water and deep, white water for water,
   // whitewater codes for whitewater only), grown with 25% to spare. False when the GPU is out of memory (the slot is then left empty).
   const TBYTES = { p: 6, s: 1, f: 1, k: 4 };
-  function slotAlloc(sl, need) {
+  // exact: no room to spare (a finished bake that is all kept on the GPU never puts a bigger frame into the slot)
+  function slotAlloc(sl, need, exact) {
     if (!sl.gl) { sl.gl = {}; sl.T = sl.T || {}; sl.rows = {}; }
     for (const k of ['p', 's', 'f', 'k']) {
       const want = Math.max(16, (need && need[k]) || 0); if (sl.gl[k] && sl.rows[k] >= want) continue;
-      const rows = Math.min(Math.ceil(want * 1.25 / 16) * 16, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+      const rows = Math.min(exact ? want : Math.ceil(want * 1.25 / 16) * 16, gl.getParameter(gl.MAX_TEXTURE_SIZE));
       if (sl.gl[k]) { gl.deleteTexture(sl.gl[k]); sl.gl[k] = null; sl.rows[k] = 0; }
       sl.key = null;
       const t = gl.createTexture(); renderer.state.bindTexture(gl.TEXTURE_2D, t);
@@ -60,11 +61,11 @@
     return n * c * data.BYTES_PER_ELEMENT;
   }
   // a frame into a slot, as it is (no per-point work on the CPU)
-  function slotLoad(sl, fr, b) {
+  function slotLoad(sl, fr, b, exact) {
     const t0 = performance.now(), show = S.showSpray !== false;
     const nW = fr ? fr.n : 0, nD = fr && fr.dp ? fr.dp.n : 0, nS = fr && show && fr.sp ? fr.sp.n : 0;
     const rW = Math.ceil(nW / TEXW), rD = Math.ceil(nD / TEXW), rS = Math.ceil(nS / TEXW);
-    if (!slotAlloc(sl, { p: rW + rD + rS, s: rW + rD, f: fr && fr.fm ? rW : 0, k: rS })) { perf.oom = (perf.oom || 0) + 1; return false; }
+    if (!slotAlloc(sl, { p: rW + rD + rS, s: rW + rD, f: fr && fr.fm ? rW : 0, k: rS }, exact)) { perf.oom = (perf.oom || 0) + 1; return false; }
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     let by = 0;
     if (nW) { by += upTex(sl.gl.p, 'p', 0, fr.pos, nW) + upTex(sl.gl.s, 's', 0, fr.spd, nW); if (fr.fm) by += upTex(sl.gl.f, 'f', 0, fr.fm, nW); }

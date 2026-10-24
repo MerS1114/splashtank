@@ -176,7 +176,7 @@
   function findSlot(key) { for (const i of BAKE) if (SLOTS[i].key === key) { SLOTS[i].used = ++useTick; return i; } return -1; }
   // as many bake slots as the budget holds for this cache's biggest frame (at least five, at most one per frame)
   function bakeSlots(c) {
-    let per = c.maxN * 8 * 1.25 + 65536; for (const i of BAKE) per = Math.max(per, slotBytes(SLOTS[i]));
+    let per = c.maxN * 8 + 65536; for (const i of BAKE) if (SLOTS[i].key && SLOTS[i].key.startsWith(c.uid + ':')) per = Math.max(per, slotBytes(SLOTS[i]));
     const want = Math.max(5, Math.min(c.frames.length, gpuCap, Math.floor((S.gpuKeepMB || 2048) * 1048576 / per)));
     while (BAKE.length < want) { SLOTS.push(newSlot()); BAKE.push(SLOTS.length - 1); }
     while (BAKE.length > want) {   // budget lowered: free the least recently used
@@ -190,7 +190,7 @@
     if (!ahead && S.cplay) perf.late = (perf.late || 0) + 1;
     for (;;) {
       let v = -1; for (const j of BAKE) if (!keep.includes(j) && (v < 0 || SLOTS[j].used < SLOTS[v].used)) v = j;
-      if (slotLoad(SLOTS[v], c.frames[k], c.b || DEFB)) { SLOTS[v].key = key; SLOTS[v].used = ++useTick; loadedNow = true; return v; }
+      if (slotLoad(SLOTS[v], c.frames[k], c.b || DEFB, !c.partial && BAKE.length >= c.frames.length)) { SLOTS[v].key = key; SLOTS[v].used = ++useTick; loadedNow = true; return v; }
       // out of GPU memory: drop this slot, keep the budget to what fitted and use one that already has its textures
       slotFree(SLOTS[v]); BAKE.splice(BAKE.indexOf(v), 1); gpuCap = BAKE.length;
       if (!S.gpuWarned) { S.gpuWarned = true; flash('The GPU is out of memory: keeping ' + BAKE.length + ' frames on it.'); }
