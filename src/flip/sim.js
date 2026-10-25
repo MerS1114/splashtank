@@ -438,7 +438,7 @@ class FlipSim {
     const run = (ps, name, items) => { const p = this.pipes[name], g = Math.ceil(items / 256); ps.setPipeline(p.pipeline); ps.setBindGroup(0, p.bg); ps.dispatchWorkgroups(Math.max(1, Math.min(g, 65535)), Math.max(1, Math.ceil(g / 65535))); };
     const ps = enc.beginComputePass();
     if (!fromPos) run(ps, 'subsample', nW);
-    if (spr) { run(ps, 'dispBegin', 1); run(ps, 'sprayDisp', this.sprDispMax); }
+    if (spr) { run(ps, 'dispBegin', 1); run(ps, 'sprayDisp', this.sprayCap); }
     if (deep) {
       const c = this.pipes.deepClear, g3 = Math.ceil(FLIP_DEEPMAX / 256); ps.setPipeline(c.pipeline); ps.setBindGroup(0, c.bg); ps.dispatchWorkgroups(Math.min(g3, 65535), Math.ceil(g3 / 65535));
       const q = this.pipes.deepPick; ps.setPipeline(q.pipeline); ps.setBindGroup(0, q.bg); ps.dispatchWorkgroupsIndirect(this.bArgs, 64);

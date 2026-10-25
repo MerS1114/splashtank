@@ -150,7 +150,9 @@
     ' void main() { int k1 = int(uK1 + 0.5); int bi = gl_VertexID / k1; float lk = float(gl_VertexID - bi * k1); if (bi >= int(uN + 0.5)) { hide(); return; }' +
     '  int idx = int(uBase + 0.5) + bi; ivec2 tc = tcOf(idx); uint pk = texelFetch(tK, tcOf(bi), 0).r; if (pk == 0u) { hide(); return; }' +
     '  vec3 p = pAt(tP, tc, uQb) * uQ + uB0; uint kc = (pk >> 29u) & 3u; float spd = float((pk >> 21u) & 255u) / 4.0; float life = float(pk & 1023u) / 1023.0;' +
-    '  vF = 0.0; vL = 0.0; uint hs = uint(idx) * 16u + uint(lk);' +
+    // mist, foam and bubbles carry a seed from their slot (packSpray), so their extras stay put; older caches without one use the point number
+    '  uint sd = kc == 2u ? (pk & 0xFFFFFu) : kc == 0u ? 0u : ((pk >> 10u) & 2047u);' +
+    '  vF = 0.0; vL = 0.0; uint hs = (sd != 0u ? sd + 1048576u : uint(idx)) * 16u + uint(lk);' +
     '  if (kc == 0u) { vK = 1.0; vS = spd; if (lk > uKs + 0.5) { hide(); return; }' +
     '   float u = float(pk & 1023u) / 1023.0 * 2.0 - 1.0; float w = float((pk >> 10u) & 1023u) / 1023.0 * 2.0 - 1.0; vec3 n = vec3(u, w, 1.0 - abs(u) - abs(w));' +
     '   if (n.z < 0.0) n.xy = vec2((1.0 - abs(w)) * (u >= 0.0 ? 1.0 : -1.0), (1.0 - abs(u)) * (w >= 0.0 ? 1.0 : -1.0)); n = normalize(n);' +

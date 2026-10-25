@@ -1,12 +1,14 @@
 // FLIP helpers for bakes and the live view on the CPU side: whitewater codes, drip samples, cache frames, the bake report numbers, and the GPU bake loop.
 // the same 32-bit packing as the shader: top bit, two bits of kind (00 spray, 10 mist, 01 foam, 11 bubble), 8 bits of speed in quarter units
 // per second, then the direction (spray, mist) or how much life is left (foam, bubbles)
-function packSprayJS(vx, vy, vz, kind, lifeFrac) {
+function packSprayJS(vx, vy, vz, kind, lifeFrac, seed) {
   kind = kind === true ? 1 : (kind | 0);
   const s = Math.hypot(vx, vy, vz);
   let code = (0x80000000 | (Math.min(Math.floor(s * 4), 255) << 21)) >>> 0;
   code = (code | [0, 0x40000000, 0x20000000, 0x60000000][kind & 3]) >>> 0;
-  if (kind >= 2) return (code | Math.round(Math.max(0, Math.min(1, lifeFrac || 0)) * 1023)) >>> 0;
+  seed = seed >>> 0;   // as wwSeed in the shader: look-only extras keep their places from frame to frame
+  if (kind >= 2) return (code | ((((seed & 2047) | 1) << 10) >>> 0) | Math.round(Math.max(0, Math.min(1, lifeFrac || 0)) * 1023)) >>> 0;
+  if (kind === 1) return (code | (seed & 0xFFFFF) | 1) >>> 0;
   let nx = 0, ny = 1, nz = 0; if (s > 1e-6) { nx = vx / s; ny = vy / s; nz = vz / s; }
   const l = Math.abs(nx) + Math.abs(ny) + Math.abs(nz); let px = nx / l, py = ny / l;
   if (nz < 0) { const qx = (1 - Math.abs(py)) * (px >= 0 ? 1 : -1), qy = (1 - Math.abs(px)) * (py >= 0 ? 1 : -1); px = qx; py = qy; }
@@ -40,19 +42,22 @@ function dripSamples(sdf, h, k) {
 }
 // live whitewater slots for a cache frame: an even sample of at most about cap points, positions across the box like the water. The sample goes
 // by slot number, so a point that stays alive stays in the sample from frame to frame (sampling by count would pick different points each frame).
+const wwSeedJS = (j) => Math.imul(j, 2654435761) >>> 11;
+const wwKeepJS = (j) => (Math.imul(j * 7919 + 104729, 2654435761) >>> 0) / 4294967296;   // a stable per-slot draw: the sample changes little as the count changes
 function packSprayFrame(sd, b, cap, foamLife) {
   foamLife = foamLife || 3;
   let alive = 0; for (let j = 0; j < sd.n; j++) if (sd.p[j * 4 + 3] > 0) alive++;
-  const step = Math.max(1, Math.ceil(alive / cap));
-  let m = 0; for (let j = 0; j < sd.n; j += step) if (sd.p[j * 4 + 3] > 0) m++;
+  const share = alive > cap ? cap / alive : 1, keep = (j) => sd.p[j * 4 + 3] > 0 && (share >= 1 || wwKeepJS(j) < share);
+  let m = 0; for (let j = 0; j < sd.n; j++) if (keep(j)) m++;
+  m = Math.min(m, cap);
   const pos = new Uint16Array(m * 3), pk = new Uint32Array(m);
   const kx = 65535 / (b.x1 - b.x0), ky = 65535 / (b.y1 - b.y0), kz = 65535 / (b.z1 - b.z0);
   let k = 0;
-  for (let j = 0; j < sd.n && k < m; j += step) {
-    if (!(sd.p[j * 4 + 3] > 0)) continue;
+  for (let j = 0; j < sd.n && k < m; j++) {
+    if (!keep(j)) continue;
     pos[k * 3] = Math.max(0, Math.min(65535, Math.round((sd.p[j * 4] - b.x0) * kx))); pos[k * 3 + 1] = Math.max(0, Math.min(65535, Math.round((sd.p[j * 4 + 1] - b.y0) * ky)));
     pos[k * 3 + 2] = Math.max(0, Math.min(65535, Math.round((sd.p[j * 4 + 2] - b.z0) * kz)));
-    pk[k] = packSprayJS(sd.v[j * 4], sd.v[j * 4 + 1], sd.v[j * 4 + 2], Math.round(sd.v[j * 4 + 3]), sd.p[j * 4 + 3] / foamLife); k++;
+    pk[k] = packSprayJS(sd.v[j * 4], sd.v[j * 4 + 1], sd.v[j * 4 + 2], Math.round(sd.v[j * 4 + 3]), sd.p[j * 4 + 3] / foamLife, wwSeedJS(j)); k++;
   }
   return { n: k, pos, pk, alive };
 }

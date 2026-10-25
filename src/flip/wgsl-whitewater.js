@@ -278,12 +278,16 @@ fn wwAlloc() -> u32 {
 }
 const WWHOLD: f32 = 0.2;
 // packed for drawing: top bit marks whitewater, the next two bits the kind (00 spray, 10 mist, 01 foam, 11 bubble), 8 bits of speed in quarter
-// units per second, then for spray and mist the direction (octahedral, 20 bits), for foam and bubbles how much of their life is left (10 bits)
-fn packSpray(v: vec3<f32>, kind: u32, lifeFrac: f32) -> u32 {
+// units per second, then for spray the direction (octahedral, 20 bits), for mist a 20-bit seed, for foam and bubbles an 11-bit seed (bits 10-20)
+// and how much of their life is left (10 bits). The seed comes from the point's slot, so its look-only extras keep their places from frame to
+// frame (they were placed by the point's place in the frame, which changes every frame in the live view: foam and mist sparkled).
+fn wwSeed(j: u32) -> u32 { return (j * 2654435761u) >> 11u; }
+fn packSpray(v: vec3<f32>, kind: u32, lifeFrac: f32, seed: u32) -> u32 {
   let s = length(v);
   var code = 0x80000000u | (min(u32(s * 4.0), 255u) << 21u);
   if (kind == 1u) { code = code | 0x40000000u; } else if (kind == 2u) { code = code | 0x20000000u; } else if (kind == 3u) { code = code | 0x60000000u; }
-  if (kind >= 2u) { return code | u32(clamp(lifeFrac, 0.0, 1.0) * 1023.0); }
+  if (kind >= 2u) { return code | (((seed & 2047u) | 1u) << 10u) | u32(clamp(lifeFrac, 0.0, 1.0) * 1023.0); }
+  if (kind == 1u) { return code | (seed & 0xFFFFFu) | 1u; }
   var n = vec3<f32>(0.0, 1.0, 0.0); if (s > 1e-6) { n = v / s; }
   var p = n.xy / (abs(n.x) + abs(n.y) + abs(n.z));
   if (n.z < 0.0) { p = (vec2<f32>(1.0) - abs(p.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), p >= vec2<f32>(0.0)); }
@@ -293,16 +297,17 @@ fn packSpray(v: vec3<f32>, kind: u32, lifeFrac: f32) -> u32 {
 // only the first sctl[0] whitewater slots have ever been handed out (wwAlloc): work over just those
 @compute @workgroup_size(1)
 fn wwArgs() { split((min(atomicLoad(&sctl[0]), P.smax) + 255u) / 256u, 28u); }
-// an even sample of the whitewater slots for the live view, written after the water points
+// an even sample of the whitewater slots for the live view, written after the water points. Each slot is in the sample or not by a hash of
+// its number against the share that fits (sdMax of those handed out), so as the count changes only a few slots join or leave: a stride
+// picked a different set whenever it changed, and the whitewater flickered. The living ones are packed together, counted in sctl[2].
 @compute @workgroup_size(256)
-// The sample takes every stride-th slot of those handed out so far (the same slots from frame to frame, so a point stays shown all its life);
-// the living ones are packed together, counted in sctl[2] (cleared by dispBegin).
 fn sprayDisp(@builtin(global_invocation_id) g: vec3<u32>) {
-  let k = gid1(g); if (k >= P.sdMax) { return; }
-  let used = min(atomicLoad(&sctl[0]), P.smax); let stride = max(1u, (used + P.sdMax - 1u) / P.sdMax);
-  let j = k * stride; if (j >= used || sPos[j].w <= 0.0) { return; }
-  let o = P.sdOff + atomicAdd(&sctl[2], 1u); if (o >= arrayLength(&disp)) { return; }
-  disp[o] = vec4<f32>(sPos[j].xyz, bitcast<f32>(packSpray(sVel[j].xyz, u32(sVel[j].w + 0.5), sPos[j].w / max(P.wwFoamLife, 0.01))));
+  let j = gid1(g); let used = min(atomicLoad(&sctl[0]), P.smax);
+  if (j >= used || sPos[j].w <= 0.0) { return; }
+  if (used > P.sdMax && hash1(j * 7919u + 104729u) * f32(used) >= f32(P.sdMax)) { return; }
+  let k = atomicAdd(&sctl[2], 1u); if (k >= P.sdMax) { return; }
+  let o = P.sdOff + k; if (o >= arrayLength(&disp)) { return; }
+  disp[o] = vec4<f32>(sPos[j].xyz, bitcast<f32>(packSpray(sVel[j].xyz, u32(sVel[j].w + 0.5), sPos[j].w / max(P.wwFoamLife, 0.01), wwSeed(j))));
 }
 @compute @workgroup_size(1)
 fn dispBegin() { atomicStore(&sctl[2], 0u); }
