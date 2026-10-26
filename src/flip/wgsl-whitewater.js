@@ -94,14 +94,15 @@ fn wwSample(@builtin(global_invocation_id) g: vec3<u32>) {
   let sp = sPos[j]; if (sp.w <= 0.0) { return; }
   let p = sp.xyz; var vf = vec3<f32>(0.0);
   if (!inTank(p)) { sAux[j] = vec4<f32>(0.0); return; }   // out in the whitewater area: no water, still air
-  if (hasStorage(particleCell(p))) { vf = sampleBoth(p).vn; }
+  if (hasStorage(particleCell(p))) { vf = sampleNew(p); }   // the new velocity only (sampleBoth also read the old, unused here)
   // for foam: how fast the surface spreads apart (positive) or gathers (negative) there. Foam thins out where it spreads and collects
   // in lines and patches where the flow converges (what makes foam look lacy instead of an even sheet).
   var dq = 0.0;
   if (P.wwErode > 0.0 && u32(sVel[j].w + 0.5) == 2u) {
     let h = P.h; let ex = vec3<f32>(h, 0.0, 0.0); let ez = vec3<f32>(0.0, 0.0, h);
     if (hasStorage(particleCell(p + ex)) && hasStorage(particleCell(p - ex)) && hasStorage(particleCell(p + ez)) && hasStorage(particleCell(p - ez))) {
-      let div = (sampleBoth(p + ex).vn.x - sampleBoth(p - ex).vn.x + sampleBoth(p + ez).vn.z - sampleBoth(p - ez).vn.z) / (2.0 * h);
+      // one velocity component at each of the four places (32 grid faces; the whole new and old velocity there was 192)
+      let div = (sampleAxis(p + ex, 0u) - sampleAxis(p - ex, 0u) + sampleAxis(p + ez, 2u) - sampleAxis(p - ez, 2u)) / (2.0 * h);
       dq = clamp(round(div * 2.0), -15.0, 15.0);
     }
   }
@@ -120,6 +121,10 @@ fn sprayEmit(@builtin(global_invocation_id) g: vec3<u32>) {
   if (P.ocean != 0u && layerW(q.xyz) > 0.0) { return; }
   let v = vel[i].xyz; let foam = vel[i].w; let spd = length(v);
   let fast = clamp((spd * P.vs - P.sprMin) / (2.0 * P.sprMin), 0.0, 1.0);
+  // most water is calm: leave before looking at the cells around it when none of the sources below could fire (the same result)
+  let canCrest = fast > 0.0 && P.wwCrest > 0.0; let canChurn = foam > 0.55 && spd * P.vs > 0.5 && P.wwImpact > 0.0;
+  let canLand = -v.y * P.vs / max(P.sprMin, 0.1) > 0.5 && P.wwLand > 0.0;
+  if (!(canCrest || canChurn || canLand) || P.q8 <= 0.1) { return; }
   let bc = vec3<i32>(floor((q.xyz - vec3<f32>(P.x0, P.y0, P.z0)) * P.ih - vec3<f32>(0.5)));
   var rho = 0.0;
   for (var dz = 0; dz <= 1; dz++) { for (var dy = 0; dy <= 1; dy++) { for (var dx = 0; dx <= 1; dx++) { rho += wetCell(bc + vec3<i32>(dx, dy, dz)); } } }

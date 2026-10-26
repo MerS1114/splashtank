@@ -23,7 +23,7 @@ const FLIP_L = {
   tileReset: [12], tileNeedClear: [0, 17], tileMark: [0, 1, 17], tileMarkPhi: [0, 7, 12, 17, 18, 19], tileMarkFill: [0, 10, 11, 17], phiInitAll: [0, 7, 10, 11, 12, 18, 19, 31], tileFree: [0, 12, 16, 17, 20, 21], argsNew: [12, 14], tileAlloc: [0, 12, 16, 19, 20, 21], tileFix: [0, 12],
   initNew: [0, 7, 8, 10, 11, 12, 21, 31], slotListBuild: [0, 12, 16, 18], argsSlots: [12, 14], growFree: [12, 20, 25],
   sortClear: [22], sortHist: [0, 1, 22], sortScan: [22], sortScatter: [0, 1, 2, 22, 23, 24, 26, 27], sortCopy: [0, 1, 2, 23, 24, 26, 27], unsort: [0, 1, 23, 26],
-  clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], p2gWin: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], spinEmit: [0, 1, 2, 3, 6, 16, 28, 29, 30], wwAdvect: [0, 1, 2], sprayStep: [0, 10, 11, 28, 29, 30, 32, 33], sprayDisp: [0, 15, 28, 29, 30], sprayDispSG: [0, 15, 28, 29, 30], dispBegin: [30], packDisp: [1, 12, 15, 30, 37, 38], wwSample: [0, 3, 5, 6, 7, 16, 28, 29, 33], wwArgs: [0, 14, 30],
+  clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], p2gWin: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], spinEmit: [0, 1, 2, 3, 6, 16, 28, 29, 30], wwAdvect: [0, 1, 2], sprayStep: [0, 10, 11, 28, 29, 30, 32, 33], sprayDisp: [0, 15, 28, 29, 30], sprayDispSG: [0, 15, 28, 29, 30], dispBegin: [30], packDisp: [1, 12, 15, 30, 37, 38], wwSample: [0, 3, 6, 7, 16, 28, 29, 33], wwArgs: [0, 14, 30],
   airClear: [0, 34], airSplatW: [0, 1, 2, 6, 16, 34], airSplatS: [0, 28, 29, 34], airUpdate: [0, 10, 11, 32, 34, 35], airCopy: [0, 32, 35], dripStep: [0, 6, 7, 10, 16, 28, 29, 30, 36],
   normFaces: [0, 3, 5, 7, 10, 12, 16, 18, 19], divergence: [0, 3, 6, 7, 9, 12, 16, 18, 19],
   listClear: [12], buildList: [0, 7, 12, 13, 18, 19], buildListSG: [0, 7, 12, 13, 18, 19], listArgs: [0, 12, 14], rbRed: [0, 7, 8, 9, 12, 13, 16, 19], rbBlack: [0, 7, 8, 9, 12, 13, 16, 19],
@@ -35,7 +35,7 @@ const FLIP_L = {
 // createComputePipelineAsync lets the driver compile them in parallel; done one after another on first use they stalled the first step
 // for many seconds on some GPUs (D3D shader compiles). pipes is set once all of them are ready.
 const FLIP_PIPES = new WeakMap();
-const WWSTAGES = new Set(['blocks', 'clear', 'p2g', 'classify', 'normFaces', 'air', 'spray']);
+const WWSTAGES = new Set(['blocks', 'clear', 'p2g', 'classify', 'normFaces', 'air', 'ww sample', 'ww move', 'ww emit']);
 function flipPipes(device) {
   let sh = FLIP_PIPES.get(device); if (sh) return sh;
   const sg = !!(device.features && device.features.has('subgroups'));
@@ -334,11 +334,14 @@ class FlipSim {
         dispatch(ps, 'wwArgs', 1);
         dispatch(ps, 'airClear', na); dispatch(ps, 'airSplatW', N); indirect(ps, 'airSplatS', 112); dispatch(ps, 'airUpdate', na); dispatch(ps, 'airCopy', na);
       } }] : []),
-      ...(this.sprayCap > 0 && !this.opt.noFoam ? [{ name: 'spray', fn: (ps) => {
-        dispatch(ps, 'wwArgs', 1); indirect(ps, 'wwSample', 112); indirect(ps, 'sprayStep', 112);
-        if (this.sprOnStep) { dispatch(ps, 'sprayEmit', N); if (this.pf32[83] > 0) dispatch(ps, 'spinEmit', N); }
-        if (this.dripOnStep) dispatch(ps, 'dripStep', this.ndrip);
-      } }] : []),
+      // whitewater in three timed parts: sampling the water at each point, moving the points, and making new ones from the water
+      ...(this.sprayCap > 0 && !this.opt.noFoam ? [
+        { name: 'ww sample', fn: (ps) => { dispatch(ps, 'wwArgs', 1); indirect(ps, 'wwSample', 112); } },
+        { name: 'ww move', fn: (ps) => { indirect(ps, 'sprayStep', 112); } },
+        { name: 'ww emit', fn: (ps) => {
+          if (this.sprOnStep) { dispatch(ps, 'sprayEmit', N); if (this.pf32[83] > 0) dispatch(ps, 'spinEmit', N); }
+          if (this.dripOnStep) dispatch(ps, 'dripStep', this.ndrip);
+        } }] : []),
       ...(nb ? [{ name: 'reseed', fn: (ps) => {
         dispatch(ps, 'nbKill', N); dispatch(ps, 'nbReset', 1); dispatch(ps, 'nbDead', N); indirect(ps, 'nbDeficit', 64); dispatch(ps, 'nbArgs', 1); indirect(ps, 'nbSpawn', 96);
       } }] : [])

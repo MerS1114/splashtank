@@ -16,7 +16,7 @@
       const warmTo = async () => { resetSim(0); for (let i = 0; i < W; i++) { stepOnce(); if (i % 10 === 9) await settle(); } await settle(); };
       say('Simulating up to ' + (W / 60).toFixed(2) + ' s, the moment to measure' + (atHead ? ' (the playhead)' : '') + '...');
       await sim.whenReady; await warmTo();
-      const N = sim.N, M = window.__benchM || 24, ST = ['sort', 'blocks', 'clear', 'p2g', 'narrow band', 'classify', 'normFaces', 'divergence', 'pressure', 'project', 'g2p', 'air', 'spray', 'reseed'];
+      const N = sim.N, M = window.__benchM || 24, ST = ['sort', 'blocks', 'clear', 'p2g', 'narrow band', 'classify', 'normFaces', 'divergence', 'pressure', 'project', 'g2p', 'air', 'ww sample', 'ww move', 'ww emit', 'reseed'];
       const f1 = (v) => v.toFixed(2), mb = (v) => Math.round(v / 1048576);
       const BASE = { noFoam: false, noCull: false, noSolidCache: false, fastAir: false, sort: true, sortAuto: true, subgroups: true, sortEvery: 16, iters: 0 };
       let lastSum = null;
@@ -55,7 +55,8 @@
       // The GPU can slow down during a long test, so every variant is measured right after a short rest, between two reference runs, and compared with their average.
       const rest = (ms) => new Promise((r) => setTimeout(r, ms));
       const trio = async (label, opt) => {
-        await settle(); await rest(window.__benchRest === undefined ? 6000 : window.__benchRest);
+        // a short pause only: after a 6 s one the first reference run was slow every time on Mer's NVIDIA card (65-115 ms against 10-65)
+        await settle(); await rest(window.__benchRest === undefined ? 1000 : window.__benchRest);
         const r1 = await measure('', {}, true);
         const v = await measure(label, opt);
         const r2 = await measure('', {}, true);

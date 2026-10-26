@@ -121,7 +121,10 @@
     '   vec3 ww = mix(1.0 - w, w, vec3(o)); s += ww.x * ww.y * ww.z * texelFetch(tAtlas, atl(c), 0).r; } return s; }' +
     ' void aniso(vec3 p) { vec3 g = (p - uA0) / uAh; float d0 = aDen(g);' +
     '  vec3 gr = vec3(aDen(g + vec3(1, 0, 0)) - aDen(g - vec3(1, 0, 0)), aDen(g + vec3(0, 1, 0)) - aDen(g - vec3(0, 1, 0)), aDen(g + vec3(0, 0, 1)) - aDen(g - vec3(0, 0, 1))) * 0.5;' +
-    '  float full = pow(uAh / uD, 3.0); float s = length(gr) / full; vFl = mix(1.0, 0.35, smoothstep(0.08, 0.3, s) * smoothstep(0.3, 0.55, d0 / full));' +
+    '  float full = pow(uAh / uD, 3.0); float s = length(gr) / full; float f = smoothstep(0.08, 0.3, s) * smoothstep(0.3, 0.55, d0 / full);' +
+    // squashed to 0.35 along the normal and widened 1.7 times along the surface (about the same volume): flat discs only as wide as
+    // a point left gaps between neighbours when seen at an angle, which the smoothing turned into grain
+    '  float tg = mix(1.0, 1.7, f); vFl = mix(1.0, 0.35, f) / tg; vRad *= tg; gl_PointSize *= tg;' +
     '  vN = length(gr) > 1e-6 ? normalize(mat3(modelViewMatrix) * (-gr)) : vec3(0.0, 0.0, 1.0); }\n#endif\n' +
     // vMV and vRad (the point's centre in view space and its radius) are for the surface's depth pass; uSzK enlarges the points there
     ' void place(vec3 p, float sz, float minPx) { vec4 mv = modelViewMatrix * vec4(p, 1.0); gl_Position = projectionMatrix * mv; sz *= uSzK; vMV = mv.xyz; vRad = 0.5 * uSize * sz; gl_PointSize = max((uOrtho > 0.0 ? uSize * uOrtho : uSize * uScale / (-mv.z)) * sz, minPx); }';
@@ -277,14 +280,16 @@
   const sScene = new THREE.Scene(), sGroup = new THREE.Group(), sW = new THREE.Points(geoW, matWS), sD = new THREE.Points(geoD, matDS);
   [sW, sD].forEach((q) => { q.frustumCulled = false; sGroup.add(q); }); sScene.add(sGroup);
   // separable bilateral blur of the depth: the radius follows the point size on screen; samples much nearer or further are left out
-  const blurMat = new THREE.ShaderMaterial({ uniforms: { tD: { value: null }, uDir: { value: new THREE.Vector2() }, uScale: U.uScale, uOrtho: U.uOrtho, uK: { value: 1 } }, vertexShader: fsVert, depthTest: false, depthWrite: false,
-    fragmentShader: 'uniform sampler2D tD; uniform vec2 uDir; uniform float uScale; uniform float uOrtho; uniform float uK; varying vec2 vUv;' +
+  const blurMat = new THREE.ShaderMaterial({ uniforms: { tD: { value: null }, uDir: { value: new THREE.Vector2() }, uScale: U.uScale, uOrtho: U.uOrtho, uK: { value: 1 }, uCap: { value: 28 }, uNrf: { value: 1 } }, vertexShader: fsVert, depthTest: false, depthWrite: false,
+    fragmentShader: 'uniform sampler2D tD; uniform vec2 uDir; uniform float uScale; uniform float uOrtho; uniform float uK; uniform float uCap; uniform float uNrf; varying vec2 vUv;' +
       'void main() { vec4 c = texture2D(tD, vUv); if (c.r <= 0.0) { gl_FragColor = c; return; }' +
-      ' float rpx = clamp((uOrtho > 0.0 ? c.a * uOrtho : c.a * uScale / c.r) * 4.0 * uK, 1.0, 28.0); float st = max(1.0, rpx / 10.0); float sr = c.a * 3.0;' +
+      ' float rpx = clamp((uOrtho > 0.0 ? c.a * uOrtho : c.a * uScale / c.r) * 4.0 * uK, 1.0, uCap); float st = max(1.0, rpx / 10.0); float sr = c.a * 3.0;' +
       ' float sum = 0.0; float ws = 0.0; for (int i = -10; i <= 10; i++) { float x = float(i) * st; vec4 q = texture2D(tD, vUv + uDir * x); if (q.r <= 0.0) continue;' +
       // narrow-range filter (Truong and Yuksel 2018): a sample far behind is another surface and is left out; one far in front is pulled
       // to just in front, so the edge of a nearer sheet still smooths this one a little instead of being ignored or dragging it forward
-      '  float qd = q.r; if (qd > c.r + sr) continue; qd = max(qd, c.r - sr); float w = exp(-x * x / (2.0 * rpx * rpx * 0.25)); sum += qd * w; ws += w; }' +
+      '  float qd = q.r; float w = exp(-x * x / (2.0 * rpx * rpx * 0.25));' +
+      '  if (uNrf > 0.5) { if (qd > c.r + sr) continue; qd = max(qd, c.r - sr); } else { float dz = (qd - c.r) / (c.a * 4.0); w *= exp(-dz * dz); }' +   // uNrf 0: the older bilateral weight
+      '  sum += qd * w; ws += w; }' +
       ' gl_FragColor = vec4(sum / max(ws, 1e-6), c.gba); }' });
   const fsScene = new THREE.Scene(), fsCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1), fsQuad = new THREE.Mesh(new THREE.PlaneBufferGeometry(2, 2), blurMat);
   fsQuad.frustumCulled = false; fsScene.add(fsQuad);
@@ -328,7 +333,8 @@
     U.uSzK.value = 1.25;   // a little larger than drawn as points, so neighbours overlap into one surface
     renderer.setClearColor(0x000000, 0); renderer.setRenderTarget(surfA); renderer.clear(); renderer.render(sScene, cam);
     U.uSzK.value = 1;
-    blurMat.uniforms.uK.value = S.surfSmooth;
+    blurMat.uniforms.uK.value = S.surfSmooth; blurMat.uniforms.uNrf.value = S.surfNrf === false ? 0 : 1;
+    blurMat.uniforms.uCap.value = 28 * Math.max(1, surfSz.y / 720);   // 28 pixels on a 720-pixel-high picture, more on bigger or sharper screens
     for (let it = 0; it < 2; it++) {
       blurMat.uniforms.tD.value = surfA.texture; blurMat.uniforms.uDir.value.set(1 / surfSz.x, 0); renderer.setRenderTarget(surfB); renderer.render(fsScene, fsCam);
       blurMat.uniforms.tD.value = surfB.texture; blurMat.uniforms.uDir.value.set(0, 1 / surfSz.y); renderer.setRenderTarget(surfA); renderer.render(fsScene, fsCam);

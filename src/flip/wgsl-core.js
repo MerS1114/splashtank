@@ -159,20 +159,20 @@ fn sampleBoth(p: vec3<f32>) -> VV {
 }
 // the new grid velocity alone (reads only accV, for kernels that cannot also bind accW)
 fn sampleNew(p: vec3<f32>) -> vec3<f32> {
-  var r = vec3<f32>(0.0);
-  for (var axis = 0u; axis < 3u; axis++) {
-    var g = (p - vec3<f32>(P.x0, P.y0, P.z0)) * P.ih;
-    if (axis == 0u) { g.y -= 0.5; g.z -= 0.5; } else if (axis == 1u) { g.x -= 0.5; g.z -= 0.5; } else { g.x -= 0.5; g.y -= 0.5; }
-    let f0 = floor(g); let fr = g - f0; let i0 = vec3<i32>(f0);
-    var sn = 0.0;
-    for (var c = 0u; c < 8u; c++) {
-      let dx = i32(c & 1u); let dy = i32((c >> 1u) & 1u); let dz = i32((c >> 2u) & 1u);
-      let w = select(1.0 - fr.x, fr.x, dx == 1) * select(1.0 - fr.y, fr.y, dy == 1) * select(1.0 - fr.z, fr.z, dz == 1);
-      sn += w * gvR(faceIndex(axis, i0.x + dx, i0.y + dy, i0.z + dz));
-    }
-    r[axis] = sn;
+  return vec3<f32>(sampleAxis(p, 0u), sampleAxis(p, 1u), sampleAxis(p, 2u));
+}
+// one component of the new grid velocity at p (8 faces instead of 24, when only that one is needed)
+fn sampleAxis(p: vec3<f32>, axis: u32) -> f32 {
+  var g = (p - vec3<f32>(P.x0, P.y0, P.z0)) * P.ih;
+  if (axis == 0u) { g.y -= 0.5; g.z -= 0.5; } else if (axis == 1u) { g.x -= 0.5; g.z -= 0.5; } else { g.x -= 0.5; g.y -= 0.5; }
+  let f0 = floor(g); let fr = g - f0; let i0 = vec3<i32>(f0);
+  var sn = 0.0;
+  for (var c = 0u; c < 8u; c++) {
+    let dx = i32(c & 1u); let dy = i32((c >> 1u) & 1u); let dz = i32((c >> 2u) & 1u);
+    let w = select(1.0 - fr.x, fr.x, dx == 1) * select(1.0 - fr.y, fr.y, dy == 1) * select(1.0 - fr.z, fr.z, dz == 1);
+    sn += w * gvR(faceIndex(axis, i0.x + dx, i0.y + dy, i0.z + dz));
   }
-  return r;
+  return sn;
 }
 
 // ---- narrow band and ocean helpers ----

@@ -32,7 +32,7 @@ const say = (s) => { console.log(s); full.push(s); };
         if (/swiftshader/i.test(info.gpu) && REAL) say('WARNING: the browser fell back to a software GPU. Numbers below are not the graphics card.');
       }
       // bake
-      await t.ev((s, qq) => { const x = window.__splash; x.S.bk.dur = s; x.S.bkDetail = qq; x.setPtab('bake'); document.querySelector('#btn-bake').click(); }, bakeS, q);
+      await t.ev((s, qq) => { const x = window.__splash; x.S.bk.dur = s; x.setPtab('bake'); document.querySelector('#seg-bkdetail [data-v="' + qq + '"]').click(); document.querySelector('#btn-bake').click(); }, bakeS, q);   // the Quality button itself, so the panel shows it
       const t0 = Date.now(); await until(t, () => !window.__splash.S.baking, 4 * 3600e3, 3000);
       const bk = await t.ev(() => { const c = window.__splash.S.cache; if (!c) return null; let w = 0, sp = 0; for (const f of c.frames) { w = Math.max(w, f.n); sp = Math.max(sp, f.sp ? f.sp.n : 0); } return { frames: c.frames.length, maxN: w, ww: sp, mb: Math.round(c.frames.reduce((a, f) => a + (f.p32 ? f.p32.byteLength + f.sf.byteLength : f.pos.byteLength + f.spd.byteLength), 0) / 1048576), d: c.d, status: document.querySelector('#bake-status').textContent }; });
       const bakeSec = Math.round((Date.now() - t0) / 1000);
@@ -57,6 +57,8 @@ const say = (s) => { console.log(s); full.push(s); };
       });
       say(''); say('Bake playback drawn as a surface: ' + (surf ? surf.fps + ' frames a second' : 'no bake'));
       await wait(1000); await t.shot('stress_' + sc.replace(/ /g, '') + '_' + String(sp).replace('.', '') + '_surface');
+      await t.ev(() => { window.__splash.S.surfAniso = !window.__splash.S.surfAniso; }); await wait(1000); await t.shot('stress_' + sc.replace(/ /g, '') + '_' + String(sp).replace('.', '') + '_surface_shapes_' + (await t.ev(() => window.__splash.S.surfAniso ? 'on' : 'off')));
+      await t.ev(() => { window.__splash.S.surfAniso = !window.__splash.S.surfAniso; });
       await t.ev(() => { window.__splash.S.surface = false; }); await wait(800);
       await t.shot('stress_' + sc.replace(/ /g, '') + '_' + String(sp).replace('.', '') + '_points');
       await t.ev(() => { window.__splash.S.tl.t = 0; }); await wait(1000);
