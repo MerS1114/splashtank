@@ -48,6 +48,7 @@ On Mac or Linux:
 - The words after `--` are the scene, the spacing, and optionally a bake length in seconds (for example `"Meteor lake" 0.03 4`): with a bake, it first bakes that many seconds at Preview quality, so the Smoothness test also times bake playback.
 - `SPLASH_BROWSER` points at a browser program if Edge and Chrome are not in their usual places.
 - The report says which GPU WebGPU found. If it says SwiftShader, the browser fell back to software and the numbers are not the card's.
+- `npm run stress` runs heavier, longer cases one after another (Meteor lake at spacings 0.03 with a Final bake, 0.02 and 0.015, and a full-depth Dam break at 0.025), each with a bake, 20 seconds of live sim, bake playback as points and as a surface, and the Solver benchmark, and writes `test-output/stress-report.txt` with a one-line summary per case first. About an hour on a fast card. Set `SPLASH_GPU` and `SPLASH_PAGE` the same way first.
 - Any other test runs the same way, for example `$env:SPLASH_GPU = "1"; node tests/surface.js "Dam break" 0.05` (see `tests/README.md`).
 
 The GPU this was tuned for is Mer's work computer (Intel UHD Graphics 730); numbers from another card show how the page behaves there, not on that one.

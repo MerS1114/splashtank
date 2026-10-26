@@ -8,7 +8,8 @@
     "check": "node tools/check.js",
     "test": "node tools/build.js && node tests/smoke.js",
     "t": "node tools/build.js && node",
-    "gpu": "node tests/gpu.js"
+    "gpu": "node tests/gpu.js",
+    "stress": "node tests/stress.js"
   },
   "devDependencies": {
     "@sparticuz/chromium": "^153.0.0",
