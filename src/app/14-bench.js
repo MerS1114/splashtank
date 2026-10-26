@@ -59,8 +59,9 @@
         const r1 = await measure('', {}, true);
         const v = await measure(label, opt);
         const r2 = await measure('', {}, true);
-        const ref = (r1 + r2) / 2, pc = (v / ref - 1) * 100;
-        say('  reference before ' + f1(r1) + ' ms and after ' + f1(r2) + ' ms, so this is ' + (pc <= 0 ? Math.abs(pc).toFixed(0) + '% faster' : pc.toFixed(0) + '% slower') + ' than their average');
+        // one reference run now and then is disturbed (seen at 49 and 70 ms against 10): then the lower one is the fair comparison
+        const odd = Math.max(r1, r2) > 1.3 * Math.min(r1, r2), ref = odd ? Math.min(r1, r2) : (r1 + r2) / 2, pc = (v / ref - 1) * 100;
+        say('  reference before ' + f1(r1) + ' ms and after ' + f1(r2) + ' ms, so this is ' + (pc <= 0 ? Math.abs(pc).toFixed(0) + '% faster' : pc.toFixed(0) + '% slower') + ' than ' + (odd ? 'the lower one (the other was disturbed)' : 'their average'));
         return { ref, v, pc };
       };
       await measure('A. reference: everything on (particles sorted every 16th step)', {});
@@ -68,7 +69,7 @@
       await trio('G. grouped transfer ' + (S.p2gWin ? 'off' : 'on') + ' (p2g adds in workgroup memory first; Speed-ups)', { p2gWin: !S.p2gWin });
       const pi = S.iters > 20 ? 20 : 40;
       await trio('P. ' + pi + ' pressure iterations instead of ' + S.iters, { iters: pi });
-      await trio('C. white water and air drag skipped (for comparison)', { noFoam: true });
+      await trio('C. all whitewater (spray, mist, foam, bubbles, air field), white water and air drag skipped (for comparison)', { noFoam: true });
       await trio('D. viewport not drawn (is drawing the points taking GPU time from the solver?)', { noDraw: true });
       say('');
       say('Blocks: at most ' + (sim.peak || sim.blocksUsed) + ' in use during the test, room for ' + sim.scap + (sim.grew ? ', the pool grew ' + sim.grew + ' times' : ''));
@@ -126,9 +127,11 @@
       }
       await new Promise((r) => setTimeout(r, 400));
       if (sim.stepMs) sim.stepMs.length = 0; sim.slowMs = 0; sim.maxQ = 0;
+      // the timeline's end must not stop or loop the sim while it is timed (Meteor lake ends at 6 s: it read as 60% of real time)
+      const tl0 = { dur: S.tl.dur, end: S.tl.end }; S.tl.dur = 1e6; S.tl.end = 'hold';
       setPlaying(true);
       say(''); say('Live sim, ' + (window.__smoothSecs || 10) + ' seconds from the start:');
-      const L = await record(window.__smoothSecs || 10); L.live = true; setPlaying(false);
+      const L = await record(window.__smoothSecs || 10); L.live = true; setPlaying(false); S.tl.dur = tl0.dur; S.tl.end = tl0.end;
       const simS = (S.frame - L.frame0) / 60;
       say('  The sim got through ' + f1(simS) + ' s of its time (' + Math.round(100 * simS / L.secs) + '% of real time). ' + fmtN(sim.N) + ' particles now, solver step about ' + f1(sim.lastMs) + ' ms from start until the browser reports it done (median of the last 31, slowest ' + f0(sim.slowMs) + ' ms)' + (sim.gpuMs ? ', of which the GPU was busy ' + f1(sim.gpuMs) + ' ms' : '') + (sim.maxQ ? ', up to ' + sim.maxQ + ' steps queued' : '') + (S.lastSub > 1 ? ' with ' + S.lastSub + ' substeps a frame' : '') + ', ' + fmtN(shownN) + ' points drawn.');
       report(L);
