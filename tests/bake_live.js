@@ -1,13 +1,12 @@
 // The bake shows in the viewport while it runs, and a cancelled bake keeps the frames it finished.
-const chromium = require('@sparticuz/chromium').default; const puppeteer = require('puppeteer-core');
+const { launch, pageUrl } = require('./browser');
 const { PAGE, OUT } = require('./paths');
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 (async () => {
-  const exe = await chromium.executablePath();
-  const br = await puppeteer.launch({ executablePath: exe, args: [...chromium.args, '--enable-unsafe-webgpu', '--enable-features=Vulkan,WebGPU', '--use-webgpu-adapter=swiftshader', '--use-angle=swiftshader', '--ignore-gpu-blocklist', '--allow-file-access-from-files'], headless: 'shell' });
+  const br = await launch();
   const pg = await br.newPage(); await pg.setViewport({ width: 1440, height: 900 });
   const errs = []; pg.on('pageerror', (e) => errs.push('page: ' + e.message)); pg.on('console', (m) => { const t = m.text(); if (/error|invalid/i.test(t)) errs.push(t.slice(0, 300)); });
-  await pg.goto('file://' + PAGE); await wait(6000);
+  await pg.goto(pageUrl(PAGE)); await wait(6000);
   await pg.select('#scene', 'Dam break'); await wait(2500);
   await pg.click('#seg-mode button[data-v=bake]'); await wait(300);
   await pg.evaluate(() => { const s = document.querySelector('#b-dur'); s.value = 3; s.dispatchEvent(new Event('input', { bubbles: true })); });

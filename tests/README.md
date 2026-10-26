@@ -2,6 +2,10 @@
 
 All tests open `dist/SplashTank.html` in headless Chromium with a software GPU, so build first (`npm run build`). Screenshots and downloads go to `test-output/`. Run them one at a time.
 
+The browser is started in `browser.js`. Set `SPLASH_GPU=1` to use the Edge or Chrome installed on the computer, in a window, on its real graphics card (`SPLASH_BROWSER` = the browser program if it is not found), and `SPLASH_PAGE` to test another copy of the page (a file or a web address such as the testing page) instead of `dist/`. See the README for setting up a computer for this.
+
+- `gpu.js` (`npm run gpu -- "Meteor lake" 0.03 [bake seconds]`): runs the Smoothness test and the Solver benchmark and saves them to `test-output/gpu-report.txt`, with screenshots as points and as a surface. Meant for a real GPU; it says which GPU WebGPU found.
+
 - `lib.js`: shared start-up for new tests (open a scene, run code in the page, wait for a condition, screenshot). Not a test itself.
 - `smoke.js`: the quick pass/fail check (`npm test`).
 - `ui2.js`, `ui3.js`: interface basics: typing values, tooltips, right-click menu, search, add menu, live cache lanes, bake panel, gizmo, view snapping.

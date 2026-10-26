@@ -1,10 +1,9 @@
 const {PAGE, OUT} = require('./paths');
-const chromium=require('@sparticuz/chromium').default; const puppeteer=require('puppeteer-core');
+const { launch, pageUrl } = require('./browser');
 const wait=(ms)=>new Promise(r=>setTimeout(r,ms));
-(async()=>{ const exe=await chromium.executablePath();
- const br=await puppeteer.launch({executablePath:exe,args:[...chromium.args,'--enable-unsafe-webgpu','--enable-features=Vulkan,WebGPU','--use-webgpu-adapter=swiftshader','--use-angle=swiftshader','--ignore-gpu-blocklist','--allow-file-access-from-files'],headless:'shell'});
+(async()=>{ const br=await launch();
  const pg=await br.newPage(); await pg.setViewport({width:1440,height:900}); const errs=[]; pg.on('pageerror',e=>errs.push('PAGE '+e.message));
- await pg.goto('file://'+PAGE); await wait(6000);
+ await pg.goto(pageUrl(PAGE)); await wait(6000);
  const ev=(f)=>pg.evaluate(f);
  await ev(()=>{ const s=window.__splash, o=s.objs.find(q=>q.kind==='mesh'); s.select(o); s.cam.r=2.6; s.cam.target.set(o.target.x,o.target.y,o.target.z); s.cam.theta=0.7; s.cam.phi=1.0; s.enterEdit(o); s.setSelMode('v'); s.ES.v.add(0); s.ES.v.add(1); s.ES.v.add(3); s.setSelMode('f'); s.setSelMode('v'); }); await wait(700);
  await pg.screenshot({path:OUT+'/e5_v.png', clip:{x:200,y:150,width:700,height:500}});

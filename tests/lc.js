@@ -1,10 +1,9 @@
 const {PAGE, OUT} = require('./paths');
-const chromium=require('@sparticuz/chromium').default; const puppeteer=require('puppeteer-core');
+const { launch, pageUrl } = require('./browser');
 const wait=(ms)=>new Promise(r=>setTimeout(r,ms));
-(async()=>{ const exe=await chromium.executablePath();
- const br=await puppeteer.launch({executablePath:exe,args:[...chromium.args,'--enable-unsafe-webgpu','--enable-features=Vulkan,WebGPU','--use-webgpu-adapter=swiftshader','--use-angle=swiftshader','--ignore-gpu-blocklist','--allow-file-access-from-files'],headless:'shell'});
+(async()=>{ const br=await launch();
  const pg=await br.newPage(); await pg.setViewport({width:1400,height:900}); const errs=[]; pg.on('console',m=>{const t=m.text(); if(/rror|nvalid/.test(t)) errs.push(t.slice(0,200));}); pg.on('pageerror',e=>errs.push(e.message));
- await pg.goto('file://'+PAGE); await wait(5000);
+ await pg.goto(pageUrl(PAGE)); await wait(5000);
  const st=()=>pg.evaluate(()=>{const s=window.__splash; return Object.assign(s.lc(),{frame:s.S.frame, N:s.getSim().N, tlt:+s.S.tl.t.toFixed(2), sub:s.S.lastSub, playing:s.S.playing, info:(document.querySelector('#lc-info')||{}).textContent, bar:(document.querySelector('#lc-bar')||{}).style?.width});});
  // coarse spacing so it runs quickly here
  await pg.evaluate(()=>{ const i=document.querySelector('#s-res'); i.value=Math.round(1000*Math.log(0.08/0.01)/Math.log(16)); i.dispatchEvent(new Event('input',{bubbles:true})); i.dispatchEvent(new Event('change',{bubbles:true})); });

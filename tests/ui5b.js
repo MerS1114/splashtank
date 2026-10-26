@@ -1,10 +1,9 @@
 const {PAGE, OUT} = require('./paths');
-const chromium=require('@sparticuz/chromium').default; const puppeteer=require('puppeteer-core');
+const { launch, pageUrl } = require('./browser');
 const wait=(ms)=>new Promise(r=>setTimeout(r,ms));
-(async()=>{ const exe=await chromium.executablePath();
- const br=await puppeteer.launch({executablePath:exe,args:[...chromium.args,'--enable-unsafe-webgpu','--enable-features=Vulkan,WebGPU','--use-webgpu-adapter=swiftshader','--use-angle=swiftshader','--ignore-gpu-blocklist','--allow-file-access-from-files'],headless:'shell'});
+(async()=>{ const br=await launch();
  const pg=await br.newPage(); await pg.setViewport({width:1440,height:900}); const errs=[]; pg.on('console',m=>{const t=m.text(); if(/rror|nvalid/.test(t)) errs.push(t.slice(0,300));}); pg.on('pageerror',e=>errs.push('PAGE '+e.message));
- await pg.goto('file://'+PAGE); await wait(6000);
+ await pg.goto(pageUrl(PAGE)); await wait(6000);
  const ev=(f,...a)=>pg.evaluate(f,...a);
  // 1. click-drag on an object selects but never moves it
  await ev(()=>{ const s=window.__splash; s.select(null); }); await wait(200);
