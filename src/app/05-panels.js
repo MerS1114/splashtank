@@ -305,6 +305,7 @@
     const r = document.createElement('div'); r.className = 'row plain';
     r.innerHTML = '<label data-tip="Points draws every water point. Surface melts them into one smooth, shaded surface with sky reflections, like a mesh but made on the fly each frame (whitewater stays as points). Drawing only: the simulation is the same.">Draw water</label><div class="seg" id="seg-surf" role="group" aria-label="Draw water"><button type="button" data-v="0">Points</button><button type="button" data-v="1">Surface</button></div>';
     gd.appendChild(r); setSeg($('#seg-surf'), S.surface ? '1' : '0'); seg('#seg-surf', (v) => { S.surface = v === '1'; r.classList.toggle('nd', S.surface); lastGen = -1; });
+    addCheck(gd, 'c-surfaniso', 'Surface shapes', S.surfAniso, 'With Draw water: Surface, points at the surface are drawn flattened along it, so they melt into a smooth skin and thin sheets look like sheets, while drops in the air stay round. Off draws every point round. Drawing only.', (on) => { S.surfAniso = on; }, true);
     addSlider(gd, { id: 'd-surfsm', label: 'Surface smoothing', min: 0.3, max: 3, step: 0.05, value: S.surfSmooth, def: dv('surfSmooth'), fmt: (v) => v.toFixed(2) + '×', tip: 'How far the surface is smoothed, compared with the point size. More melts small bumps and drops into the surface; less keeps detail. Only with Draw water: Surface.', onInput: (v) => { S.surfSmooth = v; } });
   }
   {   // how a bake plays back: Full always draws everything; Smooth drops look-only points while frames come late; Fast always drops them

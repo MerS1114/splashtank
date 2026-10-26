@@ -108,6 +108,21 @@
     '  return vec3(float(v & mx) / float(mx), float((v >> bx) & my) / float(my), float((v >> (bx + by)) & mz) / float(mz)) * 65535.0; }' +
     // look-only copies smaller than uCull pixels on screen add nothing a viewer can see: far away they are left out
     ' float pxAt(vec3 p, float sz) { vec4 mv = modelViewMatrix * vec4(p, 1.0); return (uOrtho > 0.0 ? uSize * uOrtho : uSize * uScale / max(-mv.z, 1e-4)) * sz; }' +
+    // Surface drawing, anisotropic shapes: a coarse grid of how many water points each cell holds (tAtlas, its z slices tiled across a 2D
+    // texture: uA0 corner, uAh cell size, uAn cells per side, uAt slices per row) gives every point the direction out of the water. SPLAT
+    // draws each point into its cell; ANISO flattens points at the surface along that direction (vN, vFl) so they melt into a smooth skin.
+    '\n#if defined(SPLAT) || defined(ANISO)\n uniform vec3 uA0; uniform float uAh; uniform vec3 uAn; uniform float uAt; uniform vec2 uAs;' +
+    ' ivec2 atl(ivec3 c) { int t = int(uAt + 0.5); return ivec2((c.z % t) * int(uAn.x + 0.5) + c.x, (c.z / t) * int(uAn.y + 0.5) + c.y); }\n#endif\n' +
+    '\n#ifdef SPLAT\n void splatAt(vec3 p) { ivec3 c = clamp(ivec3(floor((p - uA0) / uAh)), ivec3(0), ivec3(uAn) - 1); vec2 px = vec2(atl(c)) + 0.5;' +
+    '  gl_Position = vec4(px / uAs * 2.0 - 1.0, 0.0, 1.0); gl_PointSize = 1.0; }\n#endif\n' +
+    '\n#ifdef ANISO\n uniform sampler2D tAtlas; varying vec3 vN; varying float vFl;' +
+    ' float aDen(vec3 g) { vec3 f = g - 0.5; vec3 b = floor(f); vec3 w = f - b; ivec3 c0 = ivec3(b); float s = 0.0; ivec3 hi = ivec3(uAn) - 1;' +
+    '  for (int k = 0; k < 8; k++) { ivec3 o = ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1); ivec3 c = c0 + o; if (any(lessThan(c, ivec3(0))) || any(greaterThan(c, hi))) continue;' +
+    '   vec3 ww = mix(1.0 - w, w, vec3(o)); s += ww.x * ww.y * ww.z * texelFetch(tAtlas, atl(c), 0).r; } return s; }' +
+    ' void aniso(vec3 p) { vec3 g = (p - uA0) / uAh; float d0 = aDen(g);' +
+    '  vec3 gr = vec3(aDen(g + vec3(1, 0, 0)) - aDen(g - vec3(1, 0, 0)), aDen(g + vec3(0, 1, 0)) - aDen(g - vec3(0, 1, 0)), aDen(g + vec3(0, 0, 1)) - aDen(g - vec3(0, 0, 1))) * 0.5;' +
+    '  float full = pow(uAh / uD, 3.0); float s = length(gr) / full; vFl = mix(1.0, 0.35, smoothstep(0.08, 0.3, s) * smoothstep(0.3, 0.55, d0 / full));' +
+    '  vN = length(gr) > 1e-6 ? normalize(mat3(modelViewMatrix) * (-gr)) : vec3(0.0, 0.0, 1.0); }\n#endif\n' +
     // vMV and vRad (the point's centre in view space and its radius) are for the surface's depth pass; uSzK enlarges the points there
     ' void place(vec3 p, float sz, float minPx) { vec4 mv = modelViewMatrix * vec4(p, 1.0); gl_Position = projectionMatrix * mv; sz *= uSzK; vMV = mv.xyz; vRad = 0.5 * uSize * sz; gl_PointSize = max((uOrtho > 0.0 ? uSize * uOrtho : uSize * uScale / (-mv.z)) * sz, minPx); }';
   // water: blended between frame A and frame B (the same particle has the same number in both). A particle only in B shows at once;
@@ -124,7 +139,7 @@
     // buried water (compact bake frames mark it, bit 12): no view can see it, so only 1 in 16 is drawn, twice the size and without
     // copies, as a backstop behind gaps between surface points (with none the inside was hollow and the gaps showed as dark specks)
     '  bool bur = uHide > 0.5 && (!va || !cA || ((ra >> 12u) & 1u) == 1u) && (!vb || !cB || ((rb >> 12u) & 1u) == 1u) && (va || vb) && (cA || cB);' +
-    '  if (bur && ((hsh(uint(bi)) & 15u) != 0u || lk > 0.5)) { hide(); return; }' +
+    '\n#ifndef SPLAT\n if (bur && ((hsh(uint(bi)) & 15u) != 0u || lk > 0.5)) { hide(); return; }\n#endif\n' +
     // a slot can be a different particle in the next frame (narrow band reseeding reuses slots): if it is further than it could have moved,
     // it is not blended but switches halfway, so nothing streaks across the water
     '  vec3 pa = va ? pAt(tPA, tc, uQbA) * uQA + uB0A : vec3(0.0); vec3 pb = vb ? pAt(tPB, tc, uQbB) * uQB + uB0B : vec3(0.0);' +
@@ -134,9 +149,11 @@
     '  else if (vb) { p = pb; spd = float(sb) / 16.0; lv = lb; }' +
     '  else { hide(); return; }' +
     '  vK = 0.0; vS = spd; vL = lv / 15.0; vF = vL * uFoam;' +
+    '\n#ifdef SPLAT\n if (lk > 0.5) { hide(); return; } splatAt(p); return;\n#endif\n' +
     '  if (lk > uKw + 0.5) { hide(); return; }' +
     '  if (lk > 0.5) { p += ball(uint(bi) * 16u + uint(lk)) * 0.5 * uD; if (pxAt(p, 1.0) < uCull) { hide(); return; } }' +
-    '  place(p, (1.0 - 0.3 * vF) * (bur ? 2.0 : 1.0), 1.5); }';
+    '  place(p, (1.0 - 0.3 * vF) * (bur ? 2.0 : 1.0), 1.5);' +
+    '\n#ifdef ANISO\n aniso(p);\n#endif\n }';
   // deep water (narrow band, look only): the centre of each deep cell and four extras spread over the cell
   const VD = VHEAD + ' uniform highp usampler2D tP; uniform highp usampler2D tS; uniform float uBase; uniform float uN; uniform vec3 uB0; uniform vec3 uQ; uniform vec3 uQb;' +
     ' void main() { int k1 = int(uK1 + 0.5); int bi = gl_VertexID / k1; float lk = float(gl_VertexID - bi * k1); if (bi >= int(uN + 0.5)) { hide(); return; }' +
@@ -185,6 +202,7 @@
   const pmat = matW;   // the shared uniforms (size, colours, ...) are the same objects in all three materials
   const boxU = (b0, q, b) => { b0.value.set(b.x0, b.y0, b.z0); q.value.set((b.x1 - b.x0) / 65535, (b.y1 - b.y0) / 65535, (b.z1 - b.z0) / 65535); };
   // show slot a (and slot bi to blend the water towards, by w)
+  let lastBox = null;   // the box of the water drawn last (the surface's count grid covers it)
   function showSlots(a, bi, w) {
     const A = SLOTS[a], B = SLOTS[bi], N = w < 0.5 ? A : B, uw = matW.uniforms;
     // while the live sim runs, drawing shares the GPU with the solver (on Mer's UHD 730 a redraw cost more than half a step), so the
@@ -202,7 +220,7 @@
     const tp = (X) => (X.q ? X.T.q : X.T.p), ts = (X) => (X.q ? X.T.w : X.T.s), tff = (X) => (X.q ? X.T.w : X.T.f), qb = (v, X) => (X.q ? v.set(X.q[0], X.q[1], X.q[2]) : v.set(0, 0, 0));
     uw.tPA.value = tp(A); uw.tSA.value = ts(A); uw.tFA.value = tff(A); uw.tPB.value = tp(B); uw.tSB.value = ts(B); uw.tFB.value = tff(B); qb(uw.uQbA.value, A); qb(uw.uQbB.value, B);
     uw.uNA.value = A.nW; uw.uNB.value = w > 0 ? B.nW : 0; uw.uFmA.value = A.fm ? 1 : 0; uw.uFmB.value = B.fm ? 1 : 0; uw.uBlend.value = w; uw.uK1.value = kW;
-    boxU(uw.uB0A, uw.uQA, A.b || DEFB); boxU(uw.uB0B, uw.uQB, B.b || DEFB);
+    boxU(uw.uB0A, uw.uQA, A.b || DEFB); boxU(uw.uB0B, uw.uQB, B.b || DEFB); lastBox = A.b || DEFB;
     const ud = matD.uniforms; ud.tP.value = tp(N); ud.tS.value = ts(N); qb(ud.uQb.value, N); ud.uBase.value = N.rowD * TEXW; ud.uN.value = N.nD; ud.uK1.value = kD; boxU(ud.uB0, ud.uQ, N.b || DEFB);
     const us = matS.uniforms; us.tP.value = tp(N); us.tK.value = N.T.k; qb(us.uQb.value, N); us.uBase.value = N.rowS * TEXW; us.uN.value = N.nS; us.uK1.value = kS; boxU(us.uB0, us.uQ, N.sb || N.b || DEFB);   // whitewater is quantized across the whitewater area
     geoW.setDrawRange(0, vW); geoD.setDrawRange(0, vD); geoS.setDrawRange(0, vS); shownN = N.nW + N.nD + N.nS;
@@ -218,11 +236,43 @@
   // it (normals from the smoothed depth, sky reflection by Fresnel, a highlight, the speed colours) and writes its depth, so objects and
   // whitewater (still points, drawn after it) sit in it correctly.
   const fsVert = 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }';
+  // a sphere per point, or with ANISO an ellipsoid squashed to vFl of its radius along vN: the view ray through this pixel meets it where
+  // |M (x - centre)| = radius, M stretching the vN direction by 1 / vFl
   const SPH = 'uniform mat4 projectionMatrix; varying float vS; varying float vF; varying float vK; varying float vL; varying vec3 vMV; varying float vRad;' +
-    'void main() { vec2 c = gl_PointCoord * 2.0 - 1.0; float r2 = dot(c, c); if (r2 > 1.0) discard; vec3 e = vMV + vec3(c.x, -c.y, sqrt(1.0 - r2)) * vRad;' +
+    '\n#ifdef ANISO\n varying vec3 vN; varying float vFl;\n#endif\n' +
+    'void main() { vec2 c = gl_PointCoord * 2.0 - 1.0; c.y = -c.y; float r2 = dot(c, c); if (r2 > 1.0) discard; vec3 e = vMV + vec3(c, sqrt(1.0 - r2)) * vRad;' +
+    '\n#ifdef ANISO\n if (vFl < 0.99) { vec3 pp = vMV + vec3(c * vRad, 0.0); bool persp = projectionMatrix[3][3] < 0.5;' +
+    '  vec3 ro = persp ? vec3(0.0) : vec3(pp.xy, vMV.z + 4.0 * vRad); vec3 rd = persp ? normalize(pp) : vec3(0.0, 0.0, -1.0); float a1 = 1.0 / vFl - 1.0;' +
+    '  vec3 oc = ro - vMV; vec3 mo = oc + a1 * dot(vN, oc) * vN; vec3 md = rd + a1 * dot(vN, rd) * vN;' +
+    '  float A = dot(md, md); float B = dot(mo, md); float C = dot(mo, mo) - vRad * vRad; float D = B * B - A * C; if (D < 0.0) discard;' +
+    '  e = ro + rd * ((-B - sqrt(D)) / A); }\n#endif\n' +
     ' vec4 cl = projectionMatrix * vec4(e, 1.0); gl_FragDepthEXT = cl.z / cl.w * 0.5 + 0.5; gl_FragColor = vec4(-e.z, vS, vF, vRad); }';
   const ext = { fragDepth: true };
-  const matWS = new THREE.ShaderMaterial({ uniforms: matW.uniforms, vertexShader: VW, fragmentShader: SPH, extensions: ext });
+  Object.assign(matW.uniforms, { tAtlas: tex(), uA0: vec(), uAh: num(1), uAn: vec(), uAt: num(1), uAs: { value: new THREE.Vector2(1, 1) } });
+  const matWS = new THREE.ShaderMaterial({ uniforms: matW.uniforms, vertexShader: VW, fragmentShader: SPH, extensions: ext, defines: { ANISO: 1 } });
+  const matWS0 = new THREE.ShaderMaterial({ uniforms: matW.uniforms, vertexShader: VW, fragmentShader: SPH, extensions: ext });   // round, when Surface shapes is off
+  const matSplat = new THREE.ShaderMaterial({ uniforms: matW.uniforms, vertexShader: VW, fragmentShader: 'void main() { gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0); }', defines: { SPLAT: 1 },
+    depthTest: false, depthWrite: false, blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.OneFactor, blendDst: THREE.OneFactor, transparent: true });
+  const aScene = new THREE.Scene(), aGroup = new THREE.Group(), aW = new THREE.Points(geoW, matSplat); aW.frustumCulled = false; aGroup.add(aW); aScene.add(aGroup);
+  let atlasRT = null; const aCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  // the coarse count grid for the anisotropic shapes, over the box the water is drawn in, cells of 2 spacings (coarser if it would not fit)
+  function atlasPass(box) {
+    const u = matW.uniforms, d = u.uD.value || 0.05, E = [box.x1 - box.x0, box.y1 - box.y0, box.z1 - box.z0];
+    let h = 2 * d, n, tx, W, H;
+    for (let k = 0; k < 12; k++, h *= 1.25) {
+      n = E.map((e) => Math.max(2, Math.ceil(e / h) + 1)); tx = Math.max(1, Math.floor(4096 / n[0])); W = tx * n[0]; H = Math.ceil(n[2] / tx) * n[1];
+      if (H <= 4096 && n[0] <= 4096) break;
+    }
+    if (!atlasRT || atlasRT.width !== W || atlasRT.height !== H) {
+      if (atlasRT) atlasRT.dispose();
+      atlasRT = new THREE.WebGLRenderTarget(W, H, { type: THREE.HalfFloatType, format: THREE.RGBAFormat, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, depthBuffer: false, stencilBuffer: false });
+      atlasRT.texture.generateMipmaps = false;
+    }
+    u.uA0.value.set(box.x0, box.y0, box.z0); u.uAh.value = h; u.uAn.value.set(n[0], n[1], n[2]); u.uAt.value = tx; u.uAs.value.set(W, H);
+    aGroup.position.copy(points.position); aGroup.updateMatrixWorld();
+    renderer.setRenderTarget(atlasRT); renderer.clear(); renderer.render(aScene, aCam);
+    u.tAtlas.value = atlasRT.texture;
+  }
   const matDS = new THREE.ShaderMaterial({ uniforms: matD.uniforms, vertexShader: VD, fragmentShader: SPH, extensions: ext });
   const sScene = new THREE.Scene(), sGroup = new THREE.Group(), sW = new THREE.Points(geoW, matWS), sD = new THREE.Points(geoD, matDS);
   [sW, sD].forEach((q) => { q.frustumCulled = false; sGroup.add(q); }); sScene.add(sGroup);
@@ -230,9 +280,11 @@
   const blurMat = new THREE.ShaderMaterial({ uniforms: { tD: { value: null }, uDir: { value: new THREE.Vector2() }, uScale: U.uScale, uOrtho: U.uOrtho, uK: { value: 1 } }, vertexShader: fsVert, depthTest: false, depthWrite: false,
     fragmentShader: 'uniform sampler2D tD; uniform vec2 uDir; uniform float uScale; uniform float uOrtho; uniform float uK; varying vec2 vUv;' +
       'void main() { vec4 c = texture2D(tD, vUv); if (c.r <= 0.0) { gl_FragColor = c; return; }' +
-      ' float rpx = clamp((uOrtho > 0.0 ? c.a * uOrtho : c.a * uScale / c.r) * 4.0 * uK, 1.0, 28.0); float st = max(1.0, rpx / 10.0); float sr = c.a * 4.0;' +
+      ' float rpx = clamp((uOrtho > 0.0 ? c.a * uOrtho : c.a * uScale / c.r) * 4.0 * uK, 1.0, 28.0); float st = max(1.0, rpx / 10.0); float sr = c.a * 3.0;' +
       ' float sum = 0.0; float ws = 0.0; for (int i = -10; i <= 10; i++) { float x = float(i) * st; vec4 q = texture2D(tD, vUv + uDir * x); if (q.r <= 0.0) continue;' +
-      '  float dz = (q.r - c.r) / sr; float w = exp(-x * x / (2.0 * rpx * rpx * 0.25)) * exp(-dz * dz); sum += q.r * w; ws += w; }' +
+      // narrow-range filter (Truong and Yuksel 2018): a sample far behind is another surface and is left out; one far in front is pulled
+      // to just in front, so the edge of a nearer sheet still smooths this one a little instead of being ignored or dragging it forward
+      '  float qd = q.r; if (qd > c.r + sr) continue; qd = max(qd, c.r - sr); float w = exp(-x * x / (2.0 * rpx * rpx * 0.25)); sum += qd * w; ws += w; }' +
       ' gl_FragColor = vec4(sum / max(ws, 1e-6), c.gba); }' });
   const fsScene = new THREE.Scene(), fsCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1), fsQuad = new THREE.Mesh(new THREE.PlaneBufferGeometry(2, 2), blurMat);
   fsQuad.frustumCulled = false; fsScene.add(fsQuad);
@@ -272,6 +324,7 @@
     renderer.getDrawingBufferSize(surfSz); surfTargets(surfSz.x, surfSz.y);
     renderer.getClearColor(clr); const ca = renderer.getClearAlpha();
     sGroup.position.copy(points.position); sGroup.updateMatrixWorld();
+    if (S.surfAniso && geoW.drawRange.count > 0) { renderer.setClearColor(0x000000, 0); atlasPass(lastBox || DEFB); sW.material = matWS; } else sW.material = matWS0;
     U.uSzK.value = 1.25;   // a little larger than drawn as points, so neighbours overlap into one surface
     renderer.setClearColor(0x000000, 0); renderer.setRenderTarget(surfA); renderer.clear(); renderer.render(sScene, cam);
     U.uSzK.value = 1;
