@@ -333,7 +333,7 @@
     U.uSzK.value = 1.25;   // a little larger than drawn as points, so neighbours overlap into one surface
     renderer.setClearColor(0x000000, 0); renderer.setRenderTarget(surfA); renderer.clear(); renderer.render(sScene, cam);
     U.uSzK.value = 1;
-    blurMat.uniforms.uK.value = S.surfSmooth; blurMat.uniforms.uNrf.value = S.surfNrf === false ? 0 : 1;
+    blurMat.uniforms.uK.value = S.surfSmooth; blurMat.uniforms.uNrf.value = S.surfNrf ? 1 : 0;   // the bilateral weight looked smoother on Mer's card than the narrow-range filter
     blurMat.uniforms.uCap.value = 28 * Math.max(1, surfSz.y / 720);   // 28 pixels on a 720-pixel-high picture, more on bigger or sharper screens
     for (let it = 0; it < 2; it++) {
       blurMat.uniforms.tD.value = surfA.texture; blurMat.uniforms.uDir.value.set(1 / surfSz.x, 0); renderer.setRenderTarget(surfB); renderer.render(fsScene, fsCam);

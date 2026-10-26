@@ -1,7 +1,7 @@
 // Surface drawing (Display > Draw water: Surface): runs a scene for a while, then screenshots it as points and as a surface in several
 // variants, to tell which part of the surface drawing is at fault when it looks wrong, and times a draw each way.
 //   node tests/surface.js [scene "Dam break"] [spacing 0.05] [ms to run 20000]
-// Pictures in test-output: surface_<scene>_points, _surface (as drawn), _noshapes (Surface shapes off), _oldfilter (the older smoothing),
+// Pictures in test-output: surface_<scene>_points, _surface (as drawn by default), _shapes (Surface shapes on), _nrf (the narrow-range filter),
 // _depth (the smoothed depth as stripes: should be smooth curves), _normals (should change smoothly, not speckle).
 const { open, wait, done } = require('./lib');
 (async () => {
@@ -15,9 +15,9 @@ const { open, wait, done } = require('./lib');
   await t.ev(() => document.querySelector('#seg-surf [data-v="1"]').click()); await wait(1500);
   await t.shot(name + '_surface'); const msS = await time();
   const variant = async (suffix, fn) => { await t.ev(fn); await wait(1200); await t.shot(name + '_' + suffix); };
-  await variant('noshapes', () => { window.__splash.S.surfAniso = false; });
-  await variant('oldfilter', () => { const s = window.__splash; s.S.surfAniso = true; s.S.surfNrf = false; });
-  await variant('depth', () => { const s = window.__splash; s.S.surfNrf = true; s.compMat.uniforms.uDbg.value = 1; });
+  await variant('shapes', () => { window.__splash.S.surfAniso = true; });
+  await variant('nrf', () => { const s = window.__splash; s.S.surfAniso = false; s.S.surfNrf = true; });
+  await variant('depth', () => { const s = window.__splash; s.S.surfNrf = false; s.compMat.uniforms.uDbg.value = 1; });
   await variant('normals', () => { window.__splash.compMat.uniforms.uDbg.value = 2; });
   await t.ev(() => { window.__splash.compMat.uniforms.uDbg.value = 0; });
   console.log('draw ms: points', msP, 'surface', msS);

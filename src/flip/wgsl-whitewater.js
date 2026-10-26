@@ -97,8 +97,11 @@ fn wwSample(@builtin(global_invocation_id) g: vec3<u32>) {
   if (hasStorage(particleCell(p))) { vf = sampleNew(p); }   // the new velocity only (sampleBoth also read the old, unused here)
   // for foam: how fast the surface spreads apart (positive) or gathers (negative) there. Foam thins out where it spreads and collects
   // in lines and patches where the flow converges (what makes foam look lacy instead of an even sheet).
-  var dq = 0.0;
-  if (P.wwErode > 0.0 && u32(sVel[j].w + 0.5) == 2u) {
+  // the foam's spreading is measured every other step, half the points at a time (the more costly part of this pass); between, a
+  // point keeps last step's value from sAux
+  var dq = floor((sAux[j].w + 2.0) / 4.0);
+  if (P.wwErode > 0.0 && u32(sVel[j].w + 0.5) == 2u && ((j + P.seed) & 1u) == 0u) {
+    dq = 0.0;
     let h = P.h; let ex = vec3<f32>(h, 0.0, 0.0); let ez = vec3<f32>(0.0, 0.0, h);
     if (hasStorage(particleCell(p + ex)) && hasStorage(particleCell(p - ex)) && hasStorage(particleCell(p + ez)) && hasStorage(particleCell(p - ez))) {
       // one velocity component at each of the four places (32 grid faces; the whole new and old velocity there was 192)

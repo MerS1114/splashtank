@@ -159,7 +159,8 @@
           // UHD 730), so more than one frame may wait. But keep the queue to about 0.3 s of steps at the rate they really finish
           // (lastMs): a longer one made Stop take effect seconds late and kept the GPU busy after it (20 steps of 0.47 s each at spacing 0.02).
           const sub = S.lastSub || 1, svc = Math.max(sim.lastMs || 0, sim.gpuMs || 0);
-          const lim = svc ? Math.max(sub, Math.min(8 * sub, Math.floor(300 / svc))) : 2 * sub;
+          // at least one step more than a frame needs, so steps queue behind each other and lastMs measures what a step really costs
+          const lim = svc ? Math.max(sub + 1, Math.min(8 * sub, Math.floor(300 / svc))) : 2 * sub;
           acc = Math.min(acc + dt, 3 * DT);
           for (let k = 0; k < 3 && acc >= DT && (sim.inflight || 0) < lim; k++) { acc -= DT; stepOnce(); sim.maxQ = Math.max(sim.maxQ || 0, sim.inflight || 0); }
         } else {
