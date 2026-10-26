@@ -27,9 +27,9 @@ What the computer needs, once:
 - Microsoft Edge or Google Chrome, up to date.
 - Python 3 (python.org) only if you want to build the page from the source. To test the published pages you do not need it.
 
-Download and set up, once (in a terminal, in the folder where you keep projects):
+Download and set up, once (in a terminal, in the folder where you keep projects; `core.longpaths` lets Windows clone into a folder with a long path):
 
-    git clone https://github.com/MerS1114/splashtank.git
+    git clone -c core.longpaths=true https://github.com/MerS1114/splashtank.git
     cd splashtank
     npm install
 
