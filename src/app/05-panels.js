@@ -289,7 +289,7 @@
     if (flip) {
       const su = sub(gs, 'speedups', 'Speed-ups', false);
       addCheck(su, 'c-sort', 'Sort particles', S.sortP, 'Reorders particles by position every 16 steps so neighbours sit together in memory. Same result. Clearly faster with a million or more points; about even on small scenes. Costs 32 bytes per point of GPU memory.', (on) => { S.sortP = on; if (sim && sim.opt) sim.opt.sort = on; }, dv('sortP'));
-      addCheck(su, 'c-p2gwin', 'Grouped transfer', S.p2gWin, 'Particles add their velocity to the grid in workgroup memory first, then each grid face once, instead of every particle adding to the grid directly. Exactly the same result. Usually faster on real GPUs when particles are sorted; the Solver benchmark compares both (row G) on this computer.', (on) => { S.p2gWin = on; if (sim && sim.opt) sim.opt.p2gWin = on; }, dv('p2gWin'));
+      addCheck(su, 'c-p2gwin', 'Grouped transfer', S.p2gWin, 'Particles hand their velocity to the grid, and read it back, through a small patch of the grid kept in fast workgroup memory, instead of each particle going to the grid on its own. Exactly the same result. Needs Sort particles on to help. Whether it is faster depends on the GPU: the Solver benchmark compares both (row G) on this computer.', (on) => { S.p2gWin = on; if (sim && sim.opt) sim.opt.p2gWin = on; }, dv('p2gWin'));
     }
     if (searching) filterPanel($('#psearch').value);
   }

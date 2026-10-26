@@ -6,7 +6,8 @@
 // Only blocks within two cells of a particle exist, so memory and grid work follow the water, not the size of the box.
 // Colliders are voxelised into solid cells (cached until they move) and carry their own velocity into the pressure solve.
 // The shader is put together from the src/flip/wgsl-*.js parts (WGSL does not care about the order of declarations).
-function flipWGSL() { return FLIP_WGSL_CORE + FLIP_WGSL_BLOCKS + FLIP_WGSL_SOLVER + FLIP_WGSL_WHITEWATER + FLIP_WGSL_NARROWBAND; }
+// sg: the GPU offers subgroups, so the subgroup list kernels (wgsl-subgroups.js) are added; 'enable' must open the module
+function flipWGSL(sg) { return (sg ? 'enable subgroups;\n' : '') + FLIP_WGSL_CORE + FLIP_WGSL_BLOCKS + FLIP_WGSL_SOLVER + FLIP_WGSL_WHITEWATER + FLIP_WGSL_NARROWBAND + (sg ? FLIP_WGSL_SUBGROUPS : ''); }
 
 const FLIP_SLOT = { cells: 512 };   // one block of the sparse grid: 8 x 8 x 8 cells
 const FLIP_PARAMS_BYTES = 1664;      // the solver's uniform block: settings, whitewater, air and drips (words 68-83), starting-water shapes (84), ocean waves (148), more whitewater (404), whitewater area (408)
@@ -22,11 +23,11 @@ const FLIP_L = {
   tileReset: [12], tileNeedClear: [0, 17], tileMark: [0, 1, 17], tileMarkPhi: [0, 7, 12, 17, 18, 19], tileMarkFill: [0, 10, 11, 17], phiInitAll: [0, 7, 10, 11, 12, 18, 19, 31], tileFree: [0, 12, 16, 17, 20, 21], argsNew: [12, 14], tileAlloc: [0, 12, 16, 19, 20, 21], tileFix: [0, 12],
   initNew: [0, 7, 8, 10, 11, 12, 21, 31], slotListBuild: [0, 12, 16, 18], argsSlots: [12, 14], growFree: [12, 20, 25],
   sortClear: [22], sortHist: [0, 1, 22], sortScan: [22], sortScatter: [0, 1, 2, 22, 23, 24, 26, 27], sortCopy: [0, 1, 2, 23, 24, 26, 27], unsort: [0, 1, 23, 26],
-  clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], p2gWin: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], spinEmit: [0, 1, 2, 3, 6, 16, 28, 29, 30], wwAdvect: [0, 1, 2], sprayStep: [0, 10, 11, 28, 29, 30, 32, 33], sprayDisp: [0, 15, 28, 29, 30], dispBegin: [30], packDisp: [1, 12, 15, 30, 37, 38], wwSample: [0, 3, 5, 6, 7, 16, 28, 29, 33], wwArgs: [0, 14, 30],
+  clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], p2gWin: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], spinEmit: [0, 1, 2, 3, 6, 16, 28, 29, 30], wwAdvect: [0, 1, 2], sprayStep: [0, 10, 11, 28, 29, 30, 32, 33], sprayDisp: [0, 15, 28, 29, 30], sprayDispSG: [0, 15, 28, 29, 30], dispBegin: [30], packDisp: [1, 12, 15, 30, 37, 38], wwSample: [0, 3, 5, 6, 7, 16, 28, 29, 33], wwArgs: [0, 14, 30],
   airClear: [0, 34], airSplatW: [0, 1, 2, 6, 16, 34], airSplatS: [0, 28, 29, 34], airUpdate: [0, 10, 11, 32, 34, 35], airCopy: [0, 32, 35], dripStep: [0, 6, 7, 10, 16, 28, 29, 30, 36],
   normFaces: [0, 3, 5, 7, 10, 12, 16, 18, 19], divergence: [0, 3, 6, 7, 9, 12, 16, 18, 19],
-  listClear: [12], buildList: [0, 7, 12, 13, 18, 19], listArgs: [0, 12, 14], rbRed: [0, 7, 8, 9, 12, 13, 16, 19], rbBlack: [0, 7, 8, 9, 12, 13, 16, 19],
-  project: [0, 3, 7, 8, 12, 16, 18, 19], subsample: [0, 1, 15], g2p: [0, 1, 2, 3, 5, 6, 10, 11, 16],
+  listClear: [12], buildList: [0, 7, 12, 13, 18, 19], buildListSG: [0, 7, 12, 13, 18, 19], listArgs: [0, 12, 14], rbRed: [0, 7, 8, 9, 12, 13, 16, 19], rbBlack: [0, 7, 8, 9, 12, 13, 16, 19],
+  project: [0, 3, 7, 8, 12, 16, 18, 19], subsample: [0, 1, 15], g2p: [0, 1, 2, 3, 5, 6, 10, 11, 16], g2pWin: [0, 1, 2, 3, 5, 6, 10, 11, 16],
   nbPhi: [0, 6, 7, 9, 12, 16, 18, 19, 31], nbJacA: [0, 7, 9, 12, 16, 18, 19], nbJacB: [0, 7, 9, 12, 16, 18, 19], nbVel: [0, 3, 5, 7, 12, 16, 18, 19, 31],
   saveVel: [0, 3, 12, 18, 19, 31], nbKill: [0, 1, 2, 7, 16], nbReset: [12], nbDead: [0, 1, 12, 13], nbDeficit: [0, 6, 7, 12, 13, 16, 18, 19, 31], nbArgs: [0, 12, 14],
   nbSpawn: [0, 1, 2, 12, 13, 16, 31], deepClear: [0, 15], deepPick: [0, 6, 7, 12, 15, 16, 18, 19, 31], deepFin: [12] };
@@ -37,8 +38,9 @@ const FLIP_PIPES = new WeakMap();
 const WWSTAGES = new Set(['blocks', 'clear', 'p2g', 'classify', 'normFaces', 'air', 'spray']);
 function flipPipes(device) {
   let sh = FLIP_PIPES.get(device); if (sh) return sh;
-  sh = { pipes: null, ms: 0 }; FLIP_PIPES.set(device, sh);
-  const t0 = performance.now(), mod = device.createShaderModule({ code: flipWGSL() }), names = Object.keys(FLIP_L);
+  const sg = !!(device.features && device.features.has('subgroups'));
+  sh = { pipes: null, ms: 0, sg }; FLIP_PIPES.set(device, sh);
+  const t0 = performance.now(), mod = device.createShaderModule({ code: flipWGSL(sg) }), names = Object.keys(FLIP_L).filter((n) => sg || !n.endsWith('SG'));
   const one = (name) => {
     const desc = { layout: 'auto', compute: { module: mod, entryPoint: name } };
     if (!device.createComputePipelineAsync) return Promise.resolve(device.createComputePipeline(desc));
@@ -110,13 +112,14 @@ class FlipSim {
       this.tsRead = device.createBuffer({ size: 512, usage: U.MAP_READ | U.COPY_DST }); this.tsBusy = false;
     }
     this.L = FLIP_L; this.pipes = {}; this.ready = false;
-    const sh = flipPipes(device);
+    const sh = flipPipes(device); this.sg = sh.sg;
     this.dispAlloc();   // makes the bind groups once the pipelines are there
     if (sh.pipes) this.usePipes(sh.pipes);
     this.whenReady = sh.promise.then((p) => { if (!this.dead && !this.ready) this.usePipes(p); return this; });
   }
+  sgOn() { return this.sg && this.opt.subgroups !== false && !!this.pipes.buildListSG; }
   usePipes(p) {
-    for (const name in this.L) this.pipes[name] = { pipeline: p[name] };
+    for (const name in this.L) if (p[name]) this.pipes[name] = { pipeline: p[name] };
     this.ready = true; this.makeGroups();
   }
   // per-block storage: cell count, type, pressure, rhs (4 bytes each per cell), two numbers for each of the three faces, plus slot bookkeeping
@@ -143,7 +146,7 @@ class FlipSim {
       12: this.bCtl, 13: this.bList, 14: this.bArgs, 15: this.bDisp, 16: this.bTmap, 17: this.bNeed, 18: this.bSlotList, 19: this.bSlotTile, 20: this.bStack, 21: this.bNew,
       22: this.bSortCnt, 23: this.bTpos, 24: this.bTvel, 25: this.bGro, 26: this.bPid, 27: this.bTpid, 28: this.bSPos, 29: this.bSVel, 30: this.bSctl, 31: this.bVelG,
       32: this.bAir, 33: this.bSAux, 34: this.bAirAcc, 35: this.bAir2, 36: this.bDrip, 37: this.bPack, 38: this.bPackU };
-    for (const name in this.L) { const p = this.pipes[name]; p.bg = this.dev.createBindGroup({ layout: p.pipeline.getBindGroupLayout(0), entries: this.L[name].map((k) => ({ binding: k, resource: { buffer: bufs[k] } })) }); }
+    for (const name in this.L) { const p = this.pipes[name]; if (!p) continue; p.bg = this.dev.createBindGroup({ layout: p.pipeline.getBindGroupLayout(0), entries: this.L[name].map((k) => ({ binding: k, resource: { buffer: bufs[k] } })) }); }
   }
   // more blocks: copy the old ones over unchanged and put the new slots on the free stack
   grow(n) {
@@ -189,6 +192,7 @@ class FlipSim {
     }
   }
   step(dt, o) {
+    this.lastDt = dt;
     this.flushRun();
     const N = this.N; if (N === 0 || !this.ready) return;
     if (!this.only) this.maybeGrow();
@@ -289,7 +293,15 @@ class FlipSim {
       this.makeGroups();
     }
     const sortStage = { name: 'sort', fn: (ps) => {
-      if ((this.sortTick++) % Math.max(1, this.opt.sortEvery | 0) !== 0) return;
+      // sort when the particles may have left their blocks: the fastest water has crossed about two cells since the last sort (read
+      // back a step or two late, so it is an estimate), at least every 64 steps and at most every 4; a fixed sortEvery when sortAuto is off
+      this.sortTick++;
+      if (this.opt.sortAuto === false) { if ((this.sortTick - 1) % Math.max(1, this.opt.sortEvery | 0) !== 0) return; }
+      else {
+        this.sortMoved = (this.sortMoved || 0) + ((this.stats && this.stats.vmax) || 0) * (this.lastDt || 0) / this.h;
+        if (this.sortedEver && !(this.sortTick >= 64 || (this.sortTick >= 4 && this.sortMoved >= 2))) return;
+        this.sortTick = 0; this.sortMoved = 0; this.sortsDone = (this.sortsDone || 0) + 1;
+      }
       this.sortedEver = true;
       dispatch(ps, 'sortClear', 65536); dispatch(ps, 'sortHist', N);
       const p = this.pipes.sortScan; ps.setPipeline(p.pipeline); ps.setBindGroup(0, p.bg); ps.dispatchWorkgroups(1);
@@ -306,7 +318,7 @@ class FlipSim {
       { name: 'classify', fn: (ps) => {
         if (this.solidDirty) { indirect(ps, 'solidBuild', 64); this.solidDirty = false; }
         indirect(ps, 'classify', 64);
-        dispatch(ps, 'listClear', 1); indirect(ps, 'buildList', 64); dispatch(ps, 'listArgs', 1);
+        dispatch(ps, 'listClear', 1); indirect(ps, this.sgOn() ? 'buildListSG' : 'buildList', 64); dispatch(ps, 'listArgs', 1);
         if (nb) indirect(ps, 'nbVel', 64);
       } },
       { name: 'normFaces', fn: (ps) => indirect(ps, 'normFaces', 64) },
@@ -315,7 +327,7 @@ class FlipSim {
         for (let it = 0; it < iters; it++) for (const [nm, off] of [['rbRed', 0], ['rbBlack', 16]]) indirect(ps, nm, off);
       } },
       { name: 'project', fn: (ps) => { indirect(ps, 'project', 64); if (nb) indirect(ps, 'saveVel', 64); } },
-      { name: 'g2p', fn: (ps) => dispatch(ps, 'g2p', N) },
+      { name: 'g2p', fn: (ps) => dispatch(ps, this.opt.p2gWin ? 'g2pWin' : 'g2p', N) },
       // opt.noFoam (benchmark row C) also leaves out the whitewater stages, so the row shows what whitewater costs
       ...(this.sprayCap > 0 && this.airOnStep && !this.opt.noFoam ? [{ name: 'air', fn: (ps) => {   // air field first, so the whitewater moves with this step's air
         const na = this.airDims.n;
@@ -439,7 +451,7 @@ class FlipSim {
     const run = (ps, name, items) => { const p = this.pipes[name], g = Math.ceil(items / 256); ps.setPipeline(p.pipeline); ps.setBindGroup(0, p.bg); ps.dispatchWorkgroups(Math.max(1, Math.min(g, 65535)), Math.max(1, Math.ceil(g / 65535))); };
     const ps = enc.beginComputePass();
     if (!fromPos) run(ps, 'subsample', nW);
-    if (spr) { run(ps, 'dispBegin', 1); run(ps, 'sprayDisp', this.sprayCap); }
+    if (spr) { run(ps, 'dispBegin', 1); run(ps, this.sgOn() ? 'sprayDispSG' : 'sprayDisp', this.sprayCap); }
     if (deep) {
       const c = this.pipes.deepClear, g3 = Math.ceil(FLIP_DEEPMAX / 256); ps.setPipeline(c.pipeline); ps.setBindGroup(0, c.bg); ps.dispatchWorkgroups(Math.min(g3, 65535), Math.ceil(g3 / 65535));
       const q = this.pipes.deepPick; ps.setPipeline(q.pipeline); ps.setBindGroup(0, q.bg); ps.dispatchWorkgroupsIndirect(this.bArgs, 64);

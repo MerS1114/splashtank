@@ -14,10 +14,10 @@ fn clearSlots(@builtin(global_invocation_id) g: vec3<u32>) {
   if (s == 0u) { rhs[c] = 8.0; }   // the spare slot reads as air in the narrow band depth passes
 }
 // Particle to grid, grouped (Speed-ups > Grouped transfer; p2g below is the plain one). Sorted particles (Speed-ups > Sort particles) lie close together, so the 256 of a workgroup usually fall within a few
-// cells: they first add into a 9x9x9 window of faces in workgroup memory, and each touched face is then added to the grid once, instead
+// cells: they first add into a 11x11x11 window of faces in workgroup memory, and each touched face is then added to the grid once, instead
 // of 48 global atomic adds per particle fighting over the same faces. The sums are integers, so the result is exactly the same.
 // A workgroup whose particles spread wider (unsorted, or at the edge of a sort run) adds straight to the grid as before.
-var<workgroup> p2gAcc: array<atomic<i32>, 1458>;   // 729 faces of one axis: velocity, weight
+var<workgroup> p2gAcc: array<atomic<i32>, 2662>;   // 1331 faces of one axis: velocity, weight
 var<workgroup> p2gLo: array<atomic<i32>, 3>;
 var<workgroup> p2gHi: array<atomic<i32>, 3>;
 var<workgroup> p2gOk: u32;
@@ -40,13 +40,13 @@ fn p2gWin(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation
   workgroupBarrier();
   if (lid == 0u) {
     let lo = vec3<i32>(atomicLoad(&p2gLo[0]), atomicLoad(&p2gLo[1]), atomicLoad(&p2gLo[2])); let hi = vec3<i32>(atomicLoad(&p2gHi[0]), atomicLoad(&p2gHi[1]), atomicLoad(&p2gHi[2]));
-    p2gOk = select(0u, 1u, all(hi - lo <= vec3<i32>(6)) && all(hi >= lo)); p2gO = lo - vec3<i32>(1);
+    p2gOk = select(0u, 1u, all(hi - lo <= vec3<i32>(8)) && all(hi >= lo)); p2gO = lo - vec3<i32>(1);
   }
   let win = workgroupUniformLoad(&p2gOk);
   let o = p2gO;
   for (var axis = 0u; axis < 3u; axis++) {
     if (win == 1u) {
-      for (var e = lid; e < 1458u; e += 256u) { atomicStore(&p2gAcc[e], 0); }
+      for (var e = lid; e < 2662u; e += 256u) { atomicStore(&p2gAcc[e], 0); }
       workgroupBarrier();
     }
     if (ok) {
@@ -59,18 +59,18 @@ fn p2gWin(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation
         let w = select(1.0 - fr.x, fr.x, dx == 1) * select(1.0 - fr.y, fr.y, dy == 1) * select(1.0 - fr.z, fr.z, dz == 1);
         if (w <= 0.0) { continue; }
         let gc = i0 + vec3<i32>(dx, dy, dz); let l = gc - o;
-        if (win == 1u && all(l >= vec3<i32>(0)) && all(l < vec3<i32>(9))) {
-          let e = u32(l.x + 9 * (l.y + 9 * l.z)) * 2u;
+        if (win == 1u && all(l >= vec3<i32>(0)) && all(l < vec3<i32>(11))) {
+          let e = u32(l.x + 11 * (l.y + 11 * l.z)) * 2u;
           atomicAdd(&p2gAcc[e], i32(round(w * vc * P.scale))); atomicAdd(&p2gAcc[e + 1u], i32(round(w * P.scale)));
         } else { p2gFace(axis, gc, vc, w); }
       }
     }
     if (win == 1u) {
       workgroupBarrier();
-      for (var e = lid; e < 729u; e += 256u) {
+      for (var e = lid; e < 1331u; e += 256u) {
         let sv = atomicLoad(&p2gAcc[e * 2u]); let sw = atomicLoad(&p2gAcc[e * 2u + 1u]);
         if (sv == 0 && sw == 0) { continue; }
-        let gc = o + vec3<i32>(i32(e % 9u), i32((e / 9u) % 9u), i32(e / 81u));
+        let gc = o + vec3<i32>(i32(e % 11u), i32((e / 11u) % 11u), i32(e / 121u));
         let idx = faceIndex(axis, gc.x, gc.y, gc.z);
         atomicAdd(&accV[idx], sv); atomicAdd(&accW[idx], sw);
       }
@@ -280,6 +280,59 @@ fn g2p(@builtin(global_invocation_id) g: vec3<u32>) {
   let fcell = particleCell(p);
   var vn = v0 - vec3<f32>(0.0, P.gravity * P.dt, 0.0); var vo = v0;   // falls freely if its block had no room this step
   if (hasStorage(fcell)) { let s2 = sampleBoth(p); vn = s2.vn; vo = s2.vo; }
+  g2pRest(i, p, v0, fcell, vn, vo);
+}
+// Grid to particle, grouped (Speed-ups > Grouped transfer, with p2gWin): the 256 particles of a workgroup usually lie within a few cells
+// once sorted, so the grid faces around them (an 11x11x11 window, one axis at a time, new and old velocity) are read into workgroup memory
+// once, instead of every particle looking up 48 faces, each through its block, on its own. The same sums in the same order: identical.
+@compute @workgroup_size(256)
+fn g2pWin(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+  let i = gid1(g);
+  var ok = i < P.n; var p = vec3<f32>(0.0); var v0 = vec3<f32>(0.0); var fcell = vec3<i32>(0); var st = false;
+  if (ok) { ok = pos[i].y >= DEADY; }
+  if (ok) { p = pos[i].xyz; v0 = vel[i].xyz; fcell = particleCell(p); st = hasStorage(fcell); }
+  if (lid == 0u) { for (var k = 0u; k < 3u; k++) { atomicStore(&p2gLo[k], 1 << 30); atomicStore(&p2gHi[k], -(1 << 30)); } }
+  workgroupBarrier();
+  if (ok && st) { for (var k = 0u; k < 3u; k++) { atomicMin(&p2gLo[k], fcell[k]); atomicMax(&p2gHi[k], fcell[k]); } }
+  workgroupBarrier();
+  if (lid == 0u) {
+    let lo = vec3<i32>(atomicLoad(&p2gLo[0]), atomicLoad(&p2gLo[1]), atomicLoad(&p2gLo[2])); let hi = vec3<i32>(atomicLoad(&p2gHi[0]), atomicLoad(&p2gHi[1]), atomicLoad(&p2gHi[2]));
+    p2gOk = select(0u, 1u, all(hi - lo <= vec3<i32>(8)) && all(hi >= lo)); p2gO = lo - vec3<i32>(1);
+  }
+  let win = workgroupUniformLoad(&p2gOk);
+  let o = p2gO;
+  var vn = v0 - vec3<f32>(0.0, P.gravity * P.dt, 0.0); var vo = v0;
+  for (var axis = 0u; axis < 3u; axis++) {
+    if (win == 1u) {
+      for (var e = lid; e < 1331u; e += 256u) {
+        let gc = o + vec3<i32>(i32(e % 11u), i32((e / 11u) % 11u), i32(e / 121u));
+        let f = faceIndex(axis, gc.x, gc.y, gc.z);
+        atomicStore(&p2gAcc[e * 2u], bitcast<i32>(gvR(f))); atomicStore(&p2gAcc[e * 2u + 1u], bitcast<i32>(gv0R(f)));
+      }
+      workgroupBarrier();
+    }
+    if (ok && st) {
+      var q = (p - vec3<f32>(P.x0, P.y0, P.z0)) * P.ih;
+      if (axis == 0u) { q.y -= 0.5; q.z -= 0.5; } else if (axis == 1u) { q.x -= 0.5; q.z -= 0.5; } else { q.x -= 0.5; q.y -= 0.5; }
+      let f0 = floor(q); let fr = q - f0; let i0 = vec3<i32>(f0);
+      var sn = 0.0; var so = 0.0;
+      for (var c = 0u; c < 8u; c++) {
+        let dx = i32(c & 1u); let dy = i32((c >> 1u) & 1u); let dz = i32((c >> 2u) & 1u);
+        let w = select(1.0 - fr.x, fr.x, dx == 1) * select(1.0 - fr.y, fr.y, dy == 1) * select(1.0 - fr.z, fr.z, dz == 1);
+        let gc = i0 + vec3<i32>(dx, dy, dz); let l = gc - o;
+        if (win == 1u && all(l >= vec3<i32>(0)) && all(l < vec3<i32>(11))) {
+          let e = u32(l.x + 11 * (l.y + 11 * l.z)) * 2u;
+          sn += w * bitcast<f32>(atomicLoad(&p2gAcc[e])); so += w * bitcast<f32>(atomicLoad(&p2gAcc[e + 1u]));
+        } else { let f = faceIndex(axis, gc.x, gc.y, gc.z); sn += w * gvR(f); so += w * gv0R(f); }
+      }
+      vn[axis] = sn; vo[axis] = so;
+    }
+    if (win == 1u) { workgroupBarrier(); }
+  }
+  if (ok) { g2pRest(i, p, v0, fcell, vn, vo); }
+}
+// everything g2p does after reading the grid: FLIP/PIC blend, white-water level, air drag, collisions, open walls
+fn g2pRest(i: u32, p: vec3<f32>, v0: vec3<f32>, fcell: vec3<i32>, vn: vec3<f32>, vo: vec3<f32>) {
   var v = mix(vn, v0 + (vn - vo), P.flip);
   if (P.ocean != 0u) { let lw = layerW(p); if (lw > 0.0) { let s = clamp(lw * 2.0, 0.0, 1.0); v = mix(v, oceanVel(p), s * s * (1.0 - exp(-8.0 * P.dt))); } }   // near the ocean's boundary, ease into the waves
   // local density of water around the particle: tiny when it is alone or in a small group, about 1 inside a big body of water

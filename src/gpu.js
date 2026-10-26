@@ -496,7 +496,8 @@ async function initGpu() {
     if (!adapter) return null;
     const lim = adapter.limits;
     // timestamp queries (when the GPU offers them) time the solver on the GPU itself, without the wait for the browser to report back
-    const dev = await adapter.requestDevice({ requiredFeatures: adapter.features.has('timestamp-query') ? ['timestamp-query'] : [], requiredLimits: {
+    // subgroups (when offered) let the FLIP list kernels take room for a whole subgroup with one atomic add (wgsl-subgroups.js)
+    const dev = await adapter.requestDevice({ requiredFeatures: ['timestamp-query', 'subgroups'].filter((f) => adapter.features.has(f)), requiredLimits: {
       maxStorageBufferBindingSize: Math.min(lim.maxStorageBufferBindingSize, 1 << 29),
       maxBufferSize: Math.min(lim.maxBufferSize, 1 << 29)
     } });

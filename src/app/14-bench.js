@@ -18,7 +18,7 @@
       await sim.whenReady; await warmTo();
       const N = sim.N, M = window.__benchM || 24, ST = ['sort', 'blocks', 'clear', 'p2g', 'narrow band', 'classify', 'normFaces', 'divergence', 'pressure', 'project', 'g2p', 'air', 'spray', 'reseed'];
       const f1 = (v) => v.toFixed(2), mb = (v) => Math.round(v / 1048576);
-      const BASE = { noFoam: false, noCull: false, noSolidCache: false, fastAir: false, sort: true, sortEvery: 16, iters: 0 };
+      const BASE = { noFoam: false, noCull: false, noSolidCache: false, fastAir: false, sort: true, sortAuto: true, subgroups: true, sortEvery: 16, iters: 0 };
       let lastSum = null;
       const measure = async (label, opt, quiet) => {
         Object.assign(sim.opt, BASE); await warmTo();
@@ -49,7 +49,7 @@
       say('FLIP, ' + N + ' particles, spacing ' + sim.d.toFixed(3) + ', grid cell ' + sim.ratio.toFixed(1) + '× spacing');
       say('Box ' + sim.nx + ' × ' + sim.ny + ' × ' + sim.nz + ' = ' + sim.ncell + ' cells, ' + active + ' hold water (' + (100 * active / sim.ncell).toFixed(1) + '%)');
       { const gridMB = sim.scap * (512 * 40 + 12) / 1048576; say('Sparse grid: ' + sim.blocksUsed + ' blocks of 8×8×8 in use (' + (100 * sim.blocksUsed * 512 / sim.ncell).toFixed(1) + '% of the box), room for ' + sim.scap + ' = ' + gridMB.toFixed(gridMB < 10 ? 1 : 0) + ' MB. As a full grid it would be ' + mb(denseF * 8 + sim.ncell * 24) + ' MB. Everything on the GPU: about ' + mb(sim.memBytes()) + ' MB'); }
-      say('Pressure iterations ' + S.iters + ', wind ' + S.wind.speed + ', air drag ' + S.airDrag + ', air turbulence ' + S.gust + ', look-only points ×' + (S.detail + 1));
+      say('Pressure iterations ' + S.iters + ', wind ' + S.wind.speed + ', air drag ' + S.airDrag + ', air turbulence ' + S.gust + ', look-only points ×' + (S.detail + 1) + '. Subgroups: ' + (sim.sg ? 'yes (lists built a subgroup at a time)' : 'not offered by this GPU or browser'));
       await measure('', {}, true);   // warm-up, lets the GPU clock up before anything is timed
       say(sim.tsq ? '(stage times and GPU busy times come from GPU timestamps, so they leave out the wait for the browser to report back)' : '(this GPU or browser gives no timestamps: stage times each include a fixed cost for submitting and waiting on one stage alone)');
       // The GPU can slow down during a long test, so every variant is measured right after a short rest, between two reference runs, and compared with their average.
@@ -64,9 +64,11 @@
         say('  reference before ' + f1(r1) + ' ms and after ' + f1(r2) + ' ms, so this is ' + (pc <= 0 ? Math.abs(pc).toFixed(0) + '% faster' : pc.toFixed(0) + '% slower') + ' than ' + (odd ? 'the lower one (the other was disturbed)' : 'their average'));
         return { ref, v, pc };
       };
-      await measure('A. reference: everything on (particles sorted every 16th step)', {});
+      await measure('A. reference: everything on (particles sorted in z-order when they have moved about two cells)', {});
       await trio('S. particles not sorted', { sort: false });
-      await trio('G. grouped transfer ' + (S.p2gWin ? 'off' : 'on') + ' (p2g adds in workgroup memory first; Speed-ups)', { p2gWin: !S.p2gWin });
+      if (sim.sg) await trio('U. lists built one item at a time instead of by subgroups', { subgroups: false });
+      await trio('F. particles sorted every 16th step whether they moved or not', { sortAuto: false });
+      await trio('G. grouped transfer ' + (S.p2gWin ? 'off' : 'on') + ' (p2g and g2p through workgroup memory; Speed-ups)', { p2gWin: !S.p2gWin });
       const pi = S.iters > 20 ? 20 : 40;
       await trio('P. ' + pi + ' pressure iterations instead of ' + S.iters, { iters: pi });
       await trio('C. all whitewater (spray, mist, foam, bubbles, air field), white water and air drag skipped (for comparison)', { noFoam: true });
