@@ -32,7 +32,7 @@
     let n = clamp(Math.ceil(DT * vfast / (1.5 * hc)), lo, hi);
     const now = performance.now();
     if (n >= (S.subHold || 0) || now > (S.subHoldT || 0)) { S.subHold = n; S.subHoldT = now + 1000; } else n = S.subHold;
-    S.lastSub = n;
+    S.lastSub = n; S.subMost = Math.max(S.subMost || 0, n);
     const par = simPar();
     const t0 = performance.now();
     for (let s = 1; s <= n; s++) { par.time = (S.frame + s / n) * DT; runner.step(DT / n, prev && s < n ? lerpStates(prev, states, s / n) : states, par); }

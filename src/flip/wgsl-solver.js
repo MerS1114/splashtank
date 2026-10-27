@@ -31,7 +31,7 @@ fn p2gFace(axis: u32, c: vec3<i32>, vc: f32, w: f32) {
 fn p2gWin(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
   let i = gid1(g);
   var ok = i < P.n; var p = vec3<f32>(0.0); var v = vec3<f32>(0.0); var cc = vec3<i32>(0);
-  if (ok) { p = pos[i].xyz; ok = pos[i].y >= DEADY; }
+  if (ok) { p = pos[i].xyz; ok = pos[i].y >= DEADY && !isBallistic(i); }
   if (ok) { cc = particleCell(p); ok = hasStorage(cc); }   // no storage only when the block pool is full; it grows on the next steps
   if (ok) { v = vel[i].xyz; }
   if (lid == 0u) { for (var k = 0u; k < 3u; k++) { atomicStore(&p2gLo[k], 1 << 30); atomicStore(&p2gHi[k], -(1 << 30)); } }
@@ -83,7 +83,7 @@ fn p2gWin(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation
 fn p2g(@builtin(global_invocation_id) g: vec3<u32>) {
   let i = gid1(g); if (i >= P.n) { return; }
   let p = pos[i].xyz;
-  if (pos[i].y < DEADY) { return; }
+  if (pos[i].y < DEADY || isBallistic(i)) { return; }
   let cc = particleCell(p);
   if (!hasStorage(cc)) { return; }   // only when the block pool is full; the pool grows on the next steps
   let v = vel[i].xyz;
@@ -274,7 +274,7 @@ fn vnz(x: vec3<f32>) -> f32 {
 @compute @workgroup_size(256)
 fn g2p(@builtin(global_invocation_id) g: vec3<u32>) {
   let i = gid1(g); if (i >= P.n) { return; }
-  if (pos[i].y < DEADY) { return; }
+  if (pos[i].y < DEADY || isBallistic(i)) { return; }
   let p = pos[i].xyz;
   let v0 = vel[i].xyz;
   let fcell = particleCell(p);
@@ -289,7 +289,7 @@ fn g2p(@builtin(global_invocation_id) g: vec3<u32>) {
 fn g2pWin(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
   let i = gid1(g);
   var ok = i < P.n; var p = vec3<f32>(0.0); var v0 = vec3<f32>(0.0); var fcell = vec3<i32>(0); var st = false;
-  if (ok) { ok = pos[i].y >= DEADY; }
+  if (ok) { ok = pos[i].y >= DEADY && !isBallistic(i); }
   if (ok) { p = pos[i].xyz; v0 = vel[i].xyz; fcell = particleCell(p); st = hasStorage(fcell); }
   if (lid == 0u) { for (var k = 0u; k < 3u; k++) { atomicStore(&p2gLo[k], 1 << 30); atomicStore(&p2gHi[k], -(1 << 30)); } }
   workgroupBarrier();
@@ -390,6 +390,47 @@ fn g2pRest(i: u32, p: vec3<f32>, v0: vec3<f32>, fcell: vec3<i32>, vn: vec3<f32>,
     return;
   }
   pos[i] = vec4<f32>(pc, min(length(v), 63.0) + 64.0 * floor(foam * 15.0 + 0.5));
-  vel[i] = vec4<f32>(v, foam);
+  // a drop on its own (at most a couple of others in the cells around it) moving over a third of a cell a step flies free of the grid:
+  // the grid then picks its substeps from the water that is still together, not from the fastest flying drop
+  let alone = P.q9 < 0.5 && select(csum < 3.5, csum < 8.5, fast);   // up to 3 particles in the 8 cells around; fast: csum is 8 x its own cell's count
+  vel[i] = vec4<f32>(v, foam + select(0.0, 2.0, P.ext0.x > 0.5 && alone && length(v) * P.dt > 0.35 * P.h));
+}
+// Fast drops flying free (Speed-ups > Fast drops fly free): a ballistic particle is moved here instead of by the grid: gravity, air
+// drag towards the wind (as a lone drop in g2p), the colliders and the walls, in as many small steps of its own as its speed needs.
+// It joins the water again when it reaches a cell with water in it or slows down.
+@compute @workgroup_size(256)
+fn ballistic(@builtin(global_invocation_id) g: vec3<u32>) {
+  let i = gid1(g); if (i >= P.n) { return; }
+  if (pos[i].y < DEADY || !isBallistic(i)) { return; }
+  var p = pos[i].xyz; var v = vel[i].xyz; var foam = vel[i].w - 2.0;
+  let n = u32(clamp(ceil(length(v) * P.dt / (0.5 * P.h)), 1.0, 32.0)); let dt = P.dt / f32(n);
+  let kd = P.q4 * 1.54;
+  for (var k = 0u; k < n; k++) {
+    var gust = vec3<f32>(0.0);
+    if (P.q7 > 0.0 && P.q4 > 0.0) {
+      let gp = p * 0.55; let tt = P.q8 * 0.6;
+      gust = vec3<f32>(vnz(gp + vec3<f32>(tt, 0.0, 0.0)), vnz(gp + vec3<f32>(17.3, tt, 4.1)), vnz(gp + vec3<f32>(5.7, 9.2, tt))) * 2.0 - vec3<f32>(1.0);
+    }
+    v.y -= P.gravity * dt;
+    v = v + (vec3<f32>(P.q1, P.q2, P.q3) + gust * P.q7 - v) * (1.0 - exp(-kd * dt));
+    let sp = length(v); if (sp > P.vmax) { v = v * (P.vmax / sp); }
+    let pt = p + v * dt; let pc = collideP(pt); let dsp = pc - pt;
+    if (dot(dsp, dsp) > 1.0e-12) { let nrm = normalize(dsp); let vd = dot(v, nrm); if (vd < 0.0) { v = v - vd * nrm; } }
+    p = pc;
+    let o = P.open;
+    if (o != 0u && (((o & 1u) != 0u && p.x < P.x0) || ((o & 2u) != 0u && p.x > P.x1) || ((o & 4u) != 0u && p.y < P.y0) ||
+        ((o & 8u) != 0u && p.y > P.y1) || ((o & 16u) != 0u && p.z < P.z0) || ((o & 32u) != 0u && p.z > P.z1))) {
+      pos[i] = vec4<f32>(0.0, -1.0e6, 0.0, 0.0); vel[i] = vec4<f32>(0.0); return;
+    }
+    let c = particleCell(p);
+    if (hasStorage(c) && atomicLoad(&cnt[cellIdx(c.x, c.y, c.z)]) > 0) { break; }   // reached water: joins it below
+  }
+  // airborne drops stay white, as in g2p for a drop in open air
+  foam = max(foam * exp(-P.dt / (max(P.q5, 0.05) * 2.5)), 0.9 * (0.25 + 0.75 * clamp(length(v) / 4.0, 0.0, 1.0)));
+  let c = particleCell(p);
+  let land = hasStorage(c) && atomicLoad(&cnt[cellIdx(c.x, c.y, c.z)]) > 0;
+  let slow = length(v) * P.dt < 0.15 * P.h;   // well below the speed it left at, so it does not flip back and forth
+  pos[i] = vec4<f32>(p, min(length(v), 63.0) + 64.0 * floor(foam * 15.0 + 0.5));
+  vel[i] = vec4<f32>(v, foam + select(2.0, 0.0, land || slow || P.ext0.x < 0.5));
 }
 `;

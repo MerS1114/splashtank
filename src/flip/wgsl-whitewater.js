@@ -94,13 +94,16 @@ fn wwSample(@builtin(global_invocation_id) g: vec3<u32>) {
   let sp = sPos[j]; if (sp.w <= 0.0) { return; }
   let p = sp.xyz; var vf = vec3<f32>(0.0);
   if (!inTank(p)) { sAux[j] = vec4<f32>(0.0); return; }   // out in the whitewater area: no water, still air
-  if (hasStorage(particleCell(p))) { vf = sampleNew(p); }   // the new velocity only (sampleBoth also read the old, unused here)
+  // spray and mist only need the water's velocity when they land in it (sprayStep: spray turning to foam), so in the air the
+  // costly velocity sample is skipped; foam and bubbles move with the water and always take it
+  let kind = u32(sVel[j].w + 0.5); let wet = wetAt(p);
+  if (hasStorage(particleCell(p)) && (kind >= 2u || (kind == 0u && wet > 0.55))) { vf = sampleNew(p); }   // the new velocity only
   // for foam: how fast the surface spreads apart (positive) or gathers (negative) there. Foam thins out where it spreads and collects
   // in lines and patches where the flow converges (what makes foam look lacy instead of an even sheet).
   // the foam's spreading is measured every other step, half the points at a time (the more costly part of this pass); between, a
   // point keeps last step's value from sAux
   var dq = floor((sAux[j].w + 2.0) / 4.0);
-  if (P.wwErode > 0.0 && u32(sVel[j].w + 0.5) == 2u && ((j + P.seed) & 1u) == 0u) {
+  if (P.wwErode > 0.0 && kind == 2u && ((j + P.seed) & 1u) == 0u) {
     dq = 0.0;
     let h = P.h; let ex = vec3<f32>(h, 0.0, 0.0); let ez = vec3<f32>(0.0, 0.0, h);
     if (hasStorage(particleCell(p + ex)) && hasStorage(particleCell(p - ex)) && hasStorage(particleCell(p + ez)) && hasStorage(particleCell(p - ez))) {
@@ -109,7 +112,7 @@ fn wwSample(@builtin(global_invocation_id) g: vec3<u32>) {
       dq = clamp(round(div * 2.0), -15.0, 15.0);
     }
   }
-  sAux[j] = vec4<f32>(vf, wetAt(p) + 4.0 * dq);
+  sAux[j] = vec4<f32>(vf, wet + 4.0 * dq);
 }
 // every water particle can throw off whitewater, Houdini style (Whitewater Source):
 //   crests: fast water at a convex, open part of the surface (a crest, a thin sheet, a splash edge) moving outwards, along the surface's
@@ -122,7 +125,7 @@ fn sprayEmit(@builtin(global_invocation_id) g: vec3<u32>) {
   let i = gid1(g); if (i >= P.n || P.smax == 0u || P.sprRate <= 0.0) { return; }
   let q = pos[i]; if (q.y < DEADY) { return; }
   if (P.ocean != 0u && layerW(q.xyz) > 0.0) { return; }
-  let v = vel[i].xyz; let foam = vel[i].w; let spd = length(v);
+  let v = vel[i].xyz; let foam = vel[i].w - select(0.0, 2.0, isBallistic(i)); let spd = length(v);
   let fast = clamp((spd * P.vs - P.sprMin) / (2.0 * P.sprMin), 0.0, 1.0);
   // most water is calm: leave before looking at the cells around it when none of the sources below could fire (the same result)
   let canCrest = fast > 0.0 && P.wwCrest > 0.0; let canChurn = foam > 0.55 && spd * P.vs > 0.5 && P.wwImpact > 0.0;

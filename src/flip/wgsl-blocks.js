@@ -9,7 +9,7 @@ fn tileNeedClear(@builtin(global_invocation_id) g: vec3<u32>) { let t = gid1(g);
 @compute @workgroup_size(256)
 fn tileMark(@builtin(global_invocation_id) g: vec3<u32>) {
   let i = gid1(g); if (i >= P.n) { return; }
-  let q = pos[i]; if (q.y < DEADY) { return; }
+  let q = pos[i]; if (q.y < DEADY || isBallistic(i)) { return; }   // a drop flying free needs no grid around it
   markAround(particleCell(q.xyz));
 }
 @compute @workgroup_size(256)

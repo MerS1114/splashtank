@@ -446,16 +446,21 @@ class GpuSim {
   // another count: the gap between two finishing then is what a step costs. A step sent to an empty queue measures the browser's delay
   // in reporting back instead (84 ms against 22 ms of GPU work on Mer's NVIDIA card at 0.015), and the live loop, which sizes its queue
   // from this, then kept the queue so short that it stayed empty and the GPU idled half the time.
+  // The mean, not the median, of those gaps (leaving out the slowest): the browser may report several steps done at once, which gives
+  // one long gap and a few of none, and only their mean is the rate steps really finish at. idleMs adds up the time nothing was queued.
   track() {
-    const t = performance.now(), queued = (this.inflight || 0) > 0; this.inflight = (this.inflight || 0) + 1;
+    const t = performance.now(), queued = (this.inflight || 0) > 0; this.inflight = (this.inflight || 0) + 1; this.nSent = (this.nSent || 0) + 1;
+    if (!queued && this.idleFrom) { this.idleMs = (this.idleMs || 0) + t - this.idleFrom; this.idleFrom = 0; }
     const start = Math.max(t, this.lastDone || 0);
     this.dev.queue.onSubmittedWorkDone().then(() => {
       const n = performance.now(); this.inflight--; const ms = n - start; this.lastDone = n;
+      if (this.inflight === 0) this.idleFrom = n;
       this.slowMs = Math.max(this.slowMs || 0, ms);
       const r = this.stepMs || (this.stepMs = []);
       if (!queued) { this.latMs = ms; if (r.length) return; }   // with nothing measured back to back yet, the delay is all there is
       r.push(ms); if (r.length > 31) r.shift();
-      const s = r.slice().sort((a, b) => a - b); this.lastMs = s[s.length >> 1];
+      let sum = 0, mx = 0; for (const x of r) { sum += x; mx = Math.max(mx, x); }
+      this.lastMs = r.length > 2 ? (sum - mx) / (r.length - 1) : sum / r.length;
     });
   }
   // live view: up to three readbacks in flight, so stepping never waits for the copy to the CPU. The newest finished copy is shown.

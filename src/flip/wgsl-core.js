@@ -19,7 +19,12 @@ struct Params {
   waves: array<vec4<f32>, 64>,
   wwEdge: f32, wwErode: f32, wwLand: f32, wwTrail: f32,   // words 404-407: cosine of the leading-edge angle, foam spreading fade, foam from landing water, mist trails
   wwA0: vec4<f32>, wwA1: vec4<f32>,                       // words 408-415: the whitewater area (lowest and highest corner), at least the tank
+  ext0: vec4<f32>,                                         // words 416-419: x fast drops fly free (ballistic), y steps before a calm block sleeps (0 off), z, w spare
+  ext1: vec4<f32>,                                         // words 420-423: spare
 };
+// a particle flying free of the grid (ballistic) keeps its white-water level in vel.w plus 2
+const BALLISTIC: f32 = 1.5;
+fn isBallistic(i: u32) -> bool { return vel[i].w >= BALLISTIC; }
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read_write> pos: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> vel: array<vec4<f32>>;

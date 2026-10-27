@@ -10,7 +10,7 @@
 function flipWGSL(sg) { return (sg ? 'enable subgroups;\n' : '') + FLIP_WGSL_CORE + FLIP_WGSL_BLOCKS + FLIP_WGSL_SOLVER + FLIP_WGSL_WHITEWATER + FLIP_WGSL_NARROWBAND + (sg ? FLIP_WGSL_SUBGROUPS : ''); }
 
 const FLIP_SLOT = { cells: 512 };   // one block of the sparse grid: 8 x 8 x 8 cells
-const FLIP_PARAMS_BYTES = 1664;      // the solver's uniform block: settings, whitewater, air and drips (words 68-83), starting-water shapes (84), ocean waves (148), more whitewater (404), whitewater area (408)
+const FLIP_PARAMS_BYTES = 1696;      // the solver's uniform block: settings, whitewater, air and drips (words 68-83), starting-water shapes (84), ocean waves (148), more whitewater (404), whitewater area (408)
 const FLIP_DEEPMAX = 200000;
 // the whitewater area: the tank widened k times about its centre and raised to up times its height (floor kept); never smaller than the tank
 function wwAreaBox(b, a) {
@@ -20,14 +20,14 @@ function wwAreaBox(b, a) {
 }          // deep water points drawn at most (narrow band, look only); matches DEEPMAX in the shader
 // The bindings each kernel uses (makeGroups says which buffer each number is). Keep every kernel within 8 storage buffers.
 const FLIP_L = {
-  tileReset: [12], tileNeedClear: [0, 17], tileMark: [0, 1, 17], tileMarkPhi: [0, 7, 12, 17, 18, 19], tileMarkFill: [0, 10, 11, 17], phiInitAll: [0, 7, 10, 11, 12, 18, 19, 31], tileFree: [0, 12, 16, 17, 20, 21], argsNew: [12, 14], tileAlloc: [0, 12, 16, 19, 20, 21], tileFix: [0, 12],
+  tileReset: [12], tileNeedClear: [0, 17], tileMark: [0, 1, 2, 17], tileMarkPhi: [0, 7, 12, 17, 18, 19], tileMarkFill: [0, 10, 11, 17], phiInitAll: [0, 7, 10, 11, 12, 18, 19, 31], tileFree: [0, 12, 16, 17, 20, 21], argsNew: [12, 14], tileAlloc: [0, 12, 16, 19, 20, 21], tileFix: [0, 12],
   initNew: [0, 7, 8, 10, 11, 12, 21, 31], slotListBuild: [0, 12, 16, 18], argsSlots: [12, 14], growFree: [12, 20, 25],
   sortClear: [22], sortHist: [0, 1, 22], sortScan: [22], sortScatter: [0, 1, 2, 22, 23, 24, 26, 27], sortCopy: [0, 1, 2, 23, 24, 26, 27], unsort: [0, 1, 23, 26],
   clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], p2gWin: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], spinEmit: [0, 1, 2, 3, 6, 16, 28, 29, 30], wwAdvect: [0, 1, 2], sprayStep: [0, 10, 11, 28, 29, 30, 32, 33], sprayDisp: [0, 15, 28, 29, 30], sprayDispSG: [0, 15, 28, 29, 30], dispBegin: [30], packDisp: [1, 12, 15, 30, 37, 38], wwSample: [0, 3, 6, 7, 16, 28, 29, 33], wwArgs: [0, 14, 30],
   airClear: [0, 34], airSplatW: [0, 1, 2, 6, 16, 34], airSplatS: [0, 28, 29, 34], airUpdate: [0, 10, 11, 32, 34, 35], airCopy: [0, 32, 35], dripStep: [0, 6, 7, 10, 16, 28, 29, 30, 36],
   normFaces: [0, 3, 5, 7, 10, 12, 16, 18, 19], divergence: [0, 3, 6, 7, 9, 12, 16, 18, 19],
   listClear: [12], buildList: [0, 7, 12, 13, 18, 19], buildListSG: [0, 7, 12, 13, 18, 19], listArgs: [0, 12, 14], rbRed: [0, 7, 8, 9, 12, 13, 16, 19], rbBlack: [0, 7, 8, 9, 12, 13, 16, 19],
-  project: [0, 3, 7, 8, 12, 16, 18, 19], subsample: [0, 1, 15], g2p: [0, 1, 2, 3, 5, 6, 10, 11, 16], g2pWin: [0, 1, 2, 3, 5, 6, 10, 11, 16],
+  project: [0, 3, 7, 8, 12, 16, 18, 19], subsample: [0, 1, 15], g2p: [0, 1, 2, 3, 5, 6, 10, 11, 16], ballistic: [0, 1, 2, 6, 10, 11, 16], g2pWin: [0, 1, 2, 3, 5, 6, 10, 11, 16],
   nbPhi: [0, 6, 7, 9, 12, 16, 18, 19, 31], nbJacA: [0, 7, 9, 12, 16, 18, 19], nbJacB: [0, 7, 9, 12, 16, 18, 19], nbVel: [0, 3, 5, 7, 12, 16, 18, 19, 31],
   saveVel: [0, 3, 12, 18, 19, 31], nbKill: [0, 1, 2, 7, 16], nbReset: [12], nbDead: [0, 1, 12, 13], nbDeficit: [0, 6, 7, 12, 13, 16, 18, 19, 31], nbArgs: [0, 12, 14],
   nbSpawn: [0, 1, 2, 12, 13, 16, 31], deepClear: [0, 15], deepPick: [0, 6, 7, 12, 15, 16, 18, 19, 31], deepFin: [12] };
@@ -246,6 +246,7 @@ class FlipSim {
     this.ab = wwAreaBox(b, ww.area); f32.set([this.ab.x0, this.ab.y0, this.ab.z0, 0, this.ab.x1, this.ab.y1, this.ab.z1, 0], 408);
     f32[83] = ww.spin === undefined ? 0.5 : ww.spin; f32[404] = Math.cos((ww.edge === undefined ? 70 : ww.edge) * Math.PI / 180); f32[405] = ww.erode === undefined ? 0.25 : ww.erode;
     f32[406] = ww.land === undefined ? 1 : ww.land; f32[407] = ww.trail === undefined ? 1 : ww.trail;
+    f32[416] = this.opt.ballistic && !this.wwOnly ? 1 : 0;
     this.airOnStep = !!(airo && ad); this.dripOnStep = !!(dr && this.ndrip > 0);
     this.dev.queue.writeBuffer(this.bParams, 0, this.pu);
     const iters = Math.max(1, (this.opt.iters || o.iters) | 0);
@@ -328,6 +329,7 @@ class FlipSim {
       } },
       { name: 'project', fn: (ps) => { indirect(ps, 'project', 64); if (nb) indirect(ps, 'saveVel', 64); } },
       { name: 'g2p', fn: (ps) => dispatch(ps, this.opt.p2gWin ? 'g2pWin' : 'g2p', N) },
+      ...(this.opt.ballistic ? [{ name: 'ballistic', fn: (ps) => dispatch(ps, 'ballistic', N) }] : []),
       // opt.noFoam (benchmark row C) also leaves out the whitewater stages, so the row shows what whitewater costs
       ...(this.sprayCap > 0 && this.airOnStep && !this.opt.noFoam ? [{ name: 'air', fn: (ps) => {   // air field first, so the whitewater moves with this step's air
         const na = this.airDims.n;

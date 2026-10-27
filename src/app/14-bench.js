@@ -16,9 +16,9 @@
       const warmTo = async () => { resetSim(0); for (let i = 0; i < W; i++) { stepOnce(); if (i % 10 === 9) await settle(); } await settle(); };
       say('Simulating up to ' + (W / 60).toFixed(2) + ' s, the moment to measure' + (atHead ? ' (the playhead)' : '') + '...');
       await sim.whenReady; await warmTo();
-      const N = sim.N, M = window.__benchM || 24, ST = ['sort', 'blocks', 'clear', 'p2g', 'narrow band', 'classify', 'normFaces', 'divergence', 'pressure', 'project', 'g2p', 'air', 'ww sample', 'ww move', 'ww emit', 'reseed'];
+      const N = sim.N, M = window.__benchM || 24, ST = ['sort', 'blocks', 'clear', 'p2g', 'narrow band', 'classify', 'normFaces', 'divergence', 'pressure', 'project', 'g2p', 'ballistic', 'air', 'ww sample', 'ww move', 'ww emit', 'reseed'];
       const f1 = (v) => v.toFixed(2), mb = (v) => Math.round(v / 1048576);
-      const BASE = { noFoam: false, noCull: false, noSolidCache: false, fastAir: false, sort: true, sortAuto: true, subgroups: true, sortEvery: 16, iters: 0 };
+      const BASE = { noFoam: false, noCull: false, noSolidCache: false, fastAir: false, sort: true, sortAuto: true, subgroups: true, ballistic: S.ballistic !== false, sortEvery: 16, iters: 0 };
       let lastSum = null;
       const measure = async (label, opt, quiet) => {
         Object.assign(sim.opt, BASE); await warmTo();
@@ -129,14 +129,17 @@
         if (sh) say('GPU solver prepared (' + Object.keys(FLIP_L).length + ' shaders compiled at once, shared by every scene) in ' + f1(sh.ms / 1000) + ' s' + (performance.now() - t0 > 50 ? ', ' + f1((performance.now() - t0) / 1000) + ' s of it during this test' : ' when the page started') + '.');
       }
       await new Promise((r) => setTimeout(r, 400));
-      if (sim.stepMs) sim.stepMs.length = 0; sim.slowMs = 0; sim.maxQ = 0;
+      if (sim.stepMs) sim.stepMs.length = 0; sim.slowMs = 0; sim.maxQ = 0; sim.idleMs = 0; sim.idleFrom = 0; sim.nSent = 0; S.subMost = 0; const tq0 = performance.now();
       // the timeline's end must not stop or loop the sim while it is timed (Meteor lake ends at 6 s: it read as 60% of real time)
       const tl0 = { dur: S.tl.dur, end: S.tl.end }; S.tl.dur = 1e6; S.tl.end = 'hold';
       setPlaying(true);
       say(''); say('Live sim, ' + (window.__smoothSecs || 10) + ' seconds from the start:');
-      const L = await record(window.__smoothSecs || 10); L.live = true; setPlaying(false); S.tl.dur = tl0.dur; S.tl.end = tl0.end;
+      const L = await record(window.__smoothSecs || 10); L.live = true;
+      const tq = performance.now() - tq0, idle = (sim.idleMs || 0) + (sim.idleFrom ? performance.now() - sim.idleFrom : 0), nSent = sim.nSent || 0;
+      setPlaying(false); S.tl.dur = tl0.dur; S.tl.end = tl0.end;
       const simS = (S.frame - L.frame0) / 60;
-      say('  The sim got through ' + f1(simS) + ' s of its time (' + Math.round(100 * simS / L.secs) + '% of real time). ' + fmtN(sim.N) + ' particles now, solver step about ' + f1(sim.lastMs) + ' ms from start until the browser reports it done (median of the last 31, slowest ' + f0(sim.slowMs) + ' ms)' + (sim.gpuMs ? ', of which the GPU was busy ' + f1(sim.gpuMs) + ' ms' : '') + (sim.maxQ ? ', up to ' + sim.maxQ + ' steps queued' : '') + (S.lastSub > 1 ? ' with ' + S.lastSub + ' substeps a frame' : '') + ', ' + fmtN(shownN) + ' points drawn.');
+      say('  The sim got through ' + f1(simS) + ' s of its time (' + Math.round(100 * simS / L.secs) + '% of real time). ' + fmtN(sim.N) + ' particles now, solver step about ' + f1(sim.lastMs) + ' ms from start until the browser reports it done (mean of the last 31, slowest ' + f0(sim.slowMs) + ' ms)' + (sim.gpuMs ? ', of which the GPU was busy ' + f1(sim.gpuMs) + ' ms' : '') + (sim.maxQ ? ', up to ' + sim.maxQ + ' steps queued' : '') + ', ' + fmtN(shownN) + ' points drawn.');
+      if (sim.track) say('  ' + nSent + ' solver steps sent (' + f1(nSent / Math.max(1, S.frame - L.frame0)) + ' substeps a frame on average, at most ' + (S.subMost || 1) + '), ' + f1(nSent / (tq / 1000)) + ' a second; nothing queued for ' + Math.round(100 * idle / tq) + '% of the time' + (sim.latMs ? ', and a step sent to an empty queue was reported done after ' + f1(sim.latMs) + ' ms' : '') + '.');
       report(L);
       { const t0 = performance.now(); if (sim.dev) await sim.dev.queue.onSubmittedWorkDone(); const w = performance.now() - t0;
         if (w > 100) say('  After Stop the GPU was still busy for ' + f1(w / 1000) + ' s with steps that were queued.'); }
