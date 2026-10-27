@@ -221,7 +221,10 @@ class FlipSim {
       if (!same) { this.solidDirty = true; this.cfPrev = { n: nc, sig: this.sdfSig, a: this.cf.slice(0, n32) }; }
     }
     u32[0] = N; u32[1] = this.nx; u32[2] = this.ny; u32[3] = this.nz; u32[4] = nc; u32[5] = this.open; u32[6] = 0; u32[7] = this.ncell;
-    const F = [dt, h, 1 / h, o.g, o.flip === undefined ? 0.95 : o.flip, this.rest, o.comp === undefined ? 6 : o.comp, this.opt.mg ? 1.4 : (o.omega || this.omega()),
+    // the FLIP ratio is for a step of 1/60 s: every step blends in some smoothed grid motion, so five substeps at the same ratio smoothed a
+    // splash five times as much (an impact lost half its spray once substeps rose with its speed). Per step it is ratio^(dt*60).
+    const flip = Math.pow(Math.min(Math.max(o.flip === undefined ? 0.95 : o.flip, 0), 1), dt * 60);
+    const F = [dt, h, 1 / h, o.g, flip, this.rest, o.comp === undefined ? 6 : o.comp, this.opt.mg ? 1.4 : (o.omega || this.omega()),
       b.x0, b.y0, b.z0, o.vmax || 14, 0.3 * this.d, 65536, b.x1, b.y1, b.z1, 0.3 * h,
       (o.wind && o.wind[0]) || 0, (o.wind && o.wind[1]) || 0, (o.wind && o.wind[2]) || 0, o.drag || 0, o.foamTau || 1.2, o.foamSens || 1, o.gust || 0, this.tm || 0, this.opt.noFoam ? 1 : 0, this.opt.noCull ? 1 : 0, this.stride, this.opt.fastAir ? 1 : 0];
     if (!this.only) this.tm = (this.tm || 0) + dt;
