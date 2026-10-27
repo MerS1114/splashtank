@@ -7,10 +7,10 @@
 // Colliders are voxelised into solid cells (cached until they move) and carry their own velocity into the pressure solve.
 // The shader is put together from the src/flip/wgsl-*.js parts (WGSL does not care about the order of declarations).
 // sg: the GPU offers subgroups, so the subgroup list kernels (wgsl-subgroups.js) are added; 'enable' must open the module
-function flipWGSL(sg) { return (sg ? 'enable subgroups;\n' : '') + FLIP_WGSL_CORE + FLIP_WGSL_BLOCKS + FLIP_WGSL_SOLVER + FLIP_WGSL_WHITEWATER + FLIP_WGSL_NARROWBAND + (sg ? FLIP_WGSL_SUBGROUPS : ''); }
+function flipWGSL(sg) { return (sg ? 'enable subgroups;\n' : '') + FLIP_WGSL_CORE + FLIP_WGSL_BLOCKS + FLIP_WGSL_SOLVER + FLIP_WGSL_WHITEWATER + FLIP_WGSL_NARROWBAND + FLIP_WGSL_MG + (sg ? FLIP_WGSL_SUBGROUPS : ''); }
 
 const FLIP_SLOT = { cells: 512 };   // one block of the sparse grid: 8 x 8 x 8 cells
-const FLIP_PARAMS_BYTES = 1696;      // the solver's uniform block: settings, whitewater, air and drips (words 68-83), starting-water shapes (84), ocean waves (148), more whitewater (404), whitewater area (408)
+const FLIP_PARAMS_BYTES = 1760;      // the solver's uniform block: settings, whitewater, air and drips (words 68-83), starting-water shapes (84), ocean waves (148), more whitewater (404), whitewater area (408)
 const FLIP_DEEPMAX = 200000;
 // the whitewater area: the tank widened k times about its centre and raised to up times its height (floor kept); never smaller than the tank
 function wwAreaBox(b, a) {
@@ -30,7 +30,7 @@ const FLIP_L = {
   project: [0, 3, 7, 8, 12, 16, 18, 19], subsample: [0, 1, 15], g2p: [0, 1, 2, 3, 5, 6, 10, 11, 16], ballistic: [0, 1, 2, 6, 10, 11, 16], g2pWin: [0, 1, 2, 3, 5, 6, 10, 11, 16],
   nbPhi: [0, 6, 7, 9, 12, 16, 18, 19, 31], nbJacA: [0, 7, 9, 12, 16, 18, 19], nbJacB: [0, 7, 9, 12, 16, 18, 19], nbVel: [0, 3, 5, 7, 12, 16, 18, 19, 31],
   saveVel: [0, 3, 12, 18, 19, 31], nbKill: [0, 1, 2, 7, 16], nbReset: [12], nbDead: [0, 1, 12, 13], nbDeficit: [0, 6, 7, 12, 13, 16, 18, 19, 31], nbArgs: [0, 12, 14],
-  nbSpawn: [0, 1, 2, 12, 13, 16, 31], deepClear: [0, 15], deepPick: [0, 6, 7, 12, 15, 16, 18, 19, 31], deepFin: [12] };
+  nbSpawn: [0, 1, 2, 12, 13, 16, 31], deepClear: [0, 15], deepPick: [0, 6, 7, 12, 15, 16, 18, 19, 31], deepFin: [12], ...FLIP_MG_L };
 // The ~85 compute pipelines, made once per device and shared by every FlipSim (a new one is made on each scene load and spacing change).
 // createComputePipelineAsync lets the driver compile them in parallel; done one after another on first use they stalled the first step
 // for many seconds on some GPUs (D3D shader compiles). pipes is set once all of them are ready.
@@ -83,13 +83,14 @@ class FlipSim {
     { const ids = new Uint32Array(M); for (let k = 0; k < M; k++) ids[k] = k; device.queue.writeBuffer(this.bPid, 0, ids); }   // slot k starts as particle k
     this.bTmap = mk(this.ntiles * 4); this.bNeed = mk(this.ntiles * 4); this.bNew = mk(this.ntiles * 8);
     this.makeSlotBuffers(this.scap);
+    this.bMg = mk(16); this.mgSize = 0;
     this.bCols = mk(32 * 128); this.bSortCnt = mk(65536 * 4); this.bTpos = mk(16); this.bTvel = mk(16); this.sortTick = 0; this.solidDirty = true; this.cfPrev = null;
     this.bCtl = device.createBuffer({ size: 64, usage: U.STORAGE | U.COPY_DST | U.COPY_SRC });
     this.bGro = mk(16);
     this.dispMax = 300000; this.stride = 1;
     this.bDisp = mk(Math.min(this.MAXN, this.dispMax + 1) * 16 + 16);
     this.bPack = mk(16); this.bPackU = device.createBuffer({ size: 128, usage: U.UNIFORM | U.COPY_DST }); this.packWords = 4;
-    this.bArgs = device.createBuffer({ size: 128, usage: U.STORAGE | U.INDIRECT | U.COPY_DST });
+    this.bArgs = device.createBuffer({ size: 192, usage: U.STORAGE | U.INDIRECT | U.COPY_DST });
     this.sdfCap = 16; this.sdfSig = null; this.bSdf = mk(64);
     this.bParams = device.createBuffer({ size: FLIP_PARAMS_BYTES, usage: U.UNIFORM | U.COPY_DST });
     this.bStat = device.createBuffer({ size: 64, usage: U.MAP_READ | U.COPY_DST }); this.statBusy = false; this.stats = null;
@@ -131,6 +132,14 @@ class FlipSim {
     // fluid cell lists: without narrow band a water cell holds at least one particle; with it, deep water cells hold none, so the lists go by cells
     this.lcap = this.velGOn ? n * C : Math.min(n * C, this.MAXN); this.bList = mk(this.lcap * 8);
   }
+  // multigrid's levels (wgsl-multigrid.js): MGS floats a slot for levels 1-3, then the dense levels over the box, halving until about 4
+  // a side. Made on first use and again when the block pool grows. Returns the coarsest level.
+  mgPlan() {
+    let d = [this.tx, this.ty, this.tz], off = this.scap * 220; const dense = [];
+    while (Math.max(...d) > 4 && dense.length < FLIP_MG_LEVELS - 3) { d = d.map((v) => Math.ceil(v / 2)); dense.push([d[0], d[1], d[2], off]); off += 3 * d[0] * d[1] * d[2]; }
+    if (off !== this.mgSize) { this.bMg.destroy(); this.bMg = this.mk(off * 4); this.mgSize = off; this.makeGroups(); }
+    this.mgDense = dense; return 3 + dense.length;
+  }
   // the first narrow band step: room for the kept grid velocity and longer cell lists
   enableNB() {
     if (this.velGOn) return;
@@ -145,7 +154,7 @@ class FlipSim {
     const bufs = { 0: this.bParams, 1: this.bPos, 2: this.bVel, 3: this.bAcc, 5: this.bAccW, 6: this.bCnt, 7: this.bType, 8: this.bPres, 9: this.bRhs, 10: this.bCols, 11: this.bSdf,
       12: this.bCtl, 13: this.bList, 14: this.bArgs, 15: this.bDisp, 16: this.bTmap, 17: this.bNeed, 18: this.bSlotList, 19: this.bSlotTile, 20: this.bStack, 21: this.bNew,
       22: this.bSortCnt, 23: this.bTpos, 24: this.bTvel, 25: this.bGro, 26: this.bPid, 27: this.bTpid, 28: this.bSPos, 29: this.bSVel, 30: this.bSctl, 31: this.bVelG,
-      32: this.bAir, 33: this.bSAux, 34: this.bAirAcc, 35: this.bAir2, 36: this.bDrip, 37: this.bPack, 38: this.bPackU, 39: this.bCalm };
+      32: this.bAir, 33: this.bSAux, 34: this.bAirAcc, 35: this.bAir2, 36: this.bDrip, 37: this.bPack, 38: this.bPackU, 39: this.bCalm, 40: this.bMg };
     for (const name in this.L) { const p = this.pipes[name]; if (!p) continue; p.bg = this.dev.createBindGroup({ layout: p.pipeline.getBindGroupLayout(0), entries: this.L[name].map((k) => ({ binding: k, resource: { buffer: bufs[k] } })) }); }
   }
   // more blocks: copy the old ones over unchanged and put the new slots on the free stack
@@ -210,7 +219,7 @@ class FlipSim {
       if (!same) { this.solidDirty = true; this.cfPrev = { n: nc, sig: this.sdfSig, a: this.cf.slice(0, n32) }; }
     }
     u32[0] = N; u32[1] = this.nx; u32[2] = this.ny; u32[3] = this.nz; u32[4] = nc; u32[5] = this.open; u32[6] = 0; u32[7] = this.ncell;
-    const F = [dt, h, 1 / h, o.g, o.flip === undefined ? 0.95 : o.flip, this.rest, o.comp === undefined ? 6 : o.comp, o.omega || this.omega(),
+    const F = [dt, h, 1 / h, o.g, o.flip === undefined ? 0.95 : o.flip, this.rest, o.comp === undefined ? 6 : o.comp, this.opt.mg ? 1.4 : (o.omega || this.omega()),
       b.x0, b.y0, b.z0, o.vmax || 14, 0.3 * this.d, 65536, b.x1, b.y1, b.z1, 0.3 * h,
       (o.wind && o.wind[0]) || 0, (o.wind && o.wind[1]) || 0, (o.wind && o.wind[2]) || 0, o.drag || 0, o.foamTau || 1.2, o.foamSens || 1, o.gust || 0, this.tm || 0, this.opt.noFoam ? 1 : 0, this.opt.noCull ? 1 : 0, this.stride, this.opt.fastAir ? 1 : 0];
     if (!this.only) this.tm = (this.tm || 0) + dt;
@@ -247,6 +256,7 @@ class FlipSim {
     f32[83] = ww.spin === undefined ? 0.5 : ww.spin; f32[404] = Math.cos((ww.edge === undefined ? 70 : ww.edge) * Math.PI / 180); f32[405] = ww.erode === undefined ? 0.25 : ww.erode;
     f32[406] = ww.land === undefined ? 1 : ww.land; f32[407] = ww.trail === undefined ? 1 : ww.trail;
     f32[416] = this.opt.ballistic && !this.wwOnly ? 1 : 0; f32[417] = this.opt.settle === false ? 0 : (this.opt.settleTol || 0.001);
+    if (this.opt.mg && !this.wwOnly) { this.mgTop = this.mgPlan(); this.mgDense.forEach((q, k) => u32.set(q, 424 + 4 * k)); f32[420] = this.opt.mgW || 1; }
     this.airOnStep = !!(airo && ad); this.dripOnStep = !!(dr && this.ndrip > 0);
     this.dev.queue.writeBuffer(this.bParams, 0, this.pu);
     const iters = Math.max(1, (this.opt.iters || o.iters) | 0);
@@ -329,7 +339,21 @@ class FlipSim {
         dispatch(ps, 'listClear', 1); indirect(ps, this.sgOn() ? 'buildListSG' : 'buildList', 64); dispatch(ps, 'listArgs', 1);
       } },
       { name: 'pressure', fn: (ps) => {
-        for (let it = 0; it < iters; it++) for (const [nm, off] of [['rbRed', 0], ['rbBlack', 16]]) indirect(ps, nm, off);
+        const sweep = (n) => { for (let it = 0; it < n; it++) for (const [nm, off] of [['rbRed', 0], ['rbBlack', 16]]) indirect(ps, nm, off); };
+        if (!this.opt.mg || !this.mgTop) { sweep(iters); return; }
+        // multigrid (wgsl-multigrid.js): V-cycles, about one per 10 of the iterations asked for, each with four sweeps of the solver's cells
+        // before (over-relaxed 1.4: on a deep lake at 0.04, three cycles left 1/45 of the error 30 sweeps at 1.9 left, for less work); levels 1-3 are dispatched over the blocks in use, the dense levels over their whole grid
+        const top = this.mgTop, dz = this.mgDense;
+        const lv = (nm, l) => (l <= 3 ? indirect(ps, nm, [0, 128, 144, 160][l]) : dispatch(ps, nm, dz[l - 4][0] * dz[l - 4][1] * dz[l - 4][2]));
+        const smooth = (l, n) => { for (let k = 0; k < n; k++) { lv('mgS' + l + 'a', l); lv('mgS' + l + 'b', l); } };
+        dispatch(ps, 'mgArgs', 1);
+        for (let c = 0, nc = Math.max(1, Math.round(iters / 10)); c < nc; c++) {
+          sweep(this.opt.mgPre || 4);
+          for (let l = 1; l <= top; l++) { lv('mgDown' + l, l); smooth(l, l === top ? 16 : 2); }
+          for (let l = top - 1; l >= 1; l--) { lv('mgUp' + l, l); smooth(l, 2); }
+          indirect(ps, 'mgUp0', 64);
+        }
+        sweep(2);
       } },
       { name: 'project', fn: (ps) => { indirect(ps, 'project', 64); if (nb) indirect(ps, 'saveVel', 64); } },
       { name: 'g2p', fn: (ps) => dispatch(ps, this.opt.p2gWin ? 'g2pWin' : 'g2p', N) },
@@ -547,6 +571,32 @@ class FlipSim {
       out.push((ty[c] & 255) + '/' + (+(8 - (ty[c] >>> 16) / 4096).toFixed(1)) + '/' + cn[c] + '/' + vg[c * 3].toFixed(3) + '/' + vg[c * 3 + 1].toFixed(3));
     }
     return out;
+  }
+  // testing the pressure solve: how far the pressure is from solving it exactly, over every water cell after the last step (root mean
+  // square of the residual, against that of the right-hand side, so 0 is exact and 1 is as bad as no pressure at all)
+  async presResidual() {
+    const rd = async (buf, bytes) => { const st = this.dev.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }); const enc = this.dev.createCommandEncoder(); enc.copyBufferToBuffer(buf, 0, st, 0, bytes); this.dev.queue.submit([enc.finish()]); await st.mapAsync(GPUMapMode.READ); const a = st.getMappedRange().slice(0); st.unmap(); st.destroy(); return a; };
+    const tmap = new Uint32Array(await rd(this.bTmap, this.ntiles * 4)), bytes = this.scap * 512 * 4;
+    const ty = new Uint32Array(await rd(this.bType, bytes)), pr = new Float32Array(await rd(this.bPres, bytes)), rh = new Float32Array(await rd(this.bRhs, bytes));
+    const open = this.open, nx = this.nx, ny = this.ny, nz = this.nz;
+    const idx = (i, j, k) => { const s = tmap[(i >> 3) + this.tx * ((j >> 3) + this.ty * (k >> 3))]; return s === 0xffffffff ? -1 : s * 512 + (i & 7) + 8 * ((j & 7) + 8 * (k & 7)); };
+    const tyOf = (i, j, k) => {
+      if (i < 0) return open & 1 ? 0 : 2; if (i >= nx) return open & 2 ? 0 : 2; if (j < 0) return open & 4 ? 0 : 2; if (j >= ny) return open & 8 ? 0 : 2; if (k < 0) return open & 16 ? 0 : 2; if (k >= nz) return open & 32 ? 0 : 2;
+      const c = idx(i, j, k); return c < 0 ? 0 : ty[c] & 255;
+    };
+    let r2 = 0, b2 = 0, n = 0;
+    for (let t = 0; t < this.ntiles; t++) {
+      const s = tmap[t]; if (s === 0xffffffff) continue;
+      const bi = (t % this.tx) * 8, tt = Math.floor(t / this.tx), bj = (tt % this.ty) * 8, bk = Math.floor(tt / this.ty) * 8;
+      for (let l = 0; l < 512; l++) {
+        const c = s * 512 + l; if ((ty[c] & 255) !== 1) continue;
+        const i = bi + (l & 7), j = bj + ((l >> 3) & 7), k = bk + (l >> 6); if (i >= nx || j >= ny || k >= nz) continue;
+        let sum = 0, nns = 0;
+        for (const [a, b2_, c2] of [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1]]) { const q = tyOf(i + a, j + b2_, k + c2); if (q === 2) continue; nns++; if (q === 1) sum += pr[idx(i + a, j + b2_, k + c2)]; }
+        const r = rh[c] - (nns * pr[c] - sum); r2 += r * r; b2 += rh[c] * rh[c]; n++;
+      }
+    }
+    return { cells: n, rel: Math.sqrt(r2 / Math.max(b2, 1e-30)) };
   }
   // number of cells that hold water, read back from the fluid list counters
   async activeCells() {

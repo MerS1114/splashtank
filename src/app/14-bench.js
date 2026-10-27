@@ -18,7 +18,7 @@
       await sim.whenReady; await warmTo();
       const N = sim.N, M = window.__benchM || 24, ST = ['sort', 'blocks', 'clear', 'p2g', 'narrow band', 'classify', 'normFaces', 'divergence', 'pressure', 'project', 'g2p', 'ballistic', 'air', 'ww sample', 'ww move', 'ww emit', 'reseed'];
       const f1 = (v) => v.toFixed(2), mb = (v) => Math.round(v / 1048576);
-      const BASE = { noFoam: false, noCull: false, noSolidCache: false, fastAir: false, sort: true, sortAuto: true, subgroups: true, ballistic: S.ballistic !== false, settle: S.settle !== false, sortEvery: 16, iters: 0 };
+      const BASE = { noFoam: false, noCull: false, noSolidCache: false, fastAir: false, sort: true, sortAuto: true, subgroups: true, ballistic: S.ballistic !== false, settle: S.settle !== false, mg: !!S.mg, sortEvery: 16, iters: 0 };
       let lastSum = null;
       const measure = async (label, opt, quiet) => {
         Object.assign(sim.opt, BASE); await warmTo();
@@ -38,6 +38,7 @@
         say(label);
         say('  whole step ' + f1(tot / M) + ' ms from start until the browser reports it done (about ' + Math.round(1000 / (tot / M)) + ' steps/s), JS side ' + f1(cpu / M) + ' ms' + (sim.gpuMs ? ', GPU busy ' + f1(sim.gpuMs) + ' ms of it' : ''));
         say('  stages' + (onGpu ? ', timed on the GPU itself: ' : ', each timed alone: ') + parts.join(', ') + '  (sum ' + f1(s) + ')');
+        if (sim.presResidual) { const q = await sim.presResidual(); say('  pressure left unsolved after the last step: ' + (100 * q.rel).toFixed(2) + '% (0 is exact; over ' + fmtN(q.cells) + ' water cells)'); }
         return tot / M;
       };
       await settle();
@@ -72,6 +73,7 @@
       await trio('F. particles sorted every 16th step whether they moved or not', { sortAuto: false });
       await trio('G. grouped transfer ' + (S.p2gWin ? 'off' : 'on') + ' (p2g and g2p through workgroup memory; Speed-ups)', { p2gWin: !S.p2gWin });
       await trio('Z. settled water ' + (S.settle !== false ? 'relaxed like the rest (not left out of the pressure solve)' : 'left out of the pressure solve'), { settle: S.settle === false });
+      await trio('M. multigrid pressure ' + (S.mg ? 'off (plain red-black sweeps)' : 'on (V-cycles over coarser grids)'), { mg: !S.mg });
       const pi = S.iters > 20 ? 20 : 40;
       await trio('P. ' + pi + ' pressure iterations instead of ' + S.iters, { iters: pi });
       await trio('C. all whitewater (spray, mist, foam, bubbles, air field), white water and air drag skipped (for comparison)', { noFoam: true });
