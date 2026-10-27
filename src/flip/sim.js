@@ -182,13 +182,19 @@ class FlipSim {
     s.seen = true;
     const want = s.sc + s.ovf;
     if (s.ovf > 0 || want > 0.8 * this.scap) this.grow(Math.max(Math.ceil(this.scap * 1.5), Math.ceil(want * 1.4) + 8));
+    // narrow band: the band is refilled from free particle slots. An impact into deep water asks for far more than the spares seeded at
+    // the start, so park more slots (up to the cap) when the cells asking would use over half of what is free
+    if (this.nbCfg && this.N < this.cap) {
+      const need = s.need * Math.round(0.85 * this.rest);
+      if (need > 0.5 * s.free) { const k = Math.min(this.cap - this.N, Math.max(2 * need - s.free, Math.ceil(0.1 * this.N))); for (let q = 0; q < k; q++) this.add(0, -1e6, 0, 0, 0, 0); }
+    }
   }
   readStats(enc) {
     if (this.statBusy) return;
     enc.copyBufferToBuffer(this.bCtl, 0, this.bStat, 0, 64); this.statBusy = true;
     const done = () => this.dev.queue.onSubmittedWorkDone().then(() => this.bStat.mapAsync(GPUMapMode.READ)).then(() => {
       const a = new Uint32Array(this.bStat.getMappedRange().slice(0)); this.bStat.unmap();
-      this.stats = { sc: a[4], ovf: a[5], fluid: a[0] + a[1] + a[15], settled: a[15], vmax: new Float32Array(a.buffer)[6], seen: false }; this.ovfTotal = (this.ovfTotal || 0) + a[5]; this.peak = Math.max(this.peak || 0, a[4]); this.statBusy = false;
+      this.stats = { sc: a[4], ovf: a[5], fluid: a[0] + a[1] + a[15], settled: a[15], free: a[8], need: a[9], vmax: new Float32Array(a.buffer)[6], seen: false }; this.ovfTotal = (this.ovfTotal || 0) + a[5]; this.peak = Math.max(this.peak || 0, a[4]); this.statBusy = false;
     }).catch(() => { this.statBusy = false; });
     this.statPromise = new Promise((r) => setTimeout(r, 0)).then(done);
   }
@@ -206,7 +212,7 @@ class FlipSim {
     this.lastDt = dt;
     this.flushRun();
     const N = this.N; if (N === 0 || !this.ready) return;
-    if (!this.only) this.maybeGrow();
+    if (!this.only) { this.maybeGrow(); this.flushRun(); }   // it may park new particle slots
     const u32 = this.pu32, f32 = this.pf32, h = this.h, b = this.b;
     this.stride = Math.max(1, Math.ceil(N / this.dispMax)); this.lastN = N;
     const nbc = o.nb !== undefined ? o.nb : this.nbCfg, oc = (o.ocean && o.ocean.on) ? o.ocean : (o.ocean === undefined && this.oceanCfg && this.oceanCfg.on ? this.oceanCfg : null);

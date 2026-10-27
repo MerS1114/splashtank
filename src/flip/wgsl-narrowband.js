@@ -119,7 +119,10 @@ fn nbDeficit(@builtin(global_invocation_id) g: vec3<u32>) {
     if (cx.y > oceanEta(cx.xz) - 0.25 * P.h || ph < -P.band) { return; }
   } else {
     if ((ctype[c] & 0xffu) != 1u || ph > -1.0 || ph < -P.band) { return; }
-    if (!calmV(velGVec(cx))) { return; }   // fast water thinning out is spray and foam, not missing water
+    // fast water thinning out is spray and foam, not missing water; but a fast water cell with no particles at all is deep water an
+    // impact brought next to the surface: it gets its particles, moving with it. Only just under the surface: refilling fast empty
+    // cells lower in the band pumped water up (band particles rising left them empty, the refill rose after them, and so on)
+    if (!calmV(velGVec(cx)) && (atomicLoad(&cnt[c]) > 0 || ph < -2.0)) { return; }
   }
   let n = u32(max(atomicLoad(&cnt[c]), 0));
   if (f32(n) >= 0.55 * P.rest) { return; }

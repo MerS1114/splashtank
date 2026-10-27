@@ -120,7 +120,9 @@ fn classify(@builtin(global_invocation_id) g: vec3<u32>) {
   if (!inDom(a.p)) { ty = 0u; }   // past the far walls: storage only, never fluid
   else if ((sb & 0xff00u) != 0u) { ty = 2u; }
   else if (P.ocean != 0u && layerW(cx) >= 0.5) { ty = select(0u, 2u, cx.y < oceanEta(cx.xz)); }   // the ocean's boundary: a wall moving with the waves, under their surface
-  else if (P.nb != 0u && phiOf(c) < -1.0 && (phiOf(c) < -P.band || calmV(velGVec(cx)))) { ty = 1u; }   // water by depth: deep water has no particles
+  // water by depth: deep water has no particles. Fast water inside the band stays water if it was water and has no particles yet (deep
+  // water an impact set moving, with the surface come near): left as air, the whole body under an impact vanished and the band fell in
+  else if (P.nb != 0u && phiOf(c) < -1.0 && (phiOf(c) < -P.band || calmV(velGVec(cx)) || (n == 0 && (ctype[c] & 0xffu) == 1u))) { ty = 1u; }
   else if (n > 0) {
     ty = 1u;
     // sheet tearing: a sparse cell with no solidly full neighbour is a thin sheet or a drop, so it flies free instead of being held together
