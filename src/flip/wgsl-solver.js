@@ -191,6 +191,13 @@ fn relax(c: u32, color: u32) {
   let p = slotCoord(c >> 9u, c & 511u); let i = p.x; let j = p.y; let k = p.z;
   if (u32((i + j + k) & 1) != color) { return; }
   if ((ctype[c] & 0xffu) != 1u) { return; }
+  let sn = presNbr(i, j, k);
+  if (sn.y < 0.5) { pres[c] = 0.0; return; }
+  let pg = (rhs[c] + sn.x) / sn.y;
+  pres[c] = pres[c] + P.omega * (pg - pres[c]);
+}
+// the pressures of the six neighbours added up (x), and how many of them are not solid (y)
+fn presNbr(i: i32, j: i32, k: i32) -> vec2<f32> {
   var sum = 0.0; var nns = 0.0;
   for (var a = 0u; a < 6u; a++) {
     var q = vec3<i32>(i, j, k);
@@ -200,10 +207,25 @@ fn relax(c: u32, color: u32) {
     nns += 1.0;
     if (ty == 1u) { sum += pres[cellIdx(q.x, q.y, q.z)]; }
   }
-  if (nns < 0.5) { pres[c] = 0.0; return; }
-  let pg = (rhs[c] + sum) / nns;
-  pres[c] = pres[c] + P.omega * (pg - pres[c]);
+  return vec2<f32>(sum, nns);
 }
+// settled water: a fluid cell whose pressure from the last step already balances this step's divergence, so one relaxation would change
+// it by less than the tolerance (P.ext0.y: how far, in cells per step, the water may move from the difference; 0 = off). Once that has
+// held for SETTLE steps in a row it is left out of the pressure lists and keeps its pressure; mostly calm deep water. Checked again every
+// step, so it rejoins as soon as the water there changes. The steps in a row matter: at the start (or wherever water has just arrived)
+// deep cells show no imbalance only because the pressure has not reached them yet, and leaving them out then let the water compress.
+const SETTLE: u32 = 8u;
+@compute @workgroup_size(256)
+fn settleMark(@builtin(global_invocation_id) g: vec3<u32>) {
+  let a = acell(gid1(g)); if (!a.ok) { return; }
+  let c = a.c; var ok = false;
+  if ((ctype[c] & 0xffu) == 1u) {
+    let sn = presNbr(a.p.x, a.p.y, a.p.z);
+    if (sn.y > 0.5) { ok = abs((rhs[c] + sn.x) / sn.y - pres[c]) < P.ext0.y * P.h * P.h / (P.dt * P.dt); }
+  }
+  calm[c] = select(0u, min(calm[c] + 1u, 255u), ok);
+}
+fn settled(c: u32) -> bool { return P.ext0.y > 0.0 && calm[c] >= SETTLE; }
 // every stride-th particle, packed together, so the live view only has to copy a few hundred thousand of them
 @compute @workgroup_size(256)
 fn subsample(@builtin(global_invocation_id) g: vec3<u32>) {
@@ -213,11 +235,12 @@ fn subsample(@builtin(global_invocation_id) g: vec3<u32>) {
 }
 // fluid cell lists, one per checkerboard colour: only cells that hold water are relaxed
 @compute @workgroup_size(1)
-fn listClear() { atomicStore(&ctl[0], 0u); atomicStore(&ctl[1], 0u); }
+fn listClear() { atomicStore(&ctl[0], 0u); atomicStore(&ctl[1], 0u); atomicStore(&ctl[15], 0u); }
 @compute @workgroup_size(256)
 fn buildList(@builtin(global_invocation_id) g: vec3<u32>) {
   let a = acell(gid1(g)); if (!a.ok) { return; }
   if ((ctype[a.c] & 0xffu) != 1u) { return; }
+  if (settled(a.c)) { atomicAdd(&ctl[15], 1u); return; }
   let par = u32((a.p.x + a.p.y + a.p.z) & 1);
   let s = atomicAdd(&ctl[par], 1u);
   if (s < P.lcap) { lst[par * P.lcap + s] = a.c; }

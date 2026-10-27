@@ -86,7 +86,7 @@ function bakeDiag(dst, n, b, vcap) {
 async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
   const sim = new FlipSim(gpu.dev, { d: desc.d, maxN: desc.maxN, size: desc.size, open: desc.open, ratio: desc.cellRatio });
   await sim.whenReady;   // the shared pipelines, compiled once per device
-  sim.recycle = false; sim.cap = desc.maxN; sim.opt.fastAir = !!desc.fastAir; sim.opt.sort = !!desc.sortP; sim.opt.p2gWin = !!desc.p2gWin; sim.opt.ballistic = desc.ballistic !== false;
+  sim.recycle = false; sim.cap = desc.maxN; sim.opt.fastAir = !!desc.fastAir; sim.opt.sort = !!desc.sortP; sim.opt.p2gWin = !!desc.p2gWin; sim.opt.ballistic = desc.ballistic !== false; sim.opt.settle = desc.settle !== false; sim.opt.settleTol = desc.settleTol;
   if (desc.spr && desc.sprayCap) sim.setSprayCap(desc.sprayCap);
   if (desc.nbLook) sim.setDeepLook(true);
   const runner = new SceneRunner(sim);
@@ -123,7 +123,7 @@ async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
     for (const o of sampleAll(f * dtF)) if (o.kind === 'emitter' && o.on) mv = Math.max(mv, o.speed || 0);
     vmax = Math.max(1, mv);
     const st = sim.stats || {};
-    const diag = Object.assign(bakeDiag(dst, n, sim.b, desc.vmaxW), { sub, objectSpeed: objV, fastestParticle: st.vmax, fluidCells: st.fluid, blocksUsed: st.sc, blockPool: sim.scap,
+    const diag = Object.assign(bakeDiag(dst, n, sim.b, desc.vmaxW), { sub, objectSpeed: objV, fastestParticle: st.vmax, fluidCells: st.fluid, settled: st.settled, blocksUsed: st.sc, blockPool: sim.scap,
       blocksNoRoom: (sim.ovfTotal || 0) - ovf0, ms: performance.now() - tf0 });
     const frame = packFrameBuf(dst, n, sim.b, sampleAll(f * dtF), desc.scale);
     if (sim.sprayCap) { const sd = await sim.readSpray(); if (sd) { frame.sp = packSprayFrame(sd, sim.ab || sim.b, 200000, (desc.spr && desc.spr.ww && desc.spr.ww.foamLife) || 3); diag.sprayPoints = frame.sp.alive; frame.sb = Object.assign({}, sim.ab || sim.b); } }

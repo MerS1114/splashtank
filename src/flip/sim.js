@@ -21,12 +21,12 @@ function wwAreaBox(b, a) {
 // The bindings each kernel uses (makeGroups says which buffer each number is). Keep every kernel within 8 storage buffers.
 const FLIP_L = {
   tileReset: [12], tileNeedClear: [0, 17], tileMark: [0, 1, 2, 17], tileMarkPhi: [0, 7, 12, 17, 18, 19], tileMarkFill: [0, 10, 11, 17], phiInitAll: [0, 7, 10, 11, 12, 18, 19, 31], tileFree: [0, 12, 16, 17, 20, 21], argsNew: [12, 14], tileAlloc: [0, 12, 16, 19, 20, 21], tileFix: [0, 12],
-  initNew: [0, 7, 8, 10, 11, 12, 21, 31], slotListBuild: [0, 12, 16, 18], argsSlots: [12, 14], growFree: [12, 20, 25],
+  initNew: [0, 7, 8, 10, 11, 12, 21, 31, 39], slotListBuild: [0, 12, 16, 18], argsSlots: [12, 14], growFree: [12, 20, 25],
   sortClear: [22], sortHist: [0, 1, 22], sortScan: [22], sortScatter: [0, 1, 2, 22, 23, 24, 26, 27], sortCopy: [0, 1, 2, 23, 24, 26, 27], unsort: [0, 1, 23, 26],
   clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16], p2gWin: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], spinEmit: [0, 1, 2, 3, 6, 16, 28, 29, 30], wwAdvect: [0, 1, 2], sprayStep: [0, 10, 11, 28, 29, 30, 32, 33], sprayDisp: [0, 15, 28, 29, 30], sprayDispSG: [0, 15, 28, 29, 30], dispBegin: [30], packDisp: [1, 12, 15, 30, 37, 38], wwSample: [0, 3, 6, 7, 16, 28, 29, 33], wwArgs: [0, 14, 30],
   airClear: [0, 34], airSplatW: [0, 1, 2, 6, 16, 34], airSplatS: [0, 28, 29, 34], airUpdate: [0, 10, 11, 32, 34, 35], airCopy: [0, 32, 35], dripStep: [0, 6, 7, 10, 16, 28, 29, 30, 36],
   normFaces: [0, 3, 5, 7, 10, 12, 16, 18, 19], divergence: [0, 3, 6, 7, 9, 12, 16, 18, 19],
-  listClear: [12], buildList: [0, 7, 12, 13, 18, 19], buildListSG: [0, 7, 12, 13, 18, 19], listArgs: [0, 12, 14], rbRed: [0, 7, 8, 9, 12, 13, 16, 19], rbBlack: [0, 7, 8, 9, 12, 13, 16, 19],
+  listClear: [12], settleMark: [0, 7, 8, 9, 12, 16, 18, 19, 39], buildList: [0, 7, 12, 13, 18, 19, 39], buildListSG: [0, 7, 12, 13, 18, 19, 39], listArgs: [0, 12, 14], rbRed: [0, 7, 8, 9, 12, 13, 16, 19], rbBlack: [0, 7, 8, 9, 12, 13, 16, 19],
   project: [0, 3, 7, 8, 12, 16, 18, 19], subsample: [0, 1, 15], g2p: [0, 1, 2, 3, 5, 6, 10, 11, 16], ballistic: [0, 1, 2, 6, 10, 11, 16], g2pWin: [0, 1, 2, 3, 5, 6, 10, 11, 16],
   nbPhi: [0, 6, 7, 9, 12, 16, 18, 19, 31], nbJacA: [0, 7, 9, 12, 16, 18, 19], nbJacB: [0, 7, 9, 12, 16, 18, 19], nbVel: [0, 3, 5, 7, 12, 16, 18, 19, 31],
   saveVel: [0, 3, 12, 18, 19, 31], nbKill: [0, 1, 2, 7, 16], nbReset: [12], nbDead: [0, 1, 12, 13], nbDeficit: [0, 6, 7, 12, 13, 16, 18, 19, 31], nbArgs: [0, 12, 14],
@@ -92,7 +92,7 @@ class FlipSim {
     this.bArgs = device.createBuffer({ size: 128, usage: U.STORAGE | U.INDIRECT | U.COPY_DST });
     this.sdfCap = 16; this.sdfSig = null; this.bSdf = mk(64);
     this.bParams = device.createBuffer({ size: FLIP_PARAMS_BYTES, usage: U.UNIFORM | U.COPY_DST });
-    this.bStat = device.createBuffer({ size: 32, usage: U.MAP_READ | U.COPY_DST }); this.statBusy = false; this.stats = null;
+    this.bStat = device.createBuffer({ size: 64, usage: U.MAP_READ | U.COPY_DST }); this.statBusy = false; this.stats = null;
     this.stage = null;   // made on first use (bakes and the benchmark); the live view uses its own small ring
     this.ringCap = Math.min(this.MAXN, this.dispMax + 1);
     this.pS = new Float32Array(M * 4); this.vS = new Float32Array(M * 4);
@@ -125,7 +125,7 @@ class FlipSim {
   // per-block storage: cell count, type, pressure, rhs (4 bytes each per cell), two numbers for each of the three faces, plus slot bookkeeping
   makeSlotBuffers(n) {
     const mk = this.mk, C = 512;
-    this.bCnt = mk(n * C * 4); this.bType = mk(n * C * 4); this.bPres = mk(n * C * 4); this.bRhs = mk(n * C * 4);
+    this.bCnt = mk(n * C * 4); this.bType = mk(n * C * 4); this.bPres = mk(n * C * 4); this.bRhs = mk(n * C * 4); this.bCalm = mk(n * C * 4);
     this.bAcc = mk(n * C * 12); this.bAccW = mk(n * C * 12); this.bVelG = mk(this.velGOn ? n * C * 12 : 16);   // kept velocity: only once narrow band is used
     this.bSlotList = mk(n * 4); this.bSlotTile = mk(n * 4); this.bStack = mk(n * 4);
     // fluid cell lists: without narrow band a water cell holds at least one particle; with it, deep water cells hold none, so the lists go by cells
@@ -139,19 +139,19 @@ class FlipSim {
     this.bList.destroy(); this.lcap = this.scap * 512; this.bList = this.mk(this.lcap * 8);
     this.makeGroups();
   }
-  slotBufs() { return ['bCnt', 'bType', 'bPres', 'bRhs', 'bAcc', 'bAccW', 'bVelG', 'bSlotList', 'bSlotTile', 'bStack']; }
+  slotBufs() { return ['bCnt', 'bType', 'bPres', 'bRhs', 'bCalm', 'bAcc', 'bAccW', 'bVelG', 'bSlotList', 'bSlotTile', 'bStack']; }
   makeGroups() {
     if (!this.ready) return;
     const bufs = { 0: this.bParams, 1: this.bPos, 2: this.bVel, 3: this.bAcc, 5: this.bAccW, 6: this.bCnt, 7: this.bType, 8: this.bPres, 9: this.bRhs, 10: this.bCols, 11: this.bSdf,
       12: this.bCtl, 13: this.bList, 14: this.bArgs, 15: this.bDisp, 16: this.bTmap, 17: this.bNeed, 18: this.bSlotList, 19: this.bSlotTile, 20: this.bStack, 21: this.bNew,
       22: this.bSortCnt, 23: this.bTpos, 24: this.bTvel, 25: this.bGro, 26: this.bPid, 27: this.bTpid, 28: this.bSPos, 29: this.bSVel, 30: this.bSctl, 31: this.bVelG,
-      32: this.bAir, 33: this.bSAux, 34: this.bAirAcc, 35: this.bAir2, 36: this.bDrip, 37: this.bPack, 38: this.bPackU };
+      32: this.bAir, 33: this.bSAux, 34: this.bAirAcc, 35: this.bAir2, 36: this.bDrip, 37: this.bPack, 38: this.bPackU, 39: this.bCalm };
     for (const name in this.L) { const p = this.pipes[name]; if (!p) continue; p.bg = this.dev.createBindGroup({ layout: p.pipeline.getBindGroupLayout(0), entries: this.L[name].map((k) => ({ binding: k, resource: { buffer: bufs[k] } })) }); }
   }
   // more blocks: copy the old ones over unchanged and put the new slots on the free stack
   grow(n) {
     n = Math.min(this.scapMax, Math.max(n, this.scap + 1)); if (n <= this.scap) return false;
-    const old = this.scap, keep = {}, per = { bCnt: 2048, bType: 2048, bPres: 2048, bRhs: 2048, bAcc: 6144, bAccW: 6144, bVelG: 6144, bSlotList: 4, bSlotTile: 4, bStack: 4 };
+    const old = this.scap, keep = {}, per = { bCnt: 2048, bType: 2048, bPres: 2048, bRhs: 2048, bCalm: 2048, bAcc: 6144, bAccW: 6144, bVelG: 6144, bSlotList: 4, bSlotTile: 4, bStack: 4 };
     for (const k of this.slotBufs()) keep[k] = this[k];
     const oldList = this.bList;
     this.makeSlotBuffers(n); this.scap = n;
@@ -174,10 +174,10 @@ class FlipSim {
   }
   readStats(enc) {
     if (this.statBusy) return;
-    enc.copyBufferToBuffer(this.bCtl, 0, this.bStat, 0, 32); this.statBusy = true;
+    enc.copyBufferToBuffer(this.bCtl, 0, this.bStat, 0, 64); this.statBusy = true;
     const done = () => this.dev.queue.onSubmittedWorkDone().then(() => this.bStat.mapAsync(GPUMapMode.READ)).then(() => {
       const a = new Uint32Array(this.bStat.getMappedRange().slice(0)); this.bStat.unmap();
-      this.stats = { sc: a[4], ovf: a[5], fluid: a[0] + a[1], vmax: new Float32Array(a.buffer)[6], seen: false }; this.ovfTotal = (this.ovfTotal || 0) + a[5]; this.peak = Math.max(this.peak || 0, a[4]); this.statBusy = false;
+      this.stats = { sc: a[4], ovf: a[5], fluid: a[0] + a[1] + a[15], settled: a[15], vmax: new Float32Array(a.buffer)[6], seen: false }; this.ovfTotal = (this.ovfTotal || 0) + a[5]; this.peak = Math.max(this.peak || 0, a[4]); this.statBusy = false;
     }).catch(() => { this.statBusy = false; });
     this.statPromise = new Promise((r) => setTimeout(r, 0)).then(done);
   }
@@ -246,7 +246,7 @@ class FlipSim {
     this.ab = wwAreaBox(b, ww.area); f32.set([this.ab.x0, this.ab.y0, this.ab.z0, 0, this.ab.x1, this.ab.y1, this.ab.z1, 0], 408);
     f32[83] = ww.spin === undefined ? 0.5 : ww.spin; f32[404] = Math.cos((ww.edge === undefined ? 70 : ww.edge) * Math.PI / 180); f32[405] = ww.erode === undefined ? 0.25 : ww.erode;
     f32[406] = ww.land === undefined ? 1 : ww.land; f32[407] = ww.trail === undefined ? 1 : ww.trail;
-    f32[416] = this.opt.ballistic && !this.wwOnly ? 1 : 0;
+    f32[416] = this.opt.ballistic && !this.wwOnly ? 1 : 0; f32[417] = this.opt.settle === false ? 0 : (this.opt.settleTol || 0.001);
     this.airOnStep = !!(airo && ad); this.dripOnStep = !!(dr && this.ndrip > 0);
     this.dev.queue.writeBuffer(this.bParams, 0, this.pu);
     const iters = Math.max(1, (this.opt.iters || o.iters) | 0);
@@ -319,11 +319,15 @@ class FlipSim {
       { name: 'classify', fn: (ps) => {
         if (this.solidDirty) { indirect(ps, 'solidBuild', 64); this.solidDirty = false; }
         indirect(ps, 'classify', 64);
-        dispatch(ps, 'listClear', 1); indirect(ps, this.sgOn() ? 'buildListSG' : 'buildList', 64); dispatch(ps, 'listArgs', 1);
         if (nb) indirect(ps, 'nbVel', 64);
       } },
       { name: 'normFaces', fn: (ps) => indirect(ps, 'normFaces', 64) },
-      { name: 'divergence', fn: (ps) => indirect(ps, 'divergence', 64) },
+      // the pressure lists are built after the divergence, so settled cells (settled in wgsl-solver.js) can be left out of them
+      { name: 'divergence', fn: (ps) => {
+        indirect(ps, 'divergence', 64);
+        indirect(ps, 'settleMark', 64);   // also when off, so the counters start again from 0 when it is turned back on
+        dispatch(ps, 'listClear', 1); indirect(ps, this.sgOn() ? 'buildListSG' : 'buildList', 64); dispatch(ps, 'listArgs', 1);
+      } },
       { name: 'pressure', fn: (ps) => {
         for (let it = 0; it < iters; it++) for (const [nm, off] of [['rbRed', 0], ['rbBlack', 16]]) indirect(ps, nm, off);
       } },

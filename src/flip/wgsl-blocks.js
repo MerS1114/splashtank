@@ -41,7 +41,7 @@ fn initNew(@builtin(global_invocation_id) g: vec3<u32>) {
   let local = t & 511u; let tl = newList[(t >> 9u) * 2u]; let tt = tl / P.tx;
   let p = vec3<i32>(i32((tl % P.tx) * 8u + (local & 7u)), i32((tt % P.ty) * 8u + ((local >> 3u) & 7u)), i32((tt / P.ty) * 8u + (local >> 6u)));
   let c = s * 512u + local;
-  pres[c] = 0.0;
+  pres[c] = 0.0; calm[c] = 0u;
   ctype[c] = u32(colAt(cellCenter(p.x, p.y, p.z)) + 1) << 8u;   // depth bits 0: air
   velG[c * 3u] = 0.0; velG[c * 3u + 1u] = 0.0; velG[c * 3u + 2u] = 0.0;
 }

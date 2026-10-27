@@ -45,7 +45,7 @@
     else if (S.engine === 'gpu') sim = new GpuSim(S.gpu.dev, Object.assign(o, { maxN: Math.min(PRESET.gpu.capMax, Math.max(S.cap, 20000)), out: rawBuf }));
     else sim = new FluidSim(Object.assign(o, { maxN: 16000 }));
     if (isGpu()) sim.rawOut = true;
-    if (S.engine === 'flip') { sim.opt.fastAir = S.fastAir; sim.opt.sort = S.sortP; sim.opt.p2gWin = S.p2gWin; sim.opt.ballistic = S.ballistic; sim.setSprayCap(S.sprOn ? S.sprCap : 0); }
+    if (S.engine === 'flip') { sim.opt.fastAir = S.fastAir; sim.opt.sort = S.sortP; sim.opt.p2gWin = S.p2gWin; sim.opt.ballistic = S.ballistic; sim.opt.settle = S.settle; sim.opt.settleTol = S.settleTol; sim.setSprayCap(S.sprOn ? S.sprCap : 0); }
     lastGen = -1;
     sim.setCap(S.cap); runner = new SceneRunner(sim);
     if (S.engine === 'flip' && (Math.abs(sim.size[0] - S.dom.w) > 1e-6 || Math.abs(sim.size[1] - S.dom.h) > 1e-6 || Math.abs(sim.size[2] - S.dom.d) > 1e-6)) {

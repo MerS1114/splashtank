@@ -19,7 +19,7 @@ struct Params {
   waves: array<vec4<f32>, 64>,
   wwEdge: f32, wwErode: f32, wwLand: f32, wwTrail: f32,   // words 404-407: cosine of the leading-edge angle, foam spreading fade, foam from landing water, mist trails
   wwA0: vec4<f32>, wwA1: vec4<f32>,                       // words 408-415: the whitewater area (lowest and highest corner), at least the tank
-  ext0: vec4<f32>,                                         // words 416-419: x fast drops fly free (ballistic), y steps before a calm block sleeps (0 off), z, w spare
+  ext0: vec4<f32>,                                         // words 416-419: x fast drops fly free (ballistic), y settled-water tolerance in cells per step (0 off), z, w spare
   ext1: vec4<f32>,                                         // words 420-423: spare
 };
 // a particle flying free of the grid (ballistic) keeps its white-water level in vel.w plus 2
@@ -76,6 +76,7 @@ struct PackU { nW: u32, nS: u32, nD: u32, wFromPos: u32, srcS: u32, srcD: u32, o
   x0: f32, y0: f32, z0: f32, kx: f32, ky: f32, kz: f32, vs: f32, pad4: f32,
   sx0: f32, sy0: f32, sz0: f32, skx: f32, sky: f32, skz: f32, pad5: f32, pad6: f32 };   // whitewater positions are across the whitewater area   // vs: metres per scene unit (speed bytes in 16ths of m/s)
 @group(0) @binding(37) var<storage, read_write> packOut: array<u32>;
+@group(0) @binding(39) var<storage, read_write> calm: array<u32>;   // per cell: steps in a row its pressure has needed no change (settleMark)
 @group(0) @binding(38) var<uniform> PK: PackU;      // per drip sample: (local position, collider), (local normal, wetness)   // the grid velocity kept from the last step (narrow band)
 ${SDF_WGSL}
 

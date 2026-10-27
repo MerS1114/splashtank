@@ -19,7 +19,7 @@ fn sgCount(b: vec4<u32>) -> u32 { return countOneBits(b.x) + countOneBits(b.y) +
 fn buildListSG(@builtin(global_invocation_id) g: vec3<u32>, @builtin(subgroup_invocation_id) lane: u32) {
   let a = acell(gid1(g));
   var par = 2u;
-  if (a.ok) { if ((ctype[a.c] & 0xffu) == 1u) { par = u32((a.p.x + a.p.y + a.p.z) & 1); } }
+  if (a.ok) { if ((ctype[a.c] & 0xffu) == 1u) { if (settled(a.c)) { atomicAdd(&ctl[15], 1u); } else { par = u32((a.p.x + a.p.y + a.p.z) & 1); } } }
   for (var k = 0u; k < 2u; k++) {
     let want = par == k;
     let b = subgroupBallot(want);
