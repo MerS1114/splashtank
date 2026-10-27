@@ -10,8 +10,9 @@ async function open(scene, opts) {
   opts = opts || {};
   const br = await launch();
   const pg = await br.newPage(); await pg.setViewport({ width: opts.width || 1440, height: opts.height || 900 });
-  const errs = []; pg.on('pageerror', (e) => errs.push('page: ' + e.message)); pg.on('console', (m) => { const t = m.text(); if (/error|invalid/i.test(t)) errs.push(t.slice(0, 300)); });
-  await pg.goto(pageUrl(opts.page || PAGE)); await wait(6000);
+  const errs = []; pg.on('pageerror', (e) => errs.push('page: ' + e.message)); pg.on('console', (m) => { const t = m.text(); if (/error|invalid|device lost/i.test(t)) errs.push(t.slice(0, 300)); });
+  pg.on('error', (e) => errs.push('tab crashed: ' + e.message)); pg.on('framenavigated', (f) => { if (f === pg.mainFrame() && errs.loaded) errs.push('page reloaded: ' + f.url().slice(0, 120)); });
+  await pg.goto(pageUrl(opts.page || PAGE)); errs.loaded = true; await wait(6000);
   if (scene) { await pg.select('#scene', scene); await wait(3000); }
   if (opts.spacing) { await pg.evaluate((d) => document.querySelector('#s-res').closest('.row')._st.commit(d), opts.spacing); await wait(1500); }
   // the FLIP pipelines compile in the background; nothing steps until they are ready

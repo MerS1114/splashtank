@@ -19,9 +19,12 @@ const summary = [], full = [];
 const say = (s) => { console.log(s); full.push(s); };
 (async () => {
   say('SplashTank stress report, ' + new Date().toISOString() + (REAL ? '' : '  (software GPU: SwiftShader, not real hardware)'));
-  for (const [sc, sp, bakeS, q] of CASES) {
+  // a case whose tab went away (crashed or reloaded: puppeteer says the frame is detached) runs once more in a fresh browser
+  const todo = CASES.map((c) => [...c, 0]);
+  while (todo.length) {
+    const [sc, sp, bakeS, q, tries] = todo.shift();
     const name = sc + ' ' + sp + ', bake ' + bakeS + ' s at ' + (q === 1 ? 'Preview' : q === 1.5 ? 'Final' : 'Fine');
-    say(''); say('======== ' + name + ' ========');
+    say(''); say('======== ' + name + (tries ? ' (second try)' : '') + ' ========');
     let t;
     try {
       t = await open(sc, { spacing: sp });
@@ -67,8 +70,12 @@ const say = (s) => { console.log(s); full.push(s); };
       const m = (re, txt) => { const r = txt.match(re); return r ? r[1] : '?'; };
       summary.push(name + ': live ' + m(/\((\d+)% of real time\)/, sm) + '% of real time with ' + m(/real time\)\. (\S+) particles/, sm) + ' particles, GPU busy ' + m(/GPU was busy ([\d.]+) ms/, sm) + ' ms a step; bake ' + (bk ? (bakeSec / Math.max(1, bk.frames - 1)).toFixed(1) + ' s a frame, ' + bk.maxN + ' points' : 'none') +
         '; playback ' + m(/Bake playback[^\n]*\n\s+([\d.]+) frames a second/, sm) + ' frames a second as points, ' + (surf ? surf.fps : '?') + ' as a surface; benchmark GPU busy ' + m(/A\. reference[^\n]*\n[^\n]*GPU busy ([\d.]+) ms/, bm) + ' ms a step.');
-    } catch (e) { say('This case failed: ' + (e && e.stack || e)); summary.push(name + ': failed (' + (e && e.message || e) + ')'); }
-    if (t) { full.push('errors on the page: ' + JSON.stringify(t.errs.slice(0, 6))); await done(t); }
+    } catch (e) {
+      say('This case failed: ' + (e && e.stack || e));
+      if (!tries && /detached|Target closed|crash/i.test(e && e.message || '')) { say('The page went away; trying this case once more.'); todo.unshift([sc, sp, bakeS, q, 1]); }
+      else summary.push(name + ': failed (' + (e && e.message || e) + ')');
+    }
+    if (t) { full.push('errors on the page: ' + JSON.stringify(t.errs.slice(0, 6))); await done(t).catch(() => {}); }
     fs.writeFileSync(OUT + '/stress-report.txt', ['SUMMARY', ...summary, '', ...full].join('\n') + '\n');
   }
   console.log('\nSUMMARY\n' + summary.join('\n'));

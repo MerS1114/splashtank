@@ -255,7 +255,7 @@ class FlipSim {
     this.ab = wwAreaBox(b, ww.area); f32.set([this.ab.x0, this.ab.y0, this.ab.z0, 0, this.ab.x1, this.ab.y1, this.ab.z1, 0], 408);
     f32[83] = ww.spin === undefined ? 0.5 : ww.spin; f32[404] = Math.cos((ww.edge === undefined ? 70 : ww.edge) * Math.PI / 180); f32[405] = ww.erode === undefined ? 0.25 : ww.erode;
     f32[406] = ww.land === undefined ? 1 : ww.land; f32[407] = ww.trail === undefined ? 1 : ww.trail;
-    f32[416] = this.opt.ballistic && !this.wwOnly ? 1 : 0; f32[417] = this.opt.settle === false ? 0 : (this.opt.settleTol || 0.001);
+    f32[416] = this.opt.ballistic && !this.wwOnly ? 1 : 0; f32[417] = this.opt.settle ? (this.opt.settleTol || 0.001) : 0;
     if (this.opt.mg && !this.wwOnly) { this.mgTop = this.mgPlan(); this.mgDense.forEach((q, k) => u32.set(q, 424 + 4 * k)); f32[420] = this.opt.mgW || 1; }
     this.airOnStep = !!(airo && ad); this.dripOnStep = !!(dr && this.ndrip > 0);
     this.dev.queue.writeBuffer(this.bParams, 0, this.pu);

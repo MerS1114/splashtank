@@ -18,7 +18,7 @@
       await sim.whenReady; await warmTo();
       const N = sim.N, M = window.__benchM || 24, ST = ['sort', 'blocks', 'clear', 'p2g', 'narrow band', 'classify', 'normFaces', 'divergence', 'pressure', 'project', 'g2p', 'ballistic', 'air', 'ww sample', 'ww move', 'ww emit', 'reseed'];
       const f1 = (v) => v.toFixed(2), mb = (v) => Math.round(v / 1048576);
-      const BASE = { noFoam: false, noCull: false, noSolidCache: false, fastAir: false, sort: true, sortAuto: true, subgroups: true, ballistic: S.ballistic !== false, settle: S.settle !== false, mg: !!S.mg, sortEvery: 16, iters: 0 };
+      const BASE = { noFoam: false, noCull: false, noSolidCache: false, fastAir: false, sort: true, sortAuto: true, subgroups: true, ballistic: S.ballistic !== false, settle: !!S.settle, mg: !!S.mg, sortEvery: 16, iters: 0 };
       let lastSum = null;
       const measure = async (label, opt, quiet) => {
         Object.assign(sim.opt, BASE); await warmTo();
@@ -72,7 +72,7 @@
       if (sim.sg) await trio('U. lists built one item at a time instead of by subgroups', { subgroups: false });
       await trio('F. particles sorted every 16th step whether they moved or not', { sortAuto: false });
       await trio('G. grouped transfer ' + (S.p2gWin ? 'off' : 'on') + ' (p2g and g2p through workgroup memory; Speed-ups)', { p2gWin: !S.p2gWin });
-      await trio('Z. settled water ' + (S.settle !== false ? 'relaxed like the rest (not left out of the pressure solve)' : 'left out of the pressure solve'), { settle: S.settle === false });
+      await trio('Z. settled water ' + (S.settle ? 'relaxed like the rest (not left out of the pressure solve)' : 'left out of the pressure solve'), { settle: !S.settle });
       await trio('M. multigrid pressure ' + (S.mg ? 'off (plain red-black sweeps)' : 'on (V-cycles over coarser grids)'), { mg: !S.mg });
       const pi = S.iters > 20 ? 20 : 40;
       await trio('P. ' + pi + ' pressure iterations instead of ' + S.iters, { iters: pi });
