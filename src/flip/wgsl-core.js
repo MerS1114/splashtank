@@ -19,7 +19,7 @@ struct Params {
   waves: array<vec4<f32>, 64>,
   wwEdge: f32, wwErode: f32, wwLand: f32, wwTrail: f32,   // words 404-407: cosine of the leading-edge angle, foam spreading fade, foam from landing water, mist trails
   wwA0: vec4<f32>, wwA1: vec4<f32>,                       // words 408-415: the whitewater area (lowest and highest corner), at least the tank
-  ext0: vec4<f32>,                                         // words 416-419: x fast drops fly free (ballistic), y settled-water tolerance in cells per step (0 off), z, w spare
+  ext0: vec4<f32>,                                         // words 416-419: x fast drops fly free (ballistic), y settled-water tolerance in cells per step (0 off), z particle separation (share of the crowding undone per step, 0 off), w spare
   ext1: vec4<f32>,                                         // words 420-423: x multigrid correction weight, y z w spare
   mgD: array<vec4<u32>, 4>,                                // words 424-439: multigrid's dense levels 4-7: size x, y, z and where they start in mg
 };
@@ -79,6 +79,7 @@ struct PackU { nW: u32, nS: u32, nD: u32, wFromPos: u32, srcS: u32, srcD: u32, o
 @group(0) @binding(37) var<storage, read_write> packOut: array<u32>;
 @group(0) @binding(39) var<storage, read_write> calm: array<u32>;   // per cell: steps in a row its pressure has needed no change (settleMark)
 @group(0) @binding(40) var<storage, read_write> mg: array<f32>;   // multigrid levels (wgsl-multigrid.js)
+@group(0) @binding(41) var<storage, read_write> dpres: array<f32>;   // per cell: the separation potential (sepRelax), whose gradient moves particles apart
 @group(0) @binding(38) var<uniform> PK: PackU;      // per drip sample: (local position, collider), (local normal, wetness)   // the grid velocity kept from the last step (narrow band)
 ${SDF_WGSL}
 

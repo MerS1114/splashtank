@@ -206,11 +206,14 @@ fn presNbr(i: i32, j: i32, k: i32) -> vec2<f32> {
     if (a == 0u) { q.x -= 1; } else if (a == 1u) { q.x += 1; } else if (a == 2u) { q.y -= 1; } else if (a == 3u) { q.y += 1; } else if (a == 4u) { q.z -= 1; } else { q.z += 1; }
     let ty = ctypeOf(q.x, q.y, q.z);
     if (ty == 2u) { continue; }
-    nns += 1.0;
-    if (ty == 1u) { sum += pres[cellIdx(q.x, q.y, q.z)]; }
+    if (ty == 1u) { nns += 1.0; sum += pres[cellIdx(q.x, q.y, q.z)]; } else { nns += 1.0 / ghostTheta(); }
   }
   return vec2<f32>(sum, nns);
 }
+// Ghost fluid free surface (Gibou et al. 2002, Enright et al. 2003): the air pressure 0 is set where the surface is, a share theta of
+// a cell from the water cell's centre, not at the next air cell's centre (theta 1, first order: the surface sat half a cell too high in
+// the solve, so waves on coarse grids ran slow and lost height). P.ext0.w is theta; 0 means 1.
+fn ghostTheta() -> f32 { return select(1.0, clamp(P.ext0.w, 0.2, 1.0), P.ext0.w > 0.0); }
 // settled water: a fluid cell whose pressure from the last step already balances this step's divergence, so one relaxation would change
 // it by less than the tolerance (P.ext0.y: how far, in cells per step, the water may move from the difference; 0 = off). Once that has
 // held for SETTLE steps in a row it is left out of the pressure lists and keeps its pressure; mostly calm deep water. Checked again every
@@ -262,12 +265,106 @@ fn projBody(f: u32, axis: u32, at: vec3<i32>) {
   var pl = 0.0; var ph = 0.0;
   if (tl == 1u) { pl = pres[cellIdx(lo.x, lo.y, lo.z)]; }
   if (th == 1u) { ph = pres[cellIdx(hi.x, hi.y, hi.z)]; }
-  gvW(f, gvR(f) - P.dt * P.ih * (ph - pl));
+  let k = select(1.0 / ghostTheta(), 1.0, tl == 1u && th == 1u);   // to the surface: the gradient over theta of a cell
+  gvW(f, gvR(f) - P.dt * P.ih * k * (ph - pl));
 }
 @compute @workgroup_size(256)
 fn project(@builtin(global_invocation_id) g: vec3<u32>) {
   let a = acell(gid1(g)); if (!a.ok) { return; }
   for (var ax = 0u; ax < 3u; ax++) { projBody(a.c * 3u + ax, ax, a.p); }
+}
+// Particle separation (Speed-ups' neighbour: Simulation > Separation; after Kugelstadt et al. 2019 and Houdini's particle separation):
+// crowded and sparse cells are evened out by moving the particles, not by pushing their velocity. The old way (density correction in
+// divergence, P.comp) added a velocity every step that FLIP then kept, which worked like friction: a standing wave lost 30% of its
+// height a period. Here a potential q with laplacian(q) = share x density error is relaxed over the fluid cells (q = 0 in air, no flow
+// through solids), and after g2p each particle moves by grad(q): out of crowded cells, into sparse ones inside the water.
+fn sepErr(c: u32, i: i32, j: i32, k: i32) -> f32 {
+  let dens = f32(atomicLoad(&cnt[c])) / P.rest - 1.0;
+  var interior = true;
+  if (ctypeOf(i - 1, j, k) == 0u || ctypeOf(i + 1, j, k) == 0u || ctypeOf(i, j - 1, k) == 0u || ctypeOf(i, j + 1, k) == 0u || ctypeOf(i, j, k - 1) == 0u || ctypeOf(i, j, k + 1) == 0u) { interior = false; }
+  if (P.nb != 0u && phiOf(c) < -1.0) { return 0.0; }   // deep narrow band water has no particles to count
+  return select(max(dens, 0.0), dens, interior);
+}
+@compute @workgroup_size(256)
+fn sepClear(@builtin(global_invocation_id) g: vec3<u32>) { let a = acell(gid1(g)); if (!a.ok) { return; } dpres[a.c] = 0.0; }
+fn sepRelax(c: u32, color: u32) {
+  let p = slotCoord(c >> 9u, c & 511u); let i = p.x; let j = p.y; let k = p.z;
+  if (u32((i + j + k) & 1) != color) { return; }
+  if ((ctype[c] & 0xffu) != 1u) { return; }
+  var sum = 0.0; var nns = 0.0;
+  for (var a = 0u; a < 6u; a++) {
+    var q = vec3<i32>(i, j, k);
+    if (a == 0u) { q.x -= 1; } else if (a == 1u) { q.x += 1; } else if (a == 2u) { q.y -= 1; } else if (a == 3u) { q.y += 1; } else if (a == 4u) { q.z -= 1; } else { q.z += 1; }
+    let ty = ctypeOf(q.x, q.y, q.z);
+    if (ty == 2u) { continue; }
+    nns += 1.0;
+    if (ty == 1u) { sum += dpres[cellIdx(q.x, q.y, q.z)]; }
+  }
+  if (nns < 0.5) { dpres[c] = 0.0; return; }
+  let tgt = (sum - P.ext0.z * sepErr(c, i, j, k) * P.h * P.h) / nns;
+  dpres[c] = dpres[c] + 1.6 * (tgt - dpres[c]);
+}
+@compute @workgroup_size(256)
+fn sepRed(@builtin(global_invocation_id) g: vec3<u32>) { let t = gid1(g); if (t >= min(atomicLoad(&ctl[0]), P.lcap)) { return; } sepRelax(lst[t], 0u); }
+@compute @workgroup_size(256)
+fn sepBlack(@builtin(global_invocation_id) g: vec3<u32>) { let t = gid1(g); if (t >= min(atomicLoad(&ctl[1]), P.lcap)) { return; } sepRelax(lst[P.lcap + t], 1u); }
+// grad(q) on a face: zero through solids and between two cells without water
+fn sepFace(axis: u32, c: vec3<i32>) -> f32 {
+  var lo = c; if (axis == 0u) { lo.x -= 1; } else if (axis == 1u) { lo.y -= 1; } else { lo.z -= 1; }
+  let tl = ctypeOf(lo.x, lo.y, lo.z); let th = ctypeOf(c.x, c.y, c.z);
+  if (tl == 2u || th == 2u || (tl != 1u && th != 1u)) { return 0.0; }
+  let ql = select(0.0, dpres[cellIdx(lo.x, lo.y, lo.z)], tl == 1u); let qh = select(0.0, dpres[cellIdx(c.x, c.y, c.z)], th == 1u);
+  return (qh - ql) * P.ih;
+}
+@compute @workgroup_size(256)
+fn sepMove(@builtin(global_invocation_id) g: vec3<u32>) {
+  let i = gid1(g); if (i >= P.n) { return; }
+  let p = pos[i].xyz;
+  if (pos[i].y < DEADY || isBallistic(i) || !hasStorage(particleCell(p))) { return; }
+  var d = vec3<f32>(0.0);
+  for (var axis = 0u; axis < 3u; axis++) {
+    var q = (p - vec3<f32>(P.x0, P.y0, P.z0)) * P.ih;
+    if (axis == 0u) { q.y -= 0.5; q.z -= 0.5; } else if (axis == 1u) { q.x -= 0.5; q.z -= 0.5; } else { q.x -= 0.5; q.y -= 0.5; }
+    let f0 = floor(q); let fr = q - f0; let i0 = vec3<i32>(f0);
+    var s = 0.0;
+    for (var c = 0u; c < 8u; c++) {
+      let dx = i32(c & 1u); let dy = i32((c >> 1u) & 1u); let dz = i32((c >> 2u) & 1u);
+      let w = select(1.0 - fr.x, fr.x, dx == 1) * select(1.0 - fr.y, fr.y, dy == 1) * select(1.0 - fr.z, fr.z, dz == 1);
+      if (w > 0.0) { s += w * sepFace(axis, i0 + vec3<i32>(dx, dy, dz)); }
+    }
+    d[axis] = s;
+  }
+  let L = length(d); if (L > 0.25 * P.h) { d *= 0.25 * P.h / L; }   // at most a quarter cell a step
+  pos[i] = vec4<f32>(collideP(p + d), pos[i].w);
+}
+// Velocity extrapolation (Bridson): a particle near the surface also samples faces between two air cells, which the pressure never
+// reaches, so it took only part of the pressure's push and the surface lagged (a standing wave lost height every period). Each such face
+// takes the mean of the faces beside it that touch water: the new velocity, and the old one so that the change (the FLIP part) is that
+// of its neighbours too. One layer is all the sampling reaches. Faces read are only ones touching water, which this never writes.
+fn faceOk(axis: u32, at: vec3<i32>) -> bool {
+  var lo = at; if (axis == 0u) { lo.x -= 1; } else if (axis == 1u) { lo.y -= 1; } else { lo.z -= 1; }
+  let tl = ctypeOf(lo.x, lo.y, lo.z); let th = ctypeOf(at.x, at.y, at.z);
+  return tl != 2u && th != 2u && (tl == 1u || th == 1u);
+}
+@compute @workgroup_size(256)
+fn extrap(@builtin(global_invocation_id) g: vec3<u32>) {
+  let a = acell(gid1(g)); if (!a.ok || !inDom(a.p)) { return; }
+  for (var ax = 0u; ax < 3u; ax++) {
+    var lo = a.p; if (ax == 0u) { lo.x -= 1; } else if (ax == 1u) { lo.y -= 1; } else { lo.z -= 1; }
+    let tl = ctypeOf(lo.x, lo.y, lo.z); let th = ctypeOf(a.p.x, a.p.y, a.p.z);
+    if (tl == 2u || th == 2u || tl == 1u || th == 1u) { continue; }
+    var sn = 0.0; var sd = 0.0; var nn = 0.0;
+    for (var q = 0u; q < 6u; q++) {
+      var p = a.p;
+      if (q == 0u) { p.x -= 1; } else if (q == 1u) { p.x += 1; } else if (q == 2u) { p.y -= 1; } else if (q == 3u) { p.y += 1; } else if (q == 4u) { p.z -= 1; } else { p.z += 1; }
+      if (!inDom(p) || !faceOk(ax, p)) { continue; }
+      let f = faceIndex(ax, p.x, p.y, p.z); let vn = gvR(f);
+      sn += vn; sd += vn - gv0R(f); nn += 1.0;
+    }
+    if (nn < 0.5) { continue; }
+    let f = a.c * 3u + ax; let ve = sn / nn;
+    gvW(f, ve); gv0W(f, ve - sd / nn);
+  }
 }
 fn hash1(n0: u32) -> f32 {
   var x = n0; x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u;

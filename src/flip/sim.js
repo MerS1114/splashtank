@@ -27,7 +27,7 @@ const FLIP_L = {
   airClear: [0, 34], airSplatW: [0, 1, 2, 6, 16, 34], airSplatS: [0, 28, 29, 34], airUpdate: [0, 10, 11, 32, 34, 35], airCopy: [0, 32, 35], dripStep: [0, 6, 7, 10, 16, 28, 29, 30, 36],
   normFaces: [0, 3, 5, 7, 10, 12, 16, 18, 19], divergence: [0, 3, 6, 7, 9, 12, 16, 18, 19],
   listClear: [12], settleMark: [0, 7, 8, 9, 12, 16, 18, 19, 39], buildList: [0, 7, 12, 13, 18, 19, 39], buildListSG: [0, 7, 12, 13, 18, 19, 39], listArgs: [0, 12, 14], rbRed: [0, 7, 8, 9, 12, 13, 16, 19], rbBlack: [0, 7, 8, 9, 12, 13, 16, 19],
-  project: [0, 3, 7, 8, 12, 16, 18, 19], subsample: [0, 1, 15], g2p: [0, 1, 2, 3, 5, 6, 10, 11, 16], ballistic: [0, 1, 2, 6, 10, 11, 16], g2pWin: [0, 1, 2, 3, 5, 6, 10, 11, 16],
+  project: [0, 3, 7, 8, 12, 16, 18, 19], extrap: [0, 3, 5, 7, 12, 16, 18, 19], sepClear: [0, 12, 18, 19, 41], sepRed: [0, 6, 7, 12, 13, 16, 19, 41], sepBlack: [0, 6, 7, 12, 13, 16, 19, 41], sepMove: [0, 1, 2, 7, 10, 11, 16, 41], subsample: [0, 1, 15], g2p: [0, 1, 2, 3, 5, 6, 10, 11, 16], ballistic: [0, 1, 2, 6, 10, 11, 16], g2pWin: [0, 1, 2, 3, 5, 6, 10, 11, 16],
   nbPhi: [0, 6, 7, 9, 12, 16, 18, 19, 31], nbJacA: [0, 7, 9, 12, 16, 18, 19], nbJacB: [0, 7, 9, 12, 16, 18, 19], nbVel: [0, 3, 5, 7, 12, 16, 18, 19, 31],
   saveVel: [0, 3, 12, 18, 19, 31], nbKill: [0, 1, 2, 7, 16], nbReset: [12], nbDead: [0, 1, 12, 13], nbDeficit: [0, 6, 7, 12, 13, 16, 18, 19, 31], nbArgs: [0, 12, 14],
   nbSpawn: [0, 1, 2, 12, 13, 16, 31], deepClear: [0, 15], deepPick: [0, 6, 7, 12, 15, 16, 18, 19, 31], deepFin: [12], ...FLIP_MG_L };
@@ -128,7 +128,7 @@ class FlipSim {
   // per-block storage: cell count, type, pressure, rhs (4 bytes each per cell), two numbers for each of the three faces, plus slot bookkeeping
   makeSlotBuffers(n) {
     const mk = this.mk, C = 512;
-    this.bCnt = mk(n * C * 4); this.bType = mk(n * C * 4); this.bPres = mk(n * C * 4); this.bRhs = mk(n * C * 4); this.bCalm = mk(n * C * 4);
+    this.bCnt = mk(n * C * 4); this.bType = mk(n * C * 4); this.bPres = mk(n * C * 4); this.bRhs = mk(n * C * 4); this.bCalm = mk(n * C * 4); this.bDpres = mk(n * C * 4);
     this.bAcc = mk(n * C * 12); this.bAccW = mk(n * C * 12); this.bVelG = mk(this.velGOn ? n * C * 12 : 16);   // kept velocity: only once narrow band is used
     this.bSlotList = mk(n * 4); this.bSlotTile = mk(n * 4); this.bStack = mk(n * 4);
     // fluid cell lists: without narrow band a water cell holds at least one particle; with it, deep water cells hold none, so the lists go by cells
@@ -150,19 +150,19 @@ class FlipSim {
     this.bList.destroy(); this.lcap = this.scap * 512; this.bList = this.mk(this.lcap * 8);
     this.makeGroups();
   }
-  slotBufs() { return ['bCnt', 'bType', 'bPres', 'bRhs', 'bCalm', 'bAcc', 'bAccW', 'bVelG', 'bSlotList', 'bSlotTile', 'bStack']; }
+  slotBufs() { return ['bCnt', 'bType', 'bPres', 'bRhs', 'bCalm', 'bDpres', 'bAcc', 'bAccW', 'bVelG', 'bSlotList', 'bSlotTile', 'bStack']; }
   makeGroups() {
     if (!this.ready) return;
     const bufs = { 0: this.bParams, 1: this.bPos, 2: this.bVel, 3: this.bAcc, 5: this.bAccW, 6: this.bCnt, 7: this.bType, 8: this.bPres, 9: this.bRhs, 10: this.bCols, 11: this.bSdf,
       12: this.bCtl, 13: this.bList, 14: this.bArgs, 15: this.bDisp, 16: this.bTmap, 17: this.bNeed, 18: this.bSlotList, 19: this.bSlotTile, 20: this.bStack, 21: this.bNew,
       22: this.bSortCnt, 23: this.bTpos, 24: this.bTvel, 25: this.bGro, 26: this.bPid, 27: this.bTpid, 28: this.bSPos, 29: this.bSVel, 30: this.bSctl, 31: this.bVelG,
-      32: this.bAir, 33: this.bSAux, 34: this.bAirAcc, 35: this.bAir2, 36: this.bDrip, 37: this.bPack, 38: this.bPackU, 39: this.bCalm, 40: this.bMg };
+      32: this.bAir, 33: this.bSAux, 34: this.bAirAcc, 35: this.bAir2, 36: this.bDrip, 37: this.bPack, 38: this.bPackU, 39: this.bCalm, 40: this.bMg, 41: this.bDpres };
     for (const name in this.L) { const p = this.pipes[name]; if (!p) continue; p.bg = this.dev.createBindGroup({ layout: p.pipeline.getBindGroupLayout(0), entries: this.L[name].map((k) => ({ binding: k, resource: { buffer: bufs[k] } })) }); }
   }
   // more blocks: copy the old ones over unchanged and put the new slots on the free stack
   grow(n) {
     n = Math.min(this.scapMax, Math.max(n, this.scap + 1)); if (n <= this.scap) return false;
-    const old = this.scap, keep = {}, per = { bCnt: 2048, bType: 2048, bPres: 2048, bRhs: 2048, bCalm: 2048, bAcc: 6144, bAccW: 6144, bVelG: 6144, bSlotList: 4, bSlotTile: 4, bStack: 4 };
+    const old = this.scap, keep = {}, per = { bCnt: 2048, bType: 2048, bPres: 2048, bRhs: 2048, bCalm: 2048, bDpres: 2048, bAcc: 6144, bAccW: 6144, bVelG: 6144, bSlotList: 4, bSlotTile: 4, bStack: 4 };
     for (const k of this.slotBufs()) keep[k] = this[k];
     const oldList = this.bList;
     this.makeSlotBuffers(n); this.scap = n;
@@ -267,6 +267,9 @@ class FlipSim {
     f32[83] = ww.spin === undefined ? 0.5 : ww.spin; f32[404] = Math.cos((ww.edge === undefined ? 70 : ww.edge) * Math.PI / 180); f32[405] = ww.erode === undefined ? 0.25 : ww.erode;
     f32[406] = ww.land === undefined ? 1 : ww.land; f32[407] = ww.trail === undefined ? 1 : ww.trail;
     f32[416] = this.opt.ballistic && !this.wwOnly ? 1 : 0; f32[417] = this.opt.settle ? (this.opt.settleTol || 0.001) : 0;
+    // particle separation: the share of the crowding undone per step, from a rate per second so substeps do not change it
+    f32[418] = this.opt.sep > 0 && !this.wwOnly ? 1 - Math.exp(-this.opt.sep * dt) : 0;
+    f32[419] = this.opt.ghost || 0;   // ghost fluid surface: where between the water and air cell centres the surface is (ghostTheta)
     if (this.opt.mg && !this.wwOnly) { this.mgTop = this.mgPlan(); this.mgDense.forEach((q, k) => u32.set(q, 424 + 4 * k)); f32[420] = this.opt.mgW || 1; }
     this.airOnStep = !!(airo && ad); this.dripOnStep = !!(dr && this.ndrip > 0);
     this.dev.queue.writeBuffer(this.bParams, 0, this.pu);
@@ -366,9 +369,13 @@ class FlipSim {
         }
         sweep(2);
       } },
-      { name: 'project', fn: (ps) => { indirect(ps, 'project', 64); if (nb) indirect(ps, 'saveVel', 64); } },
+      { name: 'project', fn: (ps) => { indirect(ps, 'project', 64); if (nb) indirect(ps, 'saveVel', 64); if (this.opt.extrap !== false) indirect(ps, 'extrap', 64); } },
       { name: 'g2p', fn: (ps) => dispatch(ps, this.opt.p2gWin ? 'g2pWin' : 'g2p', N) },
       ...(this.opt.ballistic ? [{ name: 'ballistic', fn: (ps) => dispatch(ps, 'ballistic', N) }] : []),
+      ...(this.opt.sep > 0 ? [{ name: 'separation', fn: (ps) => {   // particle separation (sepRelax): the potential over the fluid cells, then move the particles
+        indirect(ps, 'sepClear', 64); for (let it = 0; it < (this.opt.sepIters || 8); it++) { indirect(ps, 'sepRed', 0); indirect(ps, 'sepBlack', 16); }
+        dispatch(ps, 'sepMove', N);
+      } }] : []),
       // opt.noFoam (benchmark row C) also leaves out the whitewater stages, so the row shows what whitewater costs
       ...(this.sprayCap > 0 && this.airOnStep && !this.opt.noFoam ? [{ name: 'air', fn: (ps) => {   // air field first, so the whitewater moves with this step's air
         const na = this.airDims.n;

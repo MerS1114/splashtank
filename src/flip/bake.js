@@ -86,7 +86,7 @@ function bakeDiag(dst, n, b, vcap) {
 async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
   const sim = new FlipSim(gpu.dev, { d: desc.d, maxN: desc.maxN, size: desc.size, open: desc.open, ratio: desc.cellRatio });
   await sim.whenReady;   // the shared pipelines, compiled once per device
-  sim.recycle = false; sim.cap = desc.maxN; sim.opt.fastAir = !!desc.fastAir; sim.opt.sort = !!desc.sortP; sim.opt.p2gWin = !!desc.p2gWin; sim.opt.ballistic = desc.ballistic !== false; sim.opt.settle = !!desc.settle; sim.opt.settleTol = desc.settleTol; sim.opt.mg = !!desc.mg;
+  sim.recycle = false; sim.cap = desc.maxN; sim.opt.fastAir = !!desc.fastAir; sim.opt.sort = !!desc.sortP; sim.opt.p2gWin = !!desc.p2gWin; sim.opt.ballistic = desc.ballistic !== false; sim.opt.settle = !!desc.settle; sim.opt.settleTol = desc.settleTol; sim.opt.mg = !!desc.mg; sim.opt.sep = desc.sep || 0;
   if (desc.spr && desc.sprayCap) sim.setSprayCap(desc.sprayCap);
   if (desc.nbLook) sim.setDeepLook(true);
   const runner = new SceneRunner(sim);
@@ -268,7 +268,7 @@ async function runDetailPass(c, desc, gpu, onProgress, isCancelled) {
   let open = 0; [[R0.x0, b.x0, 1], [R0.x1, b.x1, 2], [R0.y0, b.y0, 4], [R0.y1, b.y1, 8], [R0.z0, b.z0, 16], [R0.z1, b.z1, 32]].forEach(([r, w, bit]) => { if (!near(r, w) || (tankOpen & bit)) open |= bit; });
   const sim = new FlipSim(gpu.dev, { d: dF, maxN, size: [R0.x1 - R0.x0, R0.y1 - R0.y0, R0.z1 - R0.z0], open, ratio, org: [R0.x0, R0.y0, R0.z0] });
   await sim.whenReady;
-  sim.recycle = false; sim.cap = maxN; sim.opt.sort = false; sim.opt.ballistic = desc.ballistic !== false; sim.opt.mg = !!desc.mg;
+  sim.recycle = false; sim.cap = maxN; sim.opt.sort = false; sim.opt.ballistic = desc.ballistic !== false; sim.opt.mg = !!desc.mg; sim.opt.sep = desc.sep || 0;
   const R = sim.b, hF = sim.h, Lw = 2 * hc, runner = new SceneRunner(sim), scale = desc.scale || 1;
   const openSide = [(open & 1) && !near(R.x0, b.x0), (open & 2) && !near(R.x1, b.x1), (open & 4) && !near(R.y0, b.y0), (open & 8) && !near(R.y1, b.y1), (open & 16) && !near(R.z0, b.z0), (open & 32) && !near(R.z1, b.z1)];
   const inLayer = (x, y, z) => (openSide[0] && x - R.x0 < Lw) || (openSide[1] && R.x1 - x < Lw) || (openSide[2] && y - R.y0 < Lw) || (openSide[3] && R.y1 - y < Lw) || (openSide[4] && z - R.z0 < Lw) || (openSide[5] && R.z1 - z < Lw);

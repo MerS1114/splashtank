@@ -45,7 +45,7 @@
     else if (S.engine === 'gpu') sim = new GpuSim(S.gpu.dev, Object.assign(o, { maxN: Math.min(PRESET.gpu.capMax, Math.max(S.cap, 20000)), out: rawBuf }));
     else sim = new FluidSim(Object.assign(o, { maxN: 16000 }));
     if (isGpu()) sim.rawOut = true;
-    if (S.engine === 'flip') { sim.opt.fastAir = S.fastAir; sim.opt.sort = S.sortP; sim.opt.p2gWin = S.p2gWin; sim.opt.ballistic = S.ballistic; sim.opt.settle = S.settle; sim.opt.settleTol = S.settleTol; sim.opt.mg = S.mg; sim.setSprayCap(S.sprOn ? S.sprCap : 0); }
+    if (S.engine === 'flip') { sim.opt.fastAir = S.fastAir; sim.opt.sort = S.sortP; sim.opt.p2gWin = S.p2gWin; sim.opt.ballistic = S.ballistic; sim.opt.settle = S.settle; sim.opt.settleTol = S.settleTol; sim.opt.mg = S.mg; sim.opt.sep = S.sep; sim.setSprayCap(S.sprOn ? S.sprCap : 0); }
     lastGen = -1;
     sim.setCap(S.cap); runner = new SceneRunner(sim);
     if (S.engine === 'flip' && (Math.abs(sim.size[0] - S.dom.w) > 1e-6 || Math.abs(sim.size[1] - S.dom.h) > 1e-6 || Math.abs(sim.size[2] - S.dom.d) > 1e-6)) {
@@ -60,7 +60,7 @@
   function wwArea() { return { k: Math.max(1, S.wwArea || 1), up: Math.max(1, S.wwAreaUp || 1) }; }
   function simPar() {
     const k = 1 / (S.scale || 1);
-    return { g: S.g * k, iters: S.iters, visc: S.visc, flip: S.flip, comp: 6, wind: windVec().map((v) => v * k), drag: S.airDrag * k, gust: S.gust * k, foamSens: S.foamSens * k, foamTau: S.foamTau,
+    return { g: S.g * k, iters: S.iters, visc: S.visc, flip: S.flip, comp: S.sep > 0 ? 0 : 6, wind: windVec().map((v) => v * k), drag: S.airDrag * k, gust: S.gust * k, foamSens: S.foamSens * k, foamTau: S.foamTau,
       colMax: S.colMax * k, vmax: S.vmaxW * k, scale: S.scale || 1, vs: S.scale || 1, tear: S.tear * 0.5 * Math.pow(S.cellRatio, 3),
       spr: S.sprOn ? { rate: 12 * S.sprAmt, min: S.sprMin, life: S.sprLife, mist: S.sprMist, drag: S.sprDrag, mdrag: S.mistDrag, ww: { foamLife: S.wwFoamLife, rise: S.wwRise * k, crest: S.wwCrest, impact: S.wwImpact, spin: S.wwSpin, edge: S.wwEdge, erode: S.wwErode, land: S.wwLand, trail: S.wwTrail, area: wwArea() } } : null,
       air: S.sprOn && S.airOn ? { on: true, couple: S.airCouple, decay: S.airDecay } : null,
