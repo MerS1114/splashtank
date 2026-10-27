@@ -413,6 +413,27 @@
     areaBox.geometry.setAttribute('position', new THREE.Float32BufferAttribute(p, 3)); areaBox.computeLineDistances();
     const ds = Math.max(A.x1 - A.x0, A.z1 - A.z0) * 0.015; areaMat.dashSize = ds; areaMat.gapSize = ds * 0.8;
   }
+  // the detail region (dashed, Bake > Detail): a box given as shares of the tank (S.det centre and size), shown while the Bake tab is open
+  const detMat = new THREE.LineDashedMaterial({ color: 0x7fd0ff, transparent: true, opacity: 0.8, dashSize: 0.1, gapSize: 0.06 });
+  const detBox = new THREE.LineSegments(new THREE.BufferGeometry(), detMat); detBox.frustumCulled = false; detBox.visible = false; scene.add(detBox);
+  function detShare() {   // the region as shares of the tank, 0-1 on each axis
+    const d = S.det, c = (v) => Math.max(0, Math.min(1, v));
+    return { x0: c(d.cx - d.sx / 2), x1: c(d.cx + d.sx / 2), y0: c(d.cy - d.sy / 2), y1: c(d.cy + d.sy / 2), z0: c(d.cz - d.sz / 2), z1: c(d.cz + d.sz / 2) };
+  }
+  function detIn(B) {   // the region in a box (the scene's or a cache's)
+    const s = detShare(), L = (a, b, t) => a + (b - a) * t;
+    return { x0: L(B.x0, B.x1, s.x0), x1: L(B.x0, B.x1, s.x1), y0: L(B.y0, B.y1, s.y0), y1: L(B.y0, B.y1, s.y1), z0: L(B.z0, B.z1, s.z0), z1: L(B.z0, B.z1, s.z1) };
+  }
+  function updateDetViz() {
+    const on = S.tab === 'bake' && S.engine === 'flip';
+    detBox.visible = on; if (!on) return;
+    const A = detIn(b), X = [A.x0, A.x1], Y = [A.y0, A.y1], Z = [A.z0, A.z1], p = [];
+    for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) {
+      p.push(X[0], Y[i], Z[j], X[1], Y[i], Z[j]); p.push(X[i], Y[0], Z[j], X[i], Y[1], Z[j]); p.push(X[i], Y[j], Z[0], X[i], Y[j], Z[1]);
+    }
+    detBox.geometry.setAttribute('position', new THREE.Float32BufferAttribute(p, 3)); detBox.computeLineDistances();
+    const ds = Math.max(A.x1 - A.x0, A.z1 - A.z0, 0.01) * 0.03; detMat.dashSize = ds; detMat.gapSize = ds * 0.6;
+  }
   const openMat = new THREE.LineBasicMaterial({ color: 0xe0a030 });
   const openLines = [];
   for (let i = 0; i < 6; i++) { const l = new THREE.LineLoop(new THREE.BufferGeometry(), openMat); l.frustumCulled = false; l.visible = false; scene.add(l); openLines.push(l); }
@@ -531,7 +552,7 @@
     };
     const names = ['x0', 'x1', 'y0', 'y1', 'z0', 'z1'];
     names.forEach((nm, i) => { openLines[i].geometry.setAttribute('position', face(quad[nm])); openLines[i].visible = !!S.open[nm]; });
-    updateAreaViz();
+    updateAreaViz(); updateDetViz();
   }
   updateDomainViz();
 

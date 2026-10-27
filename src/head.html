@@ -565,13 +565,19 @@ kbd { font: 500 10px var(--font-mono); color: #e8e8e8; background: #3c3c3c; bord
                   <button class="btn flat" id="btn-cancel" type="button" hidden>Cancel</button>
                 </div>
               </div>
+              <div class="step" id="step-det">
+                <div class="step-h"><i>2</i><b>Detail</b><span class="st" id="st-det">optional</span></div>
+                <div class="pos" id="det-status">Simulates a region again, finer, guided by the baked water: more detail where it matters (an impact, a splash) without baking the whole tank finer. The dashed box in the view is the region.</div>
+                <div class="params" id="det-params"></div>
+                <div class="btnrow"><button class="btn flat" id="c-det" type="button" data-tip="Simulates the region again at the finer spacing, frame by frame, following the baked water around it and through its sides. Replaces the water inside the region in every frame; Remove detail brings the bake's own water back.">Bake detail</button><button class="btn flat" id="c-det-stop" type="button" hidden>Stop</button><button class="btn flat" id="c-det-clear" type="button" disabled data-tip="Back to the bake's own water inside the region.">Remove detail</button></div>
+              </div>
               <div class="step" id="step-ww">
-                <div class="step-h"><i>2</i><b>Whitewater</b><span class="st" id="st-ww">none</span></div>
+                <div class="step-h"><i>3</i><b>Whitewater</b><span class="st" id="st-ww">none</span></div>
                 <div class="pos" id="ww-status"></div>
                 <div class="btnrow"><button class="btn flat" id="c-ww" type="button" data-tip="Makes the whitewater for the shown bake from its water, with the Whitewater settings as they are now (Houdini style: the water is not simulated again). Change the settings and run it again to try another look. Replaces the bake's whitewater; save the cache to keep it.">Bake whitewater</button><button class="btn flat" id="c-ww-stop" type="button" hidden>Stop</button><button class="btn flat" id="ww-goto" type="button" data-tip="Opens the Whitewater settings (Simulation tab).">Whitewater settings…</button></div>
               </div>
               <div class="step" id="step-save">
-                <div class="step-h"><i>3</i><b>Save</b><span class="st" id="st-save">nothing to save</span></div>
+                <div class="step-h"><i>4</i><b>Save</b><span class="st" id="st-save">nothing to save</span></div>
                 <div class="pos" id="save-info"></div>
                 <div class="btnrow"><button class="btn flat" id="c-save" type="button" data-tip="Keeps the bake, the scene it came from and its settings, so it reopens here exactly.">Save cache (.splc)</button></div>
               </div>

@@ -59,7 +59,9 @@ class FlipSim {
     const sz = opt.size || [3, 2.6, 3];
     this.nx = Math.max(4, Math.round(sz[0] / h)); this.ny = Math.max(4, Math.round(sz[1] / h)); this.nz = Math.max(4, Math.round(sz[2] / h));
     const W = this.nx * h, H = this.ny * h, D = this.nz * h;
-    this.b = { x0: -W / 2, x1: W / 2, y0: 0, y1: H, z0: -D / 2, z1: D / 2 };
+    // opt.org: the box's low corner (the detail pass simulates only a region of the tank); otherwise centred on x and z, standing on y = 0
+    const o0 = opt.org || [-W / 2, 0, -D / 2];
+    this.b = { x0: o0[0], x1: o0[0] + W, y0: o0[1], y1: o0[1] + H, z0: o0[2], z1: o0[2] + D };
     this.size = [W, H, D];
     this.open = opt.open | 0;
     this.dev = device; this.MAXN = opt.maxN; this.cap = opt.maxN; this.N = 0; this.ring = 0; this.recycle = true;

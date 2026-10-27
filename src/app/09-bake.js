@@ -34,6 +34,8 @@
     const set = (step, st, chip, cls, txt) => { const e = $(step); if (e) { e.className = 'step ' + cls; $(st).textContent = txt; } const p = $(chip); if (p) p.className = 'pp ' + cls; };
     $('#pp-save').textContent = sv === 'stale' ? 'Not saved' : 'Saved';
     set('#step-water', '#st-water', '#pp-water', w, wt); set('#step-ww', '#st-ww', '#pp-ww', ww, wwt); set('#step-save', '#st-save', '#pp-save', sv, svt);
+    set('#step-det', '#st-det', null, S.detPass ? 'busy' : has && c.det ? 'done' : 'none', S.detPass ? 'baking ' + Math.round((S.detProg || 0) * 100) + '%' : has && c.det ? c.det.k + '× in a region' : has ? 'optional' : 'bake the water first');
+    if (typeof detInfo === 'function') detInfo();
     const si = $('#save-info');
     if (si) si.textContent = !has ? '' : c.partial ? 'Saving is possible when the bake has finished or is cancelled.' : (c.dirty ? 'Not saved: ' : 'In memory: ') + (cacheBytes(c) / 1048576).toFixed(0) + ' MB. ' + (c.dirty ? 'Closing the page loses it.' : '');
   }
@@ -179,15 +181,58 @@
     c.uid = ++cacheUid; c.dirty = true; S.wwPass = false; wwButtons(); updateCacheInfo(); lcUi(); pipeUi();
   }
   function wwButtons() {
-    const busy = S.baking || S.wwPass;
-    for (const id of ['#c-ww', '#tb-bakeww', '#btn-bake', '#btn-bakew', '#tb-bakew']) { const b = $(id); if (b) b.disabled = busy; }
+    const busy = S.baking || S.wwPass || S.detPass;
+    for (const id of ['#c-ww', '#tb-bakeww', '#btn-bake', '#btn-bakew', '#tb-bakew', '#c-det']) { const b = $(id); if (b) b.disabled = busy; }
     $('#c-ww-stop').hidden = !S.wwPass; $('#c-save').disabled = busy;
+    $('#c-det-stop').hidden = !S.detPass; $('#c-det-clear').disabled = busy || !(S.cache && S.cache.coarse);
   }
   $('#c-ww').addEventListener('click', (e) => { e.currentTarget.blur(); bakeWhitewater(); });
   $('#tb-bakeww').addEventListener('click', (e) => { e.currentTarget.blur(); S.tab = 'bake'; applyMode(); setPtab('bake'); bakeWhitewater(); });
   $('#btn-bakew').addEventListener('click', (e) => { e.currentTarget.blur(); startBake(true); });
   $('#tb-bakew').addEventListener('click', (e) => { e.currentTarget.blur(); S.tab = 'bake'; applyMode(); setPtab('bake'); startBake(true); });
   $('#c-ww-stop').addEventListener('click', () => { wwStop = true; });
+  // detail pass over a region of the shown bake (runDetailPass in flip/bake.js): the region as shares of the tank, its detail and how
+  // closely it follows the bake
+  {
+    const dp = $('#det-params'), pc = (v) => Math.round(v * 100) + '%', d = S.det, D = { cx: 0.5, cy: 0.5, cz: 0.5, sx: 0.4, sy: 1, sz: 0.4, k: 2, pull: 0.15 };
+    const sl = (key, label, tip, o) => addSlider(dp, Object.assign({ id: 's-det-' + key, label, min: 0, max: 1, step: 0.01, value: d[key], def: D[key], fmt: pc, tip, onInput: (v) => { d[key] = v; updateDetViz(); detInfo(); } }, o || {}));
+    sl('cx', 'Centre X', 'Where the region is across the tank (X), as a share of its width.');
+    sl('cz', 'Centre Z', 'Where the region is across the tank (Z), as a share of its depth.');
+    sl('cy', 'Centre height', 'The height of the region\'s centre, as a share of the tank\'s height.');
+    sl('sx', 'Width', 'The region\'s size along X, as a share of the tank.', { min: 0.05 });
+    sl('sz', 'Depth', 'The region\'s size along Z, as a share of the tank.', { min: 0.05 });
+    sl('sy', 'Height', 'The region\'s height, as a share of the tank\'s. Include the water under a splash (the region is simulated with all its water) and the room the splash needs above it: fine water that leaves the region through a side, or its top below the tank\'s, is gone, so a splash reaching the top is cut off flat.', { min: 0.05 });
+    addSlider(dp, { id: 's-det-k', label: 'Detail', min: 2, max: 3, step: 1, value: d.k, def: D.k, fmt: (v) => v + '× finer', tip: 'How much finer the region is simulated: 2× has 8 times the particles of the bake there, 3× 27 times. 3× takes much longer and much more memory.', onInput: (v) => { d.k = v; detInfo(); } });
+    addSlider(dp, { id: 's-det-pull', label: 'Follow the bake', min: 0, max: 1, step: 0.01, value: d.pull, def: D.pull, fmt: pc, tip: 'How strongly the fine water is pulled towards the baked water\'s motion each frame. Low lets finer splashes and swirls form and drift; high keeps it close to the bake. Water always comes in and goes out through the region\'s sides with the bake.', onInput: (v) => { d.pull = v; } });
+    dp.insertAdjacentHTML('beforeend', '<div class="pos" id="det-info"></div>');
+  }
+  function detInfo() {
+    const el = $('#det-info'); if (!el) return;
+    const c = S.cache, d0 = c ? c.d : bakeRes().d, r = detIn(c ? c.b : b), v = (r.x1 - r.x0) * (r.y1 - r.y0) * (r.z1 - r.z0), sc = S.scale || 1, k = S.det.k;
+    el.innerHTML = 'Region ' + ((r.x1 - r.x0) * sc).toFixed(1) + ' × ' + ((r.y1 - r.y0) * sc).toFixed(1) + ' × ' + ((r.z1 - r.z0) * sc).toFixed(1) + ' m, spacing ' + (d0 / k).toFixed(4) + ' (the bake\'s ' + d0.toFixed(3) + '). At most about <b>' + fmtN(Math.round(v / Math.pow(d0 / k, 3))) + '</b> particles if it were full of water.';
+  }
+  let detStop = false;
+  async function bakeDetail() {
+    const c = S.cache, st = $('#det-status');
+    if (!c || c.partial || S.baking || S.wwPass || S.detPass) { flash(c ? 'Wait for the bake to finish.' : 'Bake the water first.'); return; }
+    if (!S.gpu || c.engine !== 'flip') { st.textContent = 'Detail needs a FLIP bake on the GPU.'; return; }
+    const desc = buildDesc(); desc.det = { box: detIn(c.b), k: S.det.k, pull: S.det.pull };
+    setPlaying(false); setCPlay(false); S.detPass = true; detStop = false; wwButtons(); pipeUi();
+    const t0 = performance.now(); let ok = false;
+    try {
+      ok = await runDetailPass(c, desc, S.gpu, (f, F) => { st.textContent = 'Detail: frame ' + f + ' of ' + (F - 1) + '…'; S.detProg = f / (F - 1); }, () => detStop);
+      st.innerHTML = ok ? 'Detail baked for ' + (c.frames.length - 1) + ' frames in ' + fmtTime((performance.now() - t0) / 1000) + ', up to <b>' + fmtN(c.det.maxN) + '</b> fine particles. Save the cache to keep it.' : 'Stopped. The bake keeps its own water.';
+    } catch (err) { st.textContent = 'The detail pass failed: ' + (err && err.message || err); }
+    if (ok) { c.uid = ++cacheUid; c.dirty = true; S.ct = 0; buildTicks(); }
+    S.detPass = false; wwButtons(); updateCacheInfo(); applyMode(); lcUi(); pipeUi();
+  }
+  $('#c-det').addEventListener('click', (e) => { e.currentTarget.blur(); bakeDetail(); });
+  $('#c-det-stop').addEventListener('click', () => { detStop = true; });
+  $('#c-det-clear').addEventListener('click', () => {
+    const c = S.cache; if (!c || !c.coarse || S.detPass) return;
+    c.frames = c.coarse; delete c.coarse; delete c.det; c.maxN = Math.max(...c.frames.map((x) => x.n)); c.uid = ++cacheUid; c.dirty = true;
+    $('#det-status').textContent = 'Detail removed: the bake\'s own water again.'; updateCacheInfo(); applyMode(); pipeUi();
+  });
   $('#c-loop').addEventListener('change', (e) => { S.cloop = e.target.checked; });
   seg('#seg-cspeed', (v) => { S.cspeed = +v; });
   $('#c-clear').addEventListener('click', () => { if (S.cache && S.cache.dirty && !confirm('This bake is not saved. Clear it anyway?')) return; S.cache = null; for (const i of BAKE.slice(5)) slotFree(SLOTS[i]); BAKE.length = 5; updateCacheInfo(); applyMode(); lcUi(); });

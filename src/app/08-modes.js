@@ -41,7 +41,7 @@
     $('#tl-live').hidden = false; $('#tl-cache').hidden = true; $('#kf').hidden = false;   // one timeline for both: it shows the bake when a bake is shown
     $('#ms').closest('.stat').hidden = cache; $('#meter').parentNode.hidden = cache; $('#capshow').textContent = cache ? fmtN(S.cache.maxN || 0) : fmtN(S.cap);
     if (typeof renderKF === 'function') try { renderKF(); kfPlayIcon(); } catch (e) { /* the timeline is made later at start */ }
-    setSeg($('#seg-mode'), S.tab); hud();
+    setSeg($('#seg-mode'), S.tab); hud(); updateDetViz();
     try { syncPtab(); } catch (e) { /* the layout code runs later at start */ }
     resize();
   }
