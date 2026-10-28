@@ -1,11 +1,10 @@
 const {PAGE, OUT} = require('./paths');
-const chromium=require('@sparticuz/chromium').default; const puppeteer=require('puppeteer-core');
+const { launch, pageUrl } = require('./browser');
 const wait=(ms)=>new Promise(r=>setTimeout(r,ms)); const path=require('path'), fs=require('fs');
 const DL=path.resolve(OUT,'dl');
-(async()=>{ const exe=await chromium.executablePath();
- const br=await puppeteer.launch({executablePath:exe,args:[...chromium.args,'--enable-unsafe-webgpu','--enable-features=Vulkan,WebGPU','--use-webgpu-adapter=swiftshader','--use-angle=swiftshader','--ignore-gpu-blocklist','--allow-file-access-from-files'],headless:'shell'});
+(async()=>{ const br=await launch();
  const open=async()=>{ const pg=await br.newPage(); await pg.setViewport({width:1400,height:900}); const errs=[]; pg.on('console',m=>{const t=m.text(); if(/rror|nvalid/.test(t)) errs.push(t.slice(0,200));}); pg.on('pageerror',e=>errs.push(e.message));
-   const cdp=await pg.target().createCDPSession(); await cdp.send('Page.setDownloadBehavior',{behavior:'allow',downloadPath:DL}); await pg.goto('file://'+PAGE); await wait(5000); return {pg,errs}; };
+   const cdp=await pg.target().createCDPSession(); await cdp.send('Page.setDownloadBehavior',{behavior:'allow',downloadPath:DL}); await pg.goto(pageUrl(PAGE)); await wait(5000); return {pg,errs}; };
  let {pg,errs}=await open();
  await pg.select('#scene','Meteor lake'); await wait(1500);
  await pg.evaluate(()=>document.querySelector('#s-res').closest('.row')._st.commit(0.09)); await wait(1500);

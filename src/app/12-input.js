@@ -48,12 +48,24 @@
     if (K === 'd' && e.shiftKey) { e.preventDefault(); dupSelected(); return; }
     if (uiMode === 'edit') {
       if (K === 'e') { e.preventDefault(); extrudeFaces(); return; }
+      if (K === 'i') { e.preventDefault(); insetFaces(false); return; }
       if (k === '1' || k === '2' || k === '3') { e.preventDefault(); setSelMode(['', 'v', 'e', 'f'][+k]); return; }
       if (K === 'x' || k === 'Delete') { flash('Points and faces cannot be deleted because the collider has to stay closed. Move or scale them instead.'); return; }
       return;
     }
     if (K === 'x' || k === 'Delete') { if (k === 'Delete' && S.selKey) return; e.preventDefault(); deleteSelected(); return; }
-    if (K === 'i') { e.preventDefault(); selSet.forEach((o) => addKey(o, S.tl.t)); return; }
+    // I keys Location, Rotation and Scale (a source's Aim, Radius, Speed and Emitting too); over a field in the panel, only that field's
+    // group, as in Blender. Alt+I takes the key off the frame shown the same way.
+    if (K === 'i') {
+      e.preventDefault();
+      const hov = [...document.querySelectorAll(':hover')].pop(), row = hov && hov.closest && hov.closest('#params [data-kg]'), groups = row ? [row.dataset.kg] : null;
+      const list = row && selected ? [selected] : [...selSet];
+      if (!list.length) { flash('Click an object first.'); return; }
+      if (e.altKey) { let n = 0; list.forEach((o) => { if (clearKeyAt(o, S.tl.t, groups)) n++; }); flash(n ? 'Key taken off at ' + S.tl.t.toFixed(2) + ' s' + (groups ? ' (' + GROUP_NAME[groups[0]] + ')' : '') : 'No key on this frame.'); return; }
+      list.forEach((o) => addKey(o, S.tl.t, groups, true)); renderKF(); updateEst(); lcClear(); markKeyed();
+      flash('Keyed ' + (groups ? GROUP_NAME[groups[0]] : list.every((o) => o.kind === 'emitter') ? 'Location, Aim, Radius, Speed, Emitting' : 'Location, Rotation, Scale') + ' at ' + S.tl.t.toFixed(2) + ' s');
+      return;
+    }
     if (K === 'h') { e.preventDefault(); if (e.altKey) objs.forEach((o) => { o.hidden = false; o.group.visible = true; }); else selSet.forEach((o) => { o.hidden = true; o.group.visible = false; }); renderOutliner(); return; }
   });
   window.addEventListener('keyup', (e) => { if (e.key === 'Control') lastM.ctrl = false; if (e.key === 'v' || e.key === 'V') { S.snapV = false; if (tf) evalTf(); } });

@@ -1,8 +1,10 @@
 // WebGPU version of the same position based fluid solver. Mirrors FluidSim, including the boundary density.
 
 // shared by the PBF and FLIP shaders. cols holds 8 vec4 per collider, sdf all distance grids back to back.
-// (off nx ny nz) (origin cell) (Rt row 0) (Rt row 1) (Rt row 2) (position) (velocity) (angular velocity)
+// (off nx ny nz) (origin cell) (Rt row 0 / sx) (Rt row 1 / sy) (Rt row 2 / sz) (position, smallest size) (velocity) (angular velocity)
+// The rows take a world offset to the shape's own unscaled coordinates; sizes other than 1 come from the object's Scale.
 const SDF_WGSL = /* wgsl */ `
+fn colSize(k: u32) -> f32 { let s = cols[k * 8u + 5u].w; return select(1.0, s, s > 0.0); }
 fn sdfEval(k: u32, p: vec3<f32>) -> vec4<f32> {
   let a = cols[k * 8u]; let b = cols[k * 8u + 1u];
   let r0 = cols[k * 8u + 2u].xyz; let r1 = cols[k * 8u + 3u].xyz; let r2 = cols[k * 8u + 4u].xyz;
@@ -29,12 +31,16 @@ fn sdfEval(k: u32, p: vec3<f32>) -> vec4<f32> {
     let l = length(gl); gl = gl / max(l, 1e-9);
   }
   let wn = r0 * gl.x + r1 * gl.y + r2 * gl.z;
-  return vec4<f32>(phi, wn);
+  return vec4<f32>(phi * colSize(k), wn / max(length(wn), 1e-9));
 }
 // world velocity of the collider's surface at p
+// (a growing shape adds, per own axis i, column i of R times the rate of size i times the point's unscaled coordinate i:
+// with row i = column i / size i that is row i (row i . d) size i rate i, and w holds size i rate i)
 fn colSurfVel(k: u32, p: vec3<f32>) -> vec3<f32> {
-  let c = cols[k * 8u + 5u].xyz;
-  return cols[k * 8u + 6u].xyz + cross(cols[k * 8u + 7u].xyz, p - c);
+  let c = cols[k * 8u + 5u].xyz; let d = p - c;
+  let r0 = cols[k * 8u + 2u]; let r1 = cols[k * 8u + 3u]; let r2 = cols[k * 8u + 4u];
+  let grow = r0.xyz * (dot(r0.xyz, d) * r0.w) + r1.xyz * (dot(r1.xyz, d) * r1.w) + r2.xyz * (dot(r2.xyz, d) * r2.w);
+  return cols[k * 8u + 6u].xyz + cross(cols[k * 8u + 7u].xyz, d) + grow;
 }
 `;
 
@@ -55,13 +61,15 @@ function packColliders(sim, cols) {
     sim.sdfSig = sig;
   }
   for (let k = 0; k < nc; k++) {
-    const c = cols[k], sd = c.sdf, R = c.R, j = k * 32;
+    const c = cols[k], sd = c.sdf, R = c.R, j = k * 32, s = c.s || [1, 1, 1], g = c.g || [0, 0, 0];
     cf[j] = offs.get(sd.id); cf[j + 1] = sd.dims[0]; cf[j + 2] = sd.dims[1]; cf[j + 3] = sd.dims[2];
     cf[j + 4] = sd.origin[0]; cf[j + 5] = sd.origin[1]; cf[j + 6] = sd.origin[2]; cf[j + 7] = sd.cell;
-    cf[j + 8] = R[0]; cf[j + 9] = R[3]; cf[j + 10] = R[6]; cf[j + 11] = 0;
-    cf[j + 12] = R[1]; cf[j + 13] = R[4]; cf[j + 14] = R[7]; cf[j + 15] = 0;
-    cf[j + 16] = R[2]; cf[j + 17] = R[5]; cf[j + 18] = R[8]; cf[j + 19] = 0;
-    cf[j + 20] = c.x; cf[j + 21] = c.y; cf[j + 22] = c.z; cf[j + 23] = 0;
+    // the rows take a world offset to the shape's own unscaled coordinates: (R s)^-1 = s^-1 R^T, row i = column i of R over size i;
+    // their w is size i times its rate of change, for the surface speed of a growing or shrinking shape (colSurfVel)
+    cf[j + 8] = R[0] / s[0]; cf[j + 9] = R[3] / s[0]; cf[j + 10] = R[6] / s[0]; cf[j + 11] = g[0];
+    cf[j + 12] = R[1] / s[1]; cf[j + 13] = R[4] / s[1]; cf[j + 14] = R[7] / s[1]; cf[j + 15] = g[1];
+    cf[j + 16] = R[2] / s[2]; cf[j + 17] = R[5] / s[2]; cf[j + 18] = R[8] / s[2]; cf[j + 19] = g[2];
+    cf[j + 20] = c.x; cf[j + 21] = c.y; cf[j + 22] = c.z; cf[j + 23] = Math.min(s[0], s[1], s[2]);   // distances in the grid times this are metres
     cf[j + 24] = c.vx; cf[j + 25] = c.vy; cf[j + 26] = c.vz; cf[j + 27] = 0;
     cf[j + 28] = c.wx; cf[j + 29] = c.wy; cf[j + 30] = c.wz; cf[j + 31] = 0;
   }
@@ -442,14 +450,25 @@ class GpuSim {
     });
   }
   // how many steps are still queued on the GPU, and the median time one step really takes over the last 31 steps
-  // (a median, so one slow step, such as the first after a start, does not spoil the readout for long)
+  // (a median, so one slow step, such as the first after a start, does not spoil the readout for long). Only steps that waited behind
+  // another count: the gap between two finishing then is what a step costs. A step sent to an empty queue measures the browser's delay
+  // in reporting back instead (84 ms against 22 ms of GPU work on Mer's NVIDIA card at 0.015), and the live loop, which sizes its queue
+  // from this, then kept the queue so short that it stayed empty and the GPU idled half the time.
+  // The mean, not the median, of those gaps (leaving out the slowest): the browser may report several steps done at once, which gives
+  // one long gap and a few of none, and only their mean is the rate steps really finish at. idleMs adds up the time nothing was queued.
   track() {
-    const t = performance.now(); this.inflight = (this.inflight || 0) + 1;
+    const t = performance.now(), queued = (this.inflight || 0) > 0; this.inflight = (this.inflight || 0) + 1; this.nSent = (this.nSent || 0) + 1;
+    if (!queued && this.idleFrom) { this.idleMs = (this.idleMs || 0) + t - this.idleFrom; this.idleFrom = 0; }
     const start = Math.max(t, this.lastDone || 0);
     this.dev.queue.onSubmittedWorkDone().then(() => {
       const n = performance.now(); this.inflight--; const ms = n - start; this.lastDone = n;
-      const r = this.stepMs || (this.stepMs = []); r.push(ms); if (r.length > 31) r.shift();
-      const s = r.slice().sort((a, b) => a - b); this.lastMs = s[s.length >> 1]; this.slowMs = Math.max(this.slowMs || 0, ms);
+      if (this.inflight === 0) this.idleFrom = n;
+      this.slowMs = Math.max(this.slowMs || 0, ms);
+      const r = this.stepMs || (this.stepMs = []);
+      if (!queued) { this.latMs = ms; if (r.length) return; }   // with nothing measured back to back yet, the delay is all there is
+      r.push(ms); if (r.length > 31) r.shift();
+      let sum = 0, mx = 0; for (const x of r) { sum += x; mx = Math.max(mx, x); }
+      this.lastMs = r.length > 2 ? (sum - mx) / (r.length - 1) : sum / r.length;
     });
   }
   // live view: up to three readbacks in flight, so stepping never waits for the copy to the CPU. The newest finished copy is shown.
@@ -495,9 +514,14 @@ async function initGpu() {
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) return null;
     const lim = adapter.limits;
-    const dev = await adapter.requestDevice({ requiredLimits: {
-      maxStorageBufferBindingSize: Math.min(lim.maxStorageBufferBindingSize, 1 << 29),
-      maxBufferSize: Math.min(lim.maxBufferSize, 1 << 29)
+    // timestamp queries (when the GPU offers them) time the solver on the GPU itself, without the wait for the browser to report back
+    // subgroups (when offered) let the FLIP list kernels take room for a whole subgroup with one atomic add (wgsl-subgroups.js)
+    const dev = await adapter.requestDevice({ requiredFeatures: ['timestamp-query', 'subgroups'].filter((f) => adapter.features.has(f)), requiredLimits: {
+      // what the GPU offers (desktop cards: 16 storage buffers a kernel and 2 GB buffers against the 8 and 512 MB asked for before), so finer
+      // grids fit and kernels may use a ninth buffer (flipStorage in flip/sim.js decides which kernels can be made)
+      maxStorageBufferBindingSize: lim.maxStorageBufferBindingSize,
+      maxBufferSize: lim.maxBufferSize,
+      maxStorageBuffersPerShaderStage: Math.min(lim.maxStorageBuffersPerShaderStage, 16)
     } });
     const log = (m) => { (window.__errLog = window.__errLog || []).push({ t: new Date().toISOString(), msg: String(m).slice(0, 400) }); };
     dev.addEventListener('uncapturederror', (ev) => log('GPU: ' + (ev.error && ev.error.message)));

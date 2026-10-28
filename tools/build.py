@@ -26,7 +26,7 @@ if tag not in head:
 three = open(three_path, encoding='utf-8').read()
 head = head.replace(tag, '<script>\n' + three + '\n</script>')
 
-FLIP_PARTS = ['wgsl-core', 'wgsl-blocks', 'wgsl-solver', 'wgsl-whitewater', 'wgsl-narrowband', 'sim', 'bake']
+FLIP_PARTS = ['wgsl-core', 'wgsl-blocks', 'wgsl-solver', 'wgsl-whitewater', 'wgsl-narrowband', 'wgsl-multigrid', 'wgsl-subgroups', 'sim', 'bake']
 flip = '\n'.join(src('flip', p + '.js') for p in FLIP_PARTS)
 app_files = sorted(glob.glob(os.path.join(ROOT, 'src', 'app', '*.js')))
 app = '(function () {\n' + ''.join(open(f, encoding='utf-8').read() for f in app_files) + '})();'

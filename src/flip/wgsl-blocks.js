@@ -9,7 +9,7 @@ fn tileNeedClear(@builtin(global_invocation_id) g: vec3<u32>) { let t = gid1(g);
 @compute @workgroup_size(256)
 fn tileMark(@builtin(global_invocation_id) g: vec3<u32>) {
   let i = gid1(g); if (i >= P.n) { return; }
-  let q = pos[i]; if (q.y < DEADY) { return; }
+  let q = pos[i]; if (q.y < DEADY || isBallistic(i)) { return; }   // a drop flying free needs no grid around it
   markAround(particleCell(q.xyz));
 }
 @compute @workgroup_size(256)
@@ -41,7 +41,7 @@ fn initNew(@builtin(global_invocation_id) g: vec3<u32>) {
   let local = t & 511u; let tl = newList[(t >> 9u) * 2u]; let tt = tl / P.tx;
   let p = vec3<i32>(i32((tl % P.tx) * 8u + (local & 7u)), i32((tt % P.ty) * 8u + ((local >> 3u) & 7u)), i32((tt / P.ty) * 8u + (local >> 6u)));
   let c = s * 512u + local;
-  pres[c] = 0.0;
+  pres[c] = 0.0; calm[c] = 0u;
   ctype[c] = u32(colAt(cellCenter(p.x, p.y, p.z)) + 1) << 8u;   // depth bits 0: air
   velG[c * 3u] = 0.0; velG[c * 3u + 1u] = 0.0; velG[c * 3u + 2u] = 0.0;
 }
@@ -61,13 +61,17 @@ fn growFree(@builtin(global_invocation_id) g: vec3<u32>) {
 
 // ---- optional particle sort ----
 // groups particles that are near each other in memory, so neighbouring threads read the same grid cells.
-// The key is the 4x4x4 cell block hashed into 65536 buckets (a counting sort). Results do not depend on particle order.
+// The key is the particle's block of cells in z-order (Morton order: nearby blocks get nearby keys), a counting sort over 32768 keys:
+// 4x4x4 cell blocks while each side of the box is at most 128 cells, larger blocks beyond. It used to hash 4x4x4 blocks into 65536
+// buckets, which put far-apart blocks in one bucket and neighbouring blocks far apart (as in Fernandez-Fernandez et al. 2022, the
+// grouping only has to be nearly right, but it should follow space). Dead particles go last. Results do not depend on particle order.
+fn spread5(v: u32) -> u32 { var x = v & 31u; x = (x | (x << 8u)) & 0x0300F00Fu; x = (x | (x << 4u)) & 0x030C30C3u; x = (x | (x << 2u)) & 0x09249249u; return x; }
+fn sortShift() -> u32 { let m = max(max(P.nx, P.ny), P.nz); var sh = 2u; loop { if (((m - 1u) >> sh) < 32u || sh >= 12u) { break; } sh++; } return sh; }
 fn sortKey(i: u32) -> u32 {
   let q = pos[i];
-  if (q.y < DEADY) { return 0u; }
-  let c = vec3<u32>(particleCell(q.xyz)) >> vec3<u32>(2u);
-  let h = (c.x * 73856093u) ^ (c.y * 19349663u) ^ (c.z * 83492791u);
-  return (h ^ (h >> 13u)) & 65535u;
+  if (q.y < DEADY) { return 65535u; }
+  let c = vec3<u32>(particleCell(q.xyz)) >> vec3<u32>(sortShift());
+  return spread5(c.x) | (spread5(c.y) << 1u) | (spread5(c.z) << 2u);
 }
 @compute @workgroup_size(256)
 fn sortClear(@builtin(global_invocation_id) g: vec3<u32>) { let t = gid1(g); if (t < 65536u) { atomicStore(&sortCnt[t], 0u); } }

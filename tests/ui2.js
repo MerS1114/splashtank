@@ -1,10 +1,9 @@
 const {PAGE, OUT} = require('./paths');
-const chromium=require('@sparticuz/chromium').default; const puppeteer=require('puppeteer-core');
+const { launch, pageUrl } = require('./browser');
 const wait=(ms)=>new Promise(r=>setTimeout(r,ms));
-(async()=>{ const exe=await chromium.executablePath();
- const br=await puppeteer.launch({executablePath:exe,args:[...chromium.args,'--enable-unsafe-webgpu','--enable-features=Vulkan,WebGPU','--use-webgpu-adapter=swiftshader','--use-angle=swiftshader','--ignore-gpu-blocklist','--allow-file-access-from-files'],headless:'shell'});
+(async()=>{ const br=await launch();
  const pg=await br.newPage(); await pg.setViewport({width:1400,height:900}); const errs=[]; pg.on('console',m=>{const t=m.text(); if(/rror|nvalid/.test(t)) errs.push(t.slice(0,200));}); pg.on('pageerror',e=>errs.push(e.message));
- await pg.goto('file://'+PAGE); await wait(5000); console.log('loaded', JSON.stringify(errs.slice(0,3)));
+ await pg.goto(pageUrl(PAGE)); await wait(5000); console.log('loaded', JSON.stringify(errs.slice(0,3)));
  // 1. typed slider value
  await pg.click('#s-grav ~ output'); await wait(200); await pg.keyboard.type('5.37'); await pg.keyboard.press('Enter'); await wait(200);
  console.log('typed gravity', await pg.evaluate(()=>[window.__splash.S.g, document.querySelector('#s-grav ~ output').textContent]));

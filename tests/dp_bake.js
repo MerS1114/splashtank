@@ -1,10 +1,9 @@
 const {PAGE, OUT} = require('./paths');
-const chromium=require('@sparticuz/chromium').default; const puppeteer=require('puppeteer-core');
+const { launch, pageUrl } = require('./browser');
 const wait=(ms)=>new Promise(r=>setTimeout(r,ms));
-(async()=>{ const exe=await chromium.executablePath();
- const br=await puppeteer.launch({executablePath:exe,args:[...chromium.args,'--enable-unsafe-webgpu','--enable-features=Vulkan,WebGPU','--use-webgpu-adapter=swiftshader','--use-angle=swiftshader','--ignore-gpu-blocklist','--allow-file-access-from-files'],headless:'shell'});
+(async()=>{ const br=await launch();
  const pg=await br.newPage(); await pg.setViewport({width:1400,height:900}); const errs=[]; pg.on('console',m=>{const t=m.text(); if(/rror|nvalid|WGSL/i.test(t)) errs.push(t.slice(0,300));}); pg.on('pageerror',e=>errs.push(e.message));
- await pg.goto('file://'+PAGE); await wait(5000);
+ await pg.goto(pageUrl(PAGE)); await wait(5000);
  await pg.select('#scene', 'Dam break'); await wait(2500);
  await pg.evaluate(()=>{ const s=window.__splash.S; s.nbOn=true; s.nbLook=true; window.__splash.resetSim(0); }); await wait(1500);
  await pg.click('#seg-mode button[data-v=bake]'); await wait(300);
@@ -15,8 +14,8 @@ const wait=(ms)=>new Promise(r=>setTimeout(r,ms));
  const info = await pg.evaluate(()=>{ const c=window.__splash.S.cache; const f=c.frames; const dps=f.map(x=>x.dp?x.dp.n:0);
    const parts=writeCacheParts(c); const tot=parts.reduce((a,p)=>a+p.byteLength,0); const buf=new Uint8Array(tot); let o=0; for(const p of parts){ buf.set(new Uint8Array(p.buffer,p.byteOffset,p.byteLength),o); o+=p.byteLength; }
    const back=parseCache(buf.buffer); const dps2=back.frames.map(x=>x.dp?x.dp.n:0); const same = back.frames.every((x,i)=>x.n===f[i].n) && JSON.stringify(dps)===JSON.stringify(dps2);
-   const a=f[f.length-1].dp, b=back.frames[f.length-1].dp; let eq = !a || (a.pos.every((v,i)=>v===b.pos[i]) && a.spd.every((v,i)=>v===b.spd[i]));
-   return { F:f.length, dps: dps.slice(0,6).concat(['…', dps[dps.length-1]]), nbLook:c.desc.nbLook, roundtrip: same && eq }; });
+   const a=f[f.length-1].dp, b=back.frames[f.length-1].dp; const P=a&&(a.p32?'p32':'pos'), Q=a&&(a.sf?'sf':'spd'); let eq = !a || (a[P].every((v,i)=>v===b[P][i]) && a[Q].every((v,i)=>v===b[Q][i]));
+   return { F:f.length, dps: dps.slice(0,6).concat(['…', dps[dps.length-1]]), nbLook:c.desc.nbLook, roundtrip: same && eq, compact: !!f[0].p32 }; });
  console.log('cache', JSON.stringify(info));
  await pg.evaluate(()=>{ window.__splash.S.ct = 20; window.__splash.snapView('front'); }); await wait(1500);
  console.log('draw', await pg.evaluate(()=>window.__splash.drawCount()));

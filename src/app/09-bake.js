@@ -1,20 +1,53 @@
   // ---------- baking ----------
   let worker = null, sharedSrc = '';
+  // the narrow band in a bake keeps the depth in metres it has live: its band is counted in cells, and a bake with more detail has
+  // smaller cells, so the same count was a thinner layer (a meteor's crater then had less water that could bloom and tore sooner)
+  function bakeNb(d) {
+    const nb = nbCfg(); if (!nb || nb.band >= 1e4) return nb;
+    return Object.assign({}, nb, { band: Math.round(nb.band * S.liveD / d * 10) / 10 });
+  }
   function buildDesc() {
     const bk = Object.assign({}, S.bk, bakeRes());
     return {
-      d: bk.d, maxN: bk.maxN, fps: bk.fps, substeps: bk.sub, frames: Math.round(bk.dur * bk.fps), g: S.g / (S.scale || 1), iters: bk.iters, visc: S.visc, flip: S.flip, comp: 6, cellRatio: S.cellRatio, fastAir: S.fastAir, sortP: S.sortP, maxSub: bk.maxSub, detail: S.bkDetail || 1, colMax: simPar().colMax, vmaxW: simPar().vmax, wind: simPar().wind, drag: simPar().drag, gust: simPar().gust, foamSens: simPar().foamSens, foamTau: S.foamTau,
-      scale: S.scale || 1, tear: simPar().tear, spr: simPar().spr, air: simPar().air, drip: simPar().drip, nb: nbCfg(), ocean: oceanCfg(), sprayCap: S.sprOn && S.engine === 'flip' ? S.sprCap : 0, nbLook: !!(S.nbLook && nbActive()), size: [S.dom.w, S.dom.h, S.dom.d], open: openMask(),
+      d: bk.d, maxN: bk.maxN, fps: bk.fps, substeps: bk.sub, frames: Math.round(bk.dur * bk.fps), g: S.g / (S.scale || 1), iters: bk.iters, visc: S.visc, flip: S.flip, apicFlip: S.apicFlip, comp: S.sep > 0 ? 0 : 6, sep: S.sep, apic: S.xfer === 'apic', accurate: S.bkAcc === 'accurate', cellRatio: S.cellRatio, fastAir: S.fastAir, sortP: S.sortP, p2gWin: S.p2gWin, ballistic: S.ballistic, settle: S.settle, settleTol: S.settleTol, mg: S.mg, maxSub: bk.maxSub, detail: S.bkDetail || 1, colMax: simPar().colMax, vmaxW: simPar().vmax, wind: simPar().wind, drag: simPar().drag, gust: simPar().gust, foamSens: simPar().foamSens, foamTau: S.foamTau,
+      scale: S.scale || 1, tear: simPar().tear, spr: simPar().spr, air: simPar().air, drip: simPar().drip, nb: bakeNb(bk.d), ocean: oceanCfg(), sprayCap: S.sprOn && S.engine === 'flip' ? S.sprCap : 0, nbLook: !!(S.nbLook && nbActive()), size: [S.dom.w, S.dom.h, S.dom.d], open: openMask(),
       fills: resolveFills().map((f) => Object.assign({}, f)), events: S.events.map((e) => Object.assign({}, e)),
-      objs: objs.map((o) => Object.assign(snap(o), { rec: o.rec && o.rec.arr.length >= 4 ? { start: o.rec.start, arr: Float32Array.from(o.rec.arr, (v, i) => v - (i % 4 === 0 ? S.org.x : i % 4 === 1 ? S.org.y : i % 4 === 2 ? S.org.z : 0)) } : null, keys: o.keys.length ? o.keys.map((k) => Object.assign({}, k, { x: k.x - S.org.x, y: k.y - S.org.y, z: k.z - S.org.z })) : null, smooth: S.tl.smooth }))
+      objs: objs.map((o) => Object.assign(snap(o), { rec: o.rec && o.rec.arr.length >= 4 ? { start: o.rec.start, arr: Float32Array.from(o.rec.arr, (v, i) => v - (i % 4 === 0 ? S.org.x : i % 4 === 1 ? S.org.y : i % 4 === 2 ? S.org.z : 0)) } : null, keys: o.keys.length ? o.keys.map((k) => k.x === undefined ? Object.assign({}, k) : Object.assign({}, k, { x: k.x - S.org.x, y: k.y - S.org.y, z: k.z - S.org.z })) : null, smooth: S.tl.smooth }))
     };
   }
   function setBakeUI(running) {
     $('#btn-bake').disabled = running; $('#btn-cancel').hidden = !running; $('#bake-progress').hidden = !running;
     $('#seg-mode').querySelectorAll('button').forEach((x) => { x.disabled = running; });
+    wwButtons(); pipeUi();
   }
+  // the three bake steps (water, whitewater, save): their state in the Bake tab and as chips in the top bar
+  function pipeUi() {
+    const c = S.cache, has = !!(c && c.frames.length > 1);
+    let w = 'none', wt = 'not baked';
+    if (S.baking) { w = 'busy'; wt = 'baking'; } else if (has) { w = 'done'; wt = c.cancelled ? 'baked (cancelled early)' : 'baked'; }
+    let ww = 'none', wwt = has ? 'none in this bake' : 'bake the water first';
+    if (S.wwPass) { ww = 'busy'; wwt = 'baking ' + Math.round((S.wwProg || 0) * 100) + '%'; }
+    else if (S.baking && c && c.desc && c.desc.spr) { ww = 'busy'; wwt = 'baking with the water'; }
+    else if (has) { const f = c.frames[c.frames.length >> 1] || {}; const k = f.wws || (c.frames.some((x) => x.sp && x.sp.n) ? 1 : 0); if (k) { ww = 'done'; wwt = k === 2 ? 'baked from the water' : 'made with the water'; } }
+    let sv = 'none', svt = 'nothing to save';
+    if (has && !c.partial) { if (c.dirty) { sv = 'stale'; svt = 'not saved yet'; } else { sv = 'done'; svt = c.fromFile ? 'loaded from a file' : 'saved'; } }
+    const set = (step, st, chip, cls, txt) => { const e = $(step); if (e) { e.className = 'step ' + cls; $(st).textContent = txt; } const p = $(chip); if (p) p.className = 'pp ' + cls; };
+    $('#pp-save').textContent = sv === 'stale' ? 'Not saved' : 'Saved';
+    set('#step-water', '#st-water', '#pp-water', w, wt); set('#step-ww', '#st-ww', '#pp-ww', ww, wwt); set('#step-save', '#st-save', '#pp-save', sv, svt);
+    set('#step-det', '#st-det', null, S.detPass ? 'busy' : has && c.det ? 'done' : 'none', S.detPass ? 'baking ' + Math.round((S.detProg || 0) * 100) + '%' : has && c.det ? c.det.k + '× in a region' : has ? 'optional' : 'bake the water first');
+    if (typeof detInfo === 'function') detInfo();
+    const si = $('#save-info');
+    if (si) si.textContent = !has ? '' : c.partial ? 'Saving is possible when the bake has finished or is cancelled.' : (c.dirty ? 'Not saved: ' : 'In memory: ') + (cacheBytes(c) / 1048576).toFixed(0) + ' MB. ' + (c.dirty ? 'Closing the page loses it.' : '');
+  }
+  $('#pipe').addEventListener('click', () => { S.tab = 'bake'; applyMode(); setPtab('bake'); });
+  $('#ww-goto').addEventListener('click', (e) => { e.currentTarget.blur(); setPtab('sim'); const g = document.querySelector('details.sub[data-k="spray"]'); if (g) { g.open = true; g.scrollIntoView({ block: 'start' }); } });
+  // a bake not saved yet is lost with the page: the browser asks first
+  window.addEventListener('beforeunload', (e) => { if (S.baking || S.wwPass || (S.cache && S.cache.dirty && S.cache.frames.length > 1)) { e.preventDefault(); e.returnValue = ''; } });
   function fmtTime(s) { s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
-  function frameBytes(f) { return f.pos.byteLength + f.spd.byteLength + (f.objs ? f.objs.byteLength : 0) + (f.fm ? f.fm.byteLength : 0) + (f.sp ? f.sp.pos.byteLength + f.sp.pk.byteLength : 0) + (f.dp ? f.dp.pos.byteLength + f.dp.spd.byteLength : 0); }
+  function frameBytes(f) {
+    const by = (o, ks) => (o ? ks.reduce((t, k) => t + (o[k] ? o[k].byteLength : 0), 0) : 0);
+    return by(f, ['pos', 'p32', 'spd', 'sf', 'fm', 'objs']) + by(f.sp, ['pos', 'p32', 'pk']) + by(f.dp, ['pos', 'p32', 'spd', 'sf']);
+  }
   function cacheBytes(c) { let n = 0; for (const f of c.frames) n += frameBytes(f); return n; }
 
   // the bake settings without the heavy parts (distance grids, recorded motion), for the cache file and the report
@@ -25,20 +58,41 @@
     return d;
   }
   function onBakeFrame(fr, info, cache) {
+    if (cache.q === undefined) cache.q = compactBits(cache.b, cache.d);
+    if (cache.q) fr = compactFrame(fr, cache.q);   // a quarter smaller in memory, on the GPU and in the file
+    else if (fr.pos && cache.d) fr = compactFrameBox(fr, cache.b, cache.d) || fr;   // a big tank: the box around this frame's water
+    if (fr.p32) fr.hid = markInterior(fr, cache.b, cache.d);   // water no view can see, skipped when drawing
+    if (fr.sp && fr.sp.n) fr.wws = 1;   // whitewater that came with the water bake (2: made by Bake whitewater)
     cache.frames.push(fr);
     if (S.cache === cache && S.cfollow) S.ct = cache.frames.length - 1;
     if (S.cache === cache && (cache.frames.length < 4 || cache.frames.length % 6 === 0)) updateCacheInfo();
+    if (info.diag) {   // the fastest water and the substeps against their limits, reported when the bake ends
+      const d = info.diag, sc = cache.scale || 1;
+      cache.vpeak = Math.max(cache.vpeak || 0, (d.fastestParticle || 0) * sc, (d.maxSpeed || 0) * sc);
+      if (d.atWaterSpeedLimit > 0) cache.vcapFrames = (cache.vcapFrames || 0) + 1;
+      if (d.sub && d.sub >= ((cache.desc && cache.desc.maxSub) || 16)) cache.subCapFrames = (cache.subCapFrames || 0) + 1;
+    }
+    if (info.f === 0 && info.diag && info.diag.pointCap) cache.pointCap = info.diag.pointCap;   // the bake may raise Max points so the starting water fits
     if (info.diag && cache.diag) cache.diag.push(Object.assign({ f: info.f, t: info.f / cache.fps, n: info.n, elapsed: info.elapsed }, info.diag));
     cache.maxN = Math.max(cache.maxN, fr.n);
     const pct = (info.f / info.F) * 100; S.bakeT = info.f / cache.fps; lcUi();
     $('#bake-prog').style.width = pct + '%';
     const eta = info.f > 0 ? (info.elapsed / info.f) * (info.F - info.f) : 0;
-    $('#bake-status').innerHTML = 'Frame <b>' + info.f + '</b> of ' + info.F + ' · <b>' + fmtN(info.n) + '</b> points · ' + fmtTime(info.elapsed) + ' elapsed, about ' + fmtTime(eta) + ' left' + (info.full ? '<br>Max points reached, emission stopped.' : '');
+    $('#bake-status').innerHTML = 'Frame <b>' + info.f + '</b> of ' + info.F + ' · <b>' + fmtN(info.n) + '</b> points · ' + fmtTime(info.elapsed) + ' elapsed, about ' + fmtTime(eta) + ' left' + (info.full ? '<br>Max points reached, emission stopped.' : '') +
+      (cache.pointCap > ((cache.desc && cache.desc.maxN) || Infinity) ? '<br>Max points raised to ' + fmtN(cache.pointCap) + ' so the starting water fits.' : '');
+  }
+  // the fastest water and the substeps against their limits during a bake: says which limit to raise when one held the water back
+  function bakeLimits(c) {
+    const vmax = (c.desc && c.desc.vmaxW ? c.desc.vmaxW * (c.scale || 1) : S.vmaxW), ms = (c.desc && c.desc.maxSub) || 16;
+    let t = 'Fastest water ' + Math.round(c.vpeak || 0) + ' m/s (limit ' + Math.round(vmax) + ').';
+    if (c.vcapFrames) t += ' <span class="warn">The water reached its speed limit in ' + c.vcapFrames + ' frames: raise Max water speed (Simulation, Physics).</span>';
+    if (c.subCapFrames) t += ' <span class="warn">' + c.subCapFrames + ' frames needed the most substeps the bake allows (' + ms + '): raise its Max substeps.</span>';
+    return t;
   }
   function finishBake(cache, cancelled) {
     S.baking = false; setBakeUI(false); S.bakeT = 0;
     if (worker) { worker.terminate(); worker = null; }
-    cache.partial = false;
+    cache.partial = false; cache.dirty = true;
     if (cache.frames.length < 2) {   // nothing usable: the cache from before comes back
       S.cache = cache.prev || null; delete cache.prev;
       $('#bake-status').textContent = cancelled ? 'Bake cancelled before any frames were finished.' : 'Nothing was baked.';
@@ -50,13 +104,16 @@
     buildTicks(); updateCacheInfo();
     $('#bake-status').innerHTML = cancelled ? 'Cancelled. Kept the <b>' + (cache.frames.length - 1) + '</b> frames baked so far (' + (cache.frames.length / cache.fps).toFixed(1) + ' s); they play and save like a full bake.'
       : 'Baked <b>' + (cache.frames.length - 1) + '</b> frames in ' + fmtTime(cache.seconds) + '.';
-    applyMode(); lcUi();
+    $('#bake-status').innerHTML += ' ' + bakeLimits(cache);
+    applyMode(); lcUi(); pipeUi();
   }
-  function startBake() {
-    if (S.baking) return;
+  // waterOnly: the water without whitewater (faster); Bake whitewater makes it afterwards
+  function startBake(waterOnly) {
+    if (S.baking || S.wwPass) return;
     setPlaying(false);
     const desc = buildDesc();
     if (!desc.frames) return;
+    if (waterOnly === true) { desc.spr = null; desc.sprayCap = 0; desc.air = null; desc.drip = null; }
     if (isGpu() && gridCost(desc.d, S.cellRatio, desc.maxN).biggest > (S.gpu ? S.gpu.maxBuf : 1 << 27)) { $('#bake-status').textContent = 'That bake does not fit in one GPU buffer here. Pick less detail or lower Max points.'; flash('Bake too big for this GPU.'); return; }
     const cache = { b: { x0: -W / 2, x1: W / 2, y0: 0, y1: Hh, z0: -Dd / 2, z1: Dd / 2 }, org: Object.assign({}, S.org), fps: desc.fps, d: desc.d, frames: [], maxN: 0, ids: desc.objs.map((o) => o.id), seconds: 0, startedAt: Date.now(),
       engine: S.engine, scene: sceneData(), desc: lightDesc(desc), diag: [], stableIds: true, scale: S.scale || 1, spdMs: true };
@@ -92,25 +149,102 @@
       runBake(desc, (fr, info) => onBakeFrame(fr, info, cache), () => S.cancelPage).then((ok) => done(!ok));
     }
   }
-  $('#btn-bake').addEventListener('click', startBake);
+  $('#btn-bake').addEventListener('click', () => startBake(false));
   $('#btn-cancel').addEventListener('click', () => { S.cancelPage = true; if (worker) worker.postMessage({ type: 'cancel' }); });
 
   function updateCacheInfo() {
     const c = S.cache, el = $('#cache-info');
     if (!c) { el.textContent = 'No cache yet.'; return; }
     if (!c.frames.length) { el.textContent = 'Baking…'; return; }
-    el.innerHTML = '<b>' + (c.frames.length - 1) + '</b> frames at ' + c.fps + ' fps, up to <b>' + fmtN(c.maxN) + '</b> points, spacing ' + c.d.toFixed(3) + ', <b>' + (cacheBytes(c) / 1048576).toFixed(0) + ' MB</b> in memory.';
+    const g = gpuKept();
+    el.innerHTML = '<b>' + (c.frames.length - 1) + '</b> frames at ' + c.fps + ' fps, up to <b>' + fmtN(c.maxN) + '</b> points, spacing ' + c.d.toFixed(3) + ', <b>' + (cacheBytes(c) / 1048576).toFixed(0) + ' MB</b> in memory, ' + g.n + ' frames on the GPU (' + g.mb.toFixed(0) + ' MB).';
   }
+  setInterval(() => { if (S.cache && viewMode() === 'cache') { updateCacheInfo(); lcUi(); } pipeUi(); }, 1000);
+  addSlider($('#g-cache'), { id: 'c-gpukeep', label: 'GPU memory', min: 256, max: 8192, step: 256, value: S.gpuKeepMB, def: dv('gpuKeepMB'), fmt: (v) => (v >= 1024 ? (v / 1024).toFixed(v % 1024 ? 2 : 0) + ' GB' : v + ' MB'), tip: 'How much GPU memory baked frames may keep. A bake that fits is sent to the GPU once (while it plays the first time, or while it is paused) and then plays smoothly without moving any data. Frames that do not fit are sent again each time they are shown. If the GPU runs out of memory first, fewer frames are kept.', onInput: (v) => { S.gpuKeepMB = v; } });
+  // whitewater pass over the shown bake (runWhitewaterPass in flip/bake.js), with the scene's colliders and whitewater settings as they are now
+  let wwStop = false;
+  async function bakeWhitewater() {
+    const c = S.cache, st = $('#ww-status');
+    if (!c || c.partial || S.baking || S.wwPass) { flash(c ? 'Wait for the bake to finish.' : 'Bake something first.'); return; }
+    if (!S.gpu) { st.textContent = 'This needs WebGPU.'; return; }
+    const desc = buildDesc();
+    if (!desc.spr) { st.textContent = 'Turn Whitewater on first (Simulation tab).'; return; }
+    desc.sprayCap = S.sprCap;
+    setPlaying(false); S.wwPass = true; wwStop = false; wwButtons();
+    const t0 = performance.now();
+    let ok = false;
+    try {
+      ok = await runWhitewaterPass(c, desc, S.gpu, (f, F) => {
+        st.textContent = 'Whitewater: frame ' + f + ' of ' + (F - 1) + '…'; S.wwProg = f / (F - 1); if (f % 4 === 0) lcUi();
+        const i = findSlot(slotKey(c, f)); if (i > 0) SLOTS[i].key = null;   // show the new whitewater as it comes
+      }, () => wwStop);
+      st.textContent = (ok ? 'Whitewater made for ' : 'Stopped: whitewater remade for the first frames of ') + (c.frames.length - 1) + ' frames in ' + fmtTime((performance.now() - t0) / 1000) + (ok ? '. Save the cache to keep it.' : '; the rest keep the old whitewater.');
+    } catch (err) { st.textContent = 'The whitewater pass failed: ' + (err && err.message || err); }
+    c.uid = ++cacheUid; c.dirty = true; S.wwPass = false; wwButtons(); updateCacheInfo(); lcUi(); pipeUi();
+  }
+  function wwButtons() {
+    const busy = S.baking || S.wwPass || S.detPass;
+    for (const id of ['#c-ww', '#tb-bakeww', '#btn-bake', '#btn-bakew', '#tb-bakew', '#c-det']) { const b = $(id); if (b) b.disabled = busy; }
+    $('#c-ww-stop').hidden = !S.wwPass; $('#c-save').disabled = busy;
+    $('#c-det-stop').hidden = !S.detPass; $('#c-det-clear').disabled = busy || !(S.cache && S.cache.coarse);
+  }
+  $('#c-ww').addEventListener('click', (e) => { e.currentTarget.blur(); bakeWhitewater(); });
+  $('#tb-bakeww').addEventListener('click', (e) => { e.currentTarget.blur(); S.tab = 'bake'; applyMode(); setPtab('bake'); bakeWhitewater(); });
+  $('#btn-bakew').addEventListener('click', (e) => { e.currentTarget.blur(); startBake(true); });
+  $('#tb-bakew').addEventListener('click', (e) => { e.currentTarget.blur(); S.tab = 'bake'; applyMode(); setPtab('bake'); startBake(true); });
+  $('#c-ww-stop').addEventListener('click', () => { wwStop = true; });
+  // detail pass over a region of the shown bake (runDetailPass in flip/bake.js): the region as shares of the tank, its detail and how
+  // closely it follows the bake
+  {
+    const dp = $('#det-params'), pc = (v) => Math.round(v * 100) + '%', d = S.det, D = { cx: 0.5, cy: 0.5, cz: 0.5, sx: 0.4, sy: 1, sz: 0.4, k: 2, pull: 0.15 };
+    const sl = (key, label, tip, o) => addSlider(dp, Object.assign({ id: 's-det-' + key, label, min: 0, max: 1, step: 0.01, value: d[key], def: D[key], fmt: pc, tip, onInput: (v) => { d[key] = v; updateDetViz(); detInfo(); } }, o || {}));
+    sl('cx', 'Centre X', 'Where the region is across the tank (X), as a share of its width.');
+    sl('cz', 'Centre Z', 'Where the region is across the tank (Z), as a share of its depth.');
+    sl('cy', 'Centre height', 'The height of the region\'s centre, as a share of the tank\'s height.');
+    sl('sx', 'Width', 'The region\'s size along X, as a share of the tank.', { min: 0.05 });
+    sl('sz', 'Depth', 'The region\'s size along Z, as a share of the tank.', { min: 0.05 });
+    sl('sy', 'Height', 'The region\'s height, as a share of the tank\'s. Include the water under a splash (the region is simulated with all its water) and the room the splash needs above it: fine water that leaves the region through a side, or its top below the tank\'s, is gone, so a splash reaching the top is cut off flat.', { min: 0.05 });
+    addSlider(dp, { id: 's-det-k', label: 'Detail', min: 2, max: 3, step: 1, value: d.k, def: D.k, fmt: (v) => v + '× finer', tip: 'How much finer the region is simulated: 2× has 8 times the particles of the bake there, 3× 27 times. 3× takes much longer and much more memory.', onInput: (v) => { d.k = v; detInfo(); } });
+    addSlider(dp, { id: 's-det-pull', label: 'Follow the bake', min: 0, max: 1, step: 0.01, value: d.pull, def: D.pull, fmt: pc, tip: 'How strongly the fine water is pulled towards the baked water\'s motion each frame. Low lets finer splashes and swirls form and drift; high keeps it close to the bake. Water always comes in and goes out through the region\'s sides with the bake.', onInput: (v) => { d.pull = v; } });
+    dp.insertAdjacentHTML('beforeend', '<div class="pos" id="det-info"></div>');
+  }
+  function detInfo() {
+    const el = $('#det-info'); if (!el) return;
+    const c = S.cache, d0 = c ? c.d : bakeRes().d, r = detIn(c ? c.b : b), v = (r.x1 - r.x0) * (r.y1 - r.y0) * (r.z1 - r.z0), sc = S.scale || 1, k = S.det.k;
+    el.innerHTML = 'Region ' + ((r.x1 - r.x0) * sc).toFixed(1) + ' × ' + ((r.y1 - r.y0) * sc).toFixed(1) + ' × ' + ((r.z1 - r.z0) * sc).toFixed(1) + ' m, spacing ' + (d0 / k).toFixed(4) + ' (the bake\'s ' + d0.toFixed(3) + '). At most about <b>' + fmtN(Math.round(v / Math.pow(d0 / k, 3))) + '</b> particles if it were full of water.';
+  }
+  let detStop = false;
+  async function bakeDetail() {
+    const c = S.cache, st = $('#det-status');
+    if (!c || c.partial || S.baking || S.wwPass || S.detPass) { flash(c ? 'Wait for the bake to finish.' : 'Bake the water first.'); return; }
+    if (!S.gpu || c.engine !== 'flip') { st.textContent = 'Detail needs a FLIP bake on the GPU.'; return; }
+    const desc = buildDesc(); desc.det = { box: detIn(c.b), k: S.det.k, pull: S.det.pull };
+    setPlaying(false); setCPlay(false); S.detPass = true; detStop = false; wwButtons(); pipeUi();
+    const t0 = performance.now(); let ok = false;
+    try {
+      ok = await runDetailPass(c, desc, S.gpu, (f, F) => { st.textContent = 'Detail: frame ' + f + ' of ' + (F - 1) + '…'; S.detProg = f / (F - 1); }, () => detStop);
+      st.innerHTML = ok ? 'Detail baked for ' + (c.frames.length - 1) + ' frames in ' + fmtTime((performance.now() - t0) / 1000) + ', up to <b>' + fmtN(c.det.maxN) + '</b> fine particles. Save the cache to keep it.' : 'Stopped. The bake keeps its own water.';
+    } catch (err) { st.textContent = 'The detail pass failed: ' + (err && err.message || err); }
+    if (ok) { c.uid = ++cacheUid; c.dirty = true; S.ct = 0; buildTicks(); }
+    S.detPass = false; wwButtons(); updateCacheInfo(); applyMode(); lcUi(); pipeUi();
+  }
+  $('#c-det').addEventListener('click', (e) => { e.currentTarget.blur(); bakeDetail(); });
+  $('#c-det-stop').addEventListener('click', () => { detStop = true; });
+  $('#c-det-clear').addEventListener('click', () => {
+    const c = S.cache; if (!c || !c.coarse || S.detPass) return;
+    c.frames = c.coarse; delete c.coarse; delete c.det; c.maxN = Math.max(...c.frames.map((x) => x.n)); c.uid = ++cacheUid; c.dirty = true;
+    $('#det-status').textContent = 'Detail removed: the bake\'s own water again.'; updateCacheInfo(); applyMode(); pipeUi();
+  });
   $('#c-loop').addEventListener('change', (e) => { S.cloop = e.target.checked; });
   seg('#seg-cspeed', (v) => { S.cspeed = +v; });
-  $('#c-clear').addEventListener('click', () => { S.cache = null; updateCacheInfo(); applyMode(); lcUi(); });
+  $('#c-clear').addEventListener('click', () => { if (S.cache && S.cache.dirty && !confirm('This bake is not saved. Clear it anyway?')) return; S.cache = null; for (const i of BAKE.slice(5)) slotFree(SLOTS[i]); BAKE.length = 5; updateCacheInfo(); applyMode(); lcUi(); });
   function download(blob, name) {
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 8000);
   }
   $('#c-save').addEventListener('click', (e) => {
     e.currentTarget.blur(); const c = S.cache; if (!c) { flash('Bake something first.'); return; }
-    download(new Blob(writeCacheParts(c), { type: 'application/octet-stream' }), 'splashtank-bake.splc');
+    download(new Blob(writeCacheParts(c), { type: 'application/octet-stream' }), 'splashtank-bake.splc'); c.dirty = false; pipeUi();
     flash('Saved splashtank-bake.splc (' + Math.round(cacheBytes(c) / 1048576) + ' MB) to your Downloads folder.');
   });
   // measurements from a stored frame, for bakes that did not record them while running
@@ -118,10 +252,10 @@
     const b = c.b || DEFB, qx = (b.x1 - b.x0) / 65535, qy = (b.y1 - b.y0) / 65535, qz = (b.z1 - b.z0) / 65535, H = 16, hist = new Array(H).fill(0);
     let alive = 0, sx = 0, sy = 0, sz = 0, ss = 0, smax = 0, fl = 0, x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
     for (let i = 0; i < fr.n; i++) {
-      if (fr.spd[i] === 255) continue;
+      const P = framePoint(fr, b, i); if (P[3] === 255) continue;
       alive++;
-      const x = fr.pos[i * 3] * qx + b.x0, y = fr.pos[i * 3 + 1] * qy + b.y0, z = fr.pos[i * 3 + 2] * qz + b.z0, sp = fr.spd[i] / 16 / (c.spdMs ? c.scale || 1 : 1);
-      sx += x; sy += y; sz += z; ss += sp; if (sp > smax) smax = sp; if (fr.fm) fl += fr.fm[i] / 255;
+      const x = P[0], y = P[1], z = P[2], sp = P[3] / 16 / (c.spdMs ? c.scale || 1 : 1);
+      sx += x; sy += y; sz += z; ss += sp; if (sp > smax) smax = sp; fl += P[4] / 15;
       if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; if (z < z0) z0 = z; if (z > z1) z1 = z;
       hist[Math.max(0, Math.min(H - 1, Math.floor((y - b.y0) / ((b.y1 - b.y0) / H))))]++;
     }
@@ -138,7 +272,7 @@
     for (let k = 0; k < 10; k++) picks.add(Math.round((k / 9) * (F - 1)));
     const snapshots = [...picks].map((f) => {
       const fr = c.frames[f], step = Math.max(1, Math.ceil(fr.n / 3000)), pts = [];
-      for (let i = 0; i < fr.n; i += step) { if (fr.spd[i] === 255) continue; pts.push([fr.pos[i * 3] * qx + b.x0, fr.pos[i * 3 + 1] * qy + b.y0, fr.pos[i * 3 + 2] * qz + b.z0, fr.spd[i] / 16 * (c.spdMs ? 1 : c.scale || 1), fr.fm ? fr.fm[i] / 255 : 0]); }
+      for (let i = 0; i < fr.n; i += step) { const P = framePoint(fr, b, i); if (P[3] === 255) continue; pts.push([P[0], P[1], P[2], P[3] / 16 * (c.spdMs ? 1 : c.scale || 1), P[4] / 15]); }
       return { f, t: f / c.fps, points: fr.n, every: step, sample: pts };
     });
     const rep = {
@@ -163,37 +297,73 @@
   $('#scrub').addEventListener('input', (e) => { S.ct = +e.target.value; if (S.cache && S.cache.partial) S.cfollow = S.ct >= S.cache.frames.length - 1.5; });
 
   const DEFB = { x0: -1.5, x1: 1.5, y0: 0, y1: 2.6, z0: -1.5, z1: 1.5 };
-  // Baked frames live in slots 1 to 3: the frame at the playhead, the next one (to blend towards) and, while playing, the one after that,
-  // loaded ahead on a display frame that had nothing else to load, so crossing into a new frame never has to load two at once.
-  let useTick = 0;
+  // Baked frames live in the BAKE slots: the frame at the playhead, the next one (to blend towards) and, while playing, up to two after
+  // that, loaded ahead one per display frame that had nothing else to load, so crossing into a new frame never has to load at that moment.
+  // Uploading is what limits dense playback (16 MB a frame took about 100 ms on Mer's UHD 730), so there are as many slots as the GPU memory
+  // budget holds: a bake that fits is uploaded once (while playing, or while paused and idle) and then plays without moving any data.
+  // perf.late counts frames that were needed before they were loaded ahead (what makes playback hitch).
+  let useTick = 0, gpuCap = Infinity;   // gpuCap: slots that fit after the GPU ran out of memory
   function slotKey(c, k) { return c.uid + ':' + k + ':' + (S.showSpray !== false); }
-  function findSlot(key) { for (let i = 1; i < NBSLOT; i++) if (SLOTS[i].key === key) { SLOTS[i].used = ++useTick; return i; } return -1; }
-  function slotFor(c, k, keep) {
+  function findSlot(key) { for (const i of BAKE) if (SLOTS[i].key === key) { SLOTS[i].used = ++useTick; return i; } return -1; }
+  // as many bake slots as the budget holds for this cache's biggest frame (at least five, at most one per frame)
+  function bakeSlots(c) {
+    let per = c.maxN * (c.q || (c.frames[0] && c.frames[0].p32) ? 6 : 8) + 65536; for (const i of BAKE) if (SLOTS[i].key && SLOTS[i].key.startsWith(c.uid + ':')) per = Math.max(per, slotBytes(SLOTS[i]));
+    // while baking the view only follows the newest frame: five slots; finished, the frames are loaded at their exact size
+    const want = c.partial ? 5 : Math.max(5, Math.min(c.frames.length, gpuCap, Math.floor((S.gpuKeepMB || 2048) * 1048576 / per)));
+    while (BAKE.length < want) { SLOTS.push(newSlot()); BAKE.push(SLOTS.length - 1); }
+    while (BAKE.length > want) {   // budget lowered: free the least recently used
+      let v = 0; for (let j = 1; j < BAKE.length; j++) if (SLOTS[BAKE[j]].used < SLOTS[BAKE[v]].used) v = j;
+      slotFree(SLOTS[BAKE[v]]); BAKE.splice(v, 1);
+    }
+  }
+  function gpuKept() { let n = 0, b = 0; for (const i of BAKE) { if (SLOTS[i].key) n++; b += slotBytes(SLOTS[i]); } return { n, mb: b / 1048576 }; }
+  function slotFor(c, k, keep, ahead) {
     const key = slotKey(c, k); let i = findSlot(key); if (i > 0) return i;
-    let v = -1; for (let j = 1; j < NBSLOT; j++) if (!keep.includes(j) && (v < 0 || SLOTS[j].used < SLOTS[v].used)) v = j;
-    slotLoad(SLOTS[v], c.frames[k], c.b || DEFB); SLOTS[v].key = key; SLOTS[v].used = ++useTick; loadedNow = true;
-    return v;
+    if (!ahead && S.cplay) perf.late = (perf.late || 0) + 1;
+    for (;;) {
+      let v = -1; for (const j of BAKE) if (!keep.includes(j) && (v < 0 || SLOTS[j].used < SLOTS[v].used)) v = j;
+      if (slotLoad(SLOTS[v], c.frames[k], c.b || DEFB, !c.partial && BAKE.length >= c.frames.length)) { SLOTS[v].key = key; SLOTS[v].used = ++useTick; loadedNow = true; return v; }
+      // out of GPU memory: drop this slot, keep the budget to what fitted and use one that already has its textures
+      slotFree(SLOTS[v]); BAKE.splice(BAKE.indexOf(v), 1); gpuCap = BAKE.length;
+      if (!S.gpuWarned) { S.gpuWarned = true; flash('The GPU is out of memory: keeping ' + BAKE.length + ' frames on it.'); }
+      if (BAKE.length <= keep.length) return keep[0] || BAKE[0];
+    }
+  }
+  // paused and idle: fill free slots with the frames after the playhead, one per display frame, so playing starts from the GPU
+  function idleFill(c, a, last) {
+    if (S.cplay || loadedNow || benching || performance.now() - lastInput < 1000) return;
+    const free = BAKE.find((j) => !SLOTS[j].key); if (free === undefined) return;
+    for (let j = 1; j <= last; j++) { const nx = (a + j) % (last + 1); if (findSlot(slotKey(c, nx)) < 0) { slotFor(c, nx, [], true); return; } }
   }
   let cacheUid = 0, loadedNow = false;
   function showCache(t) {
     const c = S.cache, fr = c.frames, last = fr.length - 1; lastGen = -1;
     if (!c.uid) c.uid = ++cacheUid;
     if (last < 0) { hideSlots(); return 0; }   // a bake that has not finished its first frame yet
-    t = clamp(t, 0, last); loadedNow = false;
+    t = clamp(t, 0, last); loadedNow = false; bakeSlots(c);
     // blend between frames only when the same slot is the same particle in both (older caches with sorting were not saved that way)
     const a = Math.floor(t), bi = Math.min(a + 1, last), w = c.stableIds && bi !== a ? t - a : 0, A = fr[a], B = fr[bi], og = c.org || { x: 0, y: 0, z: 0 };
-    const sa = slotFor(c, a, []), sb = w > 0 ? slotFor(c, bi, [sa]) : sa;
-    if (!loadedNow && S.cplay && last > 1) {   // nothing loaded this time: load the frame after next now
-      let nx = bi + 1; if (nx > last) nx = S.cloop && !c.partial ? 0 : -1;
-      if (nx >= 0 && findSlot(slotKey(c, nx)) < 0) slotFor(c, nx, [sa, sb]);
+    // when playback falls behind and neither frame is loaded, show the one at the playhead without blending rather than load two at once
+    const behind = S.cplay && w > 0 && findSlot(slotKey(c, a)) < 0 && findSlot(slotKey(c, bi)) < 0;
+    const sa = slotFor(c, a, []), sb = w > 0 && !behind ? slotFor(c, bi, [sa]) : sa;
+    if (!loadedNow && S.cplay && last > 1) {   // nothing loaded this time: load the first of the next two frames that is not loaded yet
+      const keep = [sa, sb];
+      for (let j = 1; j <= 2; j++) {
+        let nx = bi + j; if (nx > last) nx = S.cloop && !c.partial ? nx - last - 1 : -1;
+        if (nx < 0) break;
+        const have = findSlot(slotKey(c, nx));
+        if (have < 0) { slotFor(c, nx, keep, true); break; }
+        keep.push(have);
+      }
     }
+    if (!c.partial) idleFill(c, a, last);
     pmat.uniforms.uD.value = c.d; pmat.uniforms.uCR.value = (c.desc && c.desc.cellRatio) || 2; matW.uniforms.uFdt.value = 1 / c.fps;
-    showSlots(sa, sb, w);
+    showSlots(sa, sb, sb === sa ? 0 : w);
     c.ids.forEach((id, k) => {
       const o = objs.find((q) => q.id === id); if (!o) return;
       const k4 = k * 6, ao = A.objs, bo = B.objs, L = (j) => ao[k4 + j] + (bo[k4 + j] - ao[k4 + j]) * w;
       o.group.position.set(L(0) + og.x, L(1) + og.y, L(2) + og.z);
-      if (o.kind === 'mesh') o.group.rotation.set(L(3), L(4), L(5), 'ZYX');
+      if (o.kind === 'mesh') { o.group.rotation.set(L(3), L(4), L(5), 'ZYX'); sizeAt(o, (a + w) / c.fps); }
     });
     return w < 0.5 ? SLOTS[sa].alive : SLOTS[sb].alive;
   }
@@ -207,7 +377,7 @@
       const c = parseCache(buf);
       if (c.frames.length < 2) throw new Error('The file has no frames.');
       if (c.scene && (c.ids || []).some((id) => !objs.find((o) => o.id === id))) { try { applySceneData(c.scene); } catch (e2) { /* keep the current scene */ } }
-      S.cache = c; S.ct = 0; setCPlay(true); buildTicks(); updateCacheInfo(); S.tab = 'bake'; applyMode(); lcUi();
+      c.fromFile = true; S.cache = c; S.ct = 0; setCPlay(true); buildTicks(); updateCacheInfo(); S.tab = 'bake'; applyMode(); lcUi(); pipeUi();
       st.textContent = 'Loaded ' + file.name + '.';
     } catch (err) { st.classList.add('warn'); st.textContent = 'Could not load the file: ' + err.message; }
     e.target.value = '';

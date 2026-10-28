@@ -12,6 +12,20 @@ function eulerMat(rx, ry, rz) {   // R = Rz * Ry * Rx, row major
     sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx,
     -sy, cy * sx, cy * cx];
 }
+// A collider or water volume record c: position (x, y, z), rotation R, size s = [sx, sy, sz] along its own axes (absent = 1), so a point of
+// the shape is at pos + R (s * local). Distance and outward normal in world space at (x, y, z), written to out = [phi, nx, ny, nz]. With an
+// uneven size the distance is the shape's distance times the smallest size, a little short of exact, which is the safe side for collisions.
+function sdfWorld(c, x, y, z, out) {
+  const R = c.R, s = c.s, dx = x - c.x, dy = y - c.y, dz = z - c.z;
+  let lx = R[0] * dx + R[3] * dy + R[6] * dz, ly = R[1] * dx + R[4] * dy + R[7] * dz, lz = R[2] * dx + R[5] * dy + R[8] * dz;
+  if (!s) { sdfSample(c.sdf, lx, ly, lz, out); const gx = out[1], gy = out[2], gz = out[3]; out[1] = R[0] * gx + R[1] * gy + R[2] * gz; out[2] = R[3] * gx + R[4] * gy + R[5] * gz; out[3] = R[6] * gx + R[7] * gy + R[8] * gz; return; }
+  sdfSample(c.sdf, lx / s[0], ly / s[1], lz / s[2], out);
+  const gx = out[1] / s[0], gy = out[2] / s[1], gz = out[3] / s[2];
+  const wx = R[0] * gx + R[1] * gy + R[2] * gz, wy = R[3] * gx + R[4] * gy + R[5] * gz, wz = R[6] * gx + R[7] * gy + R[8] * gz, l = Math.hypot(wx, wy, wz) || 1;
+  out[0] *= Math.min(s[0], s[1], s[2]); out[1] = wx / l; out[2] = wy / l; out[3] = wz / l;
+}
+const unitSize = (o) => (o.sx || 1) === 1 && (o.sy || 1) === 1 && (o.sz || 1) === 1;
+const sizeOf = (o) => (unitSize(o) ? null : [o.sx || 1, o.sy || 1, o.sz || 1]);
 function meshCube(hx, hy, hz) {
   const v = [];
   for (const z of [-1, 1]) for (const y of [-1, 1]) for (const x of [-1, 1]) v.push([x * hx, y * hy, z * hz]);
@@ -207,12 +221,11 @@ function sdfSample(sd, x, y, z, out) {
 const SDFTMP = [0, 0, 0, 0];
 // fill a water volume: every lattice point inside the mesh (through its signed distance field and pose) gets a particle
 function fillVolume(sim, f) {
-  const d = sim.d, R = f.R, j = 0.01 * d / 0.12;
+  const d = sim.d, j = 0.01 * d / 0.12;
   for (let y = f.lo[1] + d / 2; y < f.hi[1]; y += d)
     for (let x = f.lo[0] + d / 2; x < f.hi[0]; x += d)
       for (let z = f.lo[2] + d / 2; z < f.hi[2]; z += d) {
-        const dx = x - f.x, dy = y - f.y, dz = z - f.z;
-        sdfSample(f.sdf, R[0] * dx + R[3] * dy + R[6] * dz, R[1] * dx + R[4] * dy + R[7] * dz, R[2] * dx + R[5] * dy + R[8] * dz, SDFTMP);
+        sdfWorld(f, x, y, z, SDFTMP);
         if (SDFTMP[0] < 0 && !sim.add(x + (Math.random() - 0.5) * j, y + (Math.random() - 0.5) * j, z + (Math.random() - 0.5) * j, 0, 0, 0)) return;
       }
 }
@@ -306,12 +319,8 @@ class FluidSim {
       let x = Q[i3], y = Q[i3 + 1], z = Q[i3 + 2];
       if (y < FDEAD) continue;
       for (let k = 0; k < nc; k++) {
-        const c = cols[k], R = c.R, dx = x - c.x, dy = y - c.y, dz = z - c.z;
-        sdfSample(c.sdf, R[0] * dx + R[3] * dy + R[6] * dz, R[1] * dx + R[4] * dy + R[7] * dz, R[2] * dx + R[5] * dy + R[8] * dz, SDFTMP);
-        if (SDFTMP[0] < m) {
-          const sc = m - SDFTMP[0], gx = SDFTMP[1], gy = SDFTMP[2], gz = SDFTMP[3];
-          x += (R[0] * gx + R[1] * gy + R[2] * gz) * sc; y += (R[3] * gx + R[4] * gy + R[5] * gz) * sc; z += (R[6] * gx + R[7] * gy + R[8] * gz) * sc;
-        }
+        sdfWorld(cols[k], x, y, z, SDFTMP);
+        if (SDFTMP[0] < m) { const sc = m - SDFTMP[0]; x += SDFTMP[1] * sc; y += SDFTMP[2] * sc; z += SDFTMP[3] * sc; }
       }
       Q[i3] = x < x0 ? x0 : x > x1 ? x1 : x;
       Q[i3 + 1] = y < y0 ? y0 : y > y1 ? y1 : y;
@@ -331,15 +340,13 @@ class FluidSim {
     p = b.z1 - z; if (!(op & 32) && p < h) { if (p < 0) p = 0; t = h2 - p * p; t *= t; rho += c0 * (Gh - this.G(p)); gz += c0 * t * t; }
     const nc = cols.length;
     for (let k = 0; k < nc; k++) {
-      const c = cols[k], R = c.R, dx = x - c.x, dy = y - c.y, dz = z - c.z;
-      sdfSample(c.sdf, R[0] * dx + R[3] * dy + R[6] * dz, R[1] * dx + R[4] * dy + R[7] * dz, R[2] * dx + R[5] * dy + R[8] * dz, SDFTMP);
+      sdfWorld(cols[k], x, y, z, SDFTMP);
       let phi = SDFTMP[0];
       if (phi >= h) continue;
       if (phi < 0) phi = 0;
       t = h2 - phi * phi; t *= t; dd = -c0 * t * t;
       rho += c0 * (Gh - this.G(phi));
-      const lx = SDFTMP[1], ly = SDFTMP[2], lz = SDFTMP[3];
-      gx += dd * (R[0] * lx + R[1] * ly + R[2] * lz); gy += dd * (R[3] * lx + R[4] * ly + R[5] * lz); gz += dd * (R[6] * lx + R[7] * ly + R[8] * lz);
+      gx += dd * SDFTMP[1]; gy += dd * SDFTMP[2]; gz += dd * SDFTMP[3];
     }
     this.br = rho; this.bgx = gx; this.bgy = gy; this.bgz = gz;
   }
@@ -517,7 +524,8 @@ function objSpeed(a, b, dt, lim) {
     if (!p || p.id !== o.id) continue;
     const lin = Math.hypot(o.x - p.x, o.y - p.y, o.z - p.z), rot = Math.abs((o.rx || 0) - (p.rx || 0)) + Math.abs((o.yaw || 0) - (p.yaw || 0)) + Math.abs((o.rz || 0) - (p.rz || 0));
     const R = o.sdf ? 0.5 * o.sdf.cell * Math.hypot(o.sdf.dims[0], o.sdf.dims[1], o.sdf.dims[2]) : 0.5;
-    const ov = (lin + rot * R) / dt;
+    const sz = Math.max(o.sx || 1, o.sy || 1, o.sz || 1), grow = Math.abs((o.sx || 1) - (p.sx || 1)) + Math.abs((o.sy || 1) - (p.sy || 1)) + Math.abs((o.sz || 1) - (p.sz || 1));
+    const ov = (lin + rot * R * sz + grow * R) / dt;
     if (!lim || ov <= lim) v = Math.max(v, ov);
   }
   return v;
@@ -530,8 +538,9 @@ class SceneRunner {
     const lim2 = Math.pow(par.colMax || 20, 2);   // faster than this, an object's move counts as a jump and gives the water no speed
     const colOf = (o) => {   // collider record with velocity and angular velocity, for the pressure solves
       const R = eulerMat(o.rx || 0, o.yaw || 0, o.rz || 0), p = prev[o.id];
-      prev[o.id] = { x: o.x, y: o.y, z: o.z, R };
-      const c = { sdf: o.sdf, x: o.x, y: o.y, z: o.z, R, vx: 0, vy: 0, vz: 0, wx: 0, wy: 0, wz: 0 };
+      const sz = [o.sx || 1, o.sy || 1, o.sz || 1];
+      prev[o.id] = { x: o.x, y: o.y, z: o.z, R, sz };
+      const c = { sdf: o.sdf, x: o.x, y: o.y, z: o.z, R, s: sizeOf(o), vx: 0, vy: 0, vz: 0, wx: 0, wy: 0, wz: 0 };
       if (p) {
         const vx = (o.x - p.x) / dt, vy = (o.y - p.y) / dt, vz = (o.z - p.z) / dt;
         if (vx * vx + vy * vy + vz * vz < lim2) { c.vx = vx; c.vy = vy; c.vz = vz; }
@@ -539,6 +548,10 @@ class SceneRunner {
         for (let r = 0; r < 3; r++) for (let q = 0; q < 3; q++) d[r * 3 + q] = R[r * 3] * P[q * 3] + R[r * 3 + 1] * P[q * 3 + 1] + R[r * 3 + 2] * P[q * 3 + 2];
         const wx = (d[7] - d[5]) / (2 * dt), wy = (d[2] - d[6]) / (2 * dt), wz = (d[3] - d[1]) / (2 * dt);
         if (wx * wx + wy * wy + wz * wz < lim2) { c.wx = wx; c.wy = wy; c.wz = wz; }
+        // growing or shrinking: per axis size times its rate of change (packColliders turns it into the surface's outward speed)
+        const ps = p.sz || [1, 1, 1], ext = o.sdf ? 0.5 * o.sdf.cell * Math.max(o.sdf.dims[0], o.sdf.dims[1], o.sdf.dims[2]) : 0.5;
+        const g = sz.map((v, i) => v * (v - ps[i]) / dt);
+        if (g.some((v, i) => v) && Math.max(...g.map((v, i) => Math.abs(v / sz[i]) * ext)) ** 2 < lim2) c.g = g;
       }
       return c;
     };
@@ -604,28 +617,43 @@ class SceneRunner {
   }
 }
 
-// Pose of an object at time t (seconds) from its keyframes. keys are sorted by t.
+// Keyframes work like Blender's: each key holds some groups of channels (Location x y z; for a shape Rotation rx yaw rz and Scale sx sy
+// sz; for a source Aim az el, Radius, Speed and Emitting), and each group is animated only by the keys that hold it, so a Location key
+// does not pin the rotation. Old keys hold Location and Rotation (and a source's Emitting and Speed).
+const KEY_GROUPS = { loc: ['x', 'y', 'z'], rot: ['rx', 'yaw', 'rz'], scale: ['sx', 'sy', 'sz'], aim: ['az', 'el'], radius: ['radius'], speed: ['speed'], on: ['on'] };
+const keyHas = (k, g) => k[KEY_GROUPS[g][0]] !== undefined;
+// Pose of an object at time t (seconds) from its keyframes (sorted by t): the channels of every group some key holds, others left out.
 function keyPose(keys, t, smooth) {
-  const n = keys.length;
-  if (t <= keys[0].t) return keys[0];
-  if (t >= keys[n - 1].t) return keys[n - 1];
-  let i = 0; while (i < n - 2 && t >= keys[i + 1].t) i++;
-  const a = keys[i], b = keys[i + 1], u = (t - a.t) / Math.max(b.t - a.t, 1e-6);
-  const p0 = keys[i - 1] || a, p3 = keys[i + 2] || b, u2 = u * u, u3 = u2 * u;
-  const f = (k) => {
-    const A = a[k] || 0, B = b[k] || 0, P0 = p0[k] || 0, P3 = p3[k] || 0;
-    if (!smooth) return A + (B - A) * u;
-    return 0.5 * ((2 * A) + (-P0 + B) * u + (2 * P0 - 5 * A + 4 * B - P3) * u2 + (-P0 + 3 * A - 3 * B + P3) * u3);
-  };
-  return { t, x: f('x'), y: f('y'), z: f('z'), rx: f('rx'), yaw: f('yaw'), rz: f('rz'), on: a.on, speed: a.speed === undefined ? undefined : a.speed + (b.speed - a.speed) * u };
+  const out = { t };
+  for (const g in KEY_GROUPS) {
+    const ks = keys.filter((k) => keyHas(k, g)), n = ks.length; if (!n) continue;
+    const ch = KEY_GROUPS[g];
+    if (g === 'on') { let v = ks[0].on; for (const k of ks) if (k.t <= t) v = k.on; out.on = v; continue; }   // on and off switch at the key
+    if (t <= ks[0].t || n === 1) { for (const c of ch) out[c] = ks[0][c]; continue; }
+    if (t >= ks[n - 1].t) { for (const c of ch) out[c] = ks[n - 1][c]; continue; }
+    let i = 0; while (i < n - 2 && t >= ks[i + 1].t) i++;
+    const a = ks[i], b = ks[i + 1], u = (t - a.t) / Math.max(b.t - a.t, 1e-6);
+    const p0 = ks[i - 1] || a, p3 = ks[i + 2] || b, u2 = u * u, u3 = u2 * u;
+    for (const c of ch) {
+      const A = a[c], B = b[c], P0 = p0[c], P3 = p3[c];
+      out[c] = !smooth || g === 'speed' ? A + (B - A) * u : 0.5 * ((2 * A) + (-P0 + B) * u + (2 * P0 - 5 * A + 4 * B - P3) * u2 + (-P0 + 3 * A - 3 * B + P3) * u3);
+    }
+    if (g === 'scale') for (const c of ch) out[c] = Math.max(out[c], 0.02);
+  }
+  return out;
+}
+// copy the animated channels of a pose onto an object state (only the channels some key holds)
+function applyPose(s, k) {
+  for (const c of ['x', 'y', 'z', 'rx', 'yaw', 'rz', 'sx', 'sy', 'sz', 'az', 'el', 'speed', 'radius', 'on']) if (k[c] !== undefined) s[c] = k[c];
 }
 
 function sampleObjState(o, t) {
   const s = Object.assign({}, o);
   if (o.keys && o.keys.length) {
     const k = keyPose(o.keys, t, o.smooth !== false);
-    s.x = k.x; s.y = k.y; s.z = k.z; s.yaw = k.yaw || 0; s.rx = k.rx || 0; s.rz = k.rz || 0;
-    if (o.kind === 'emitter') { if (k.on !== undefined) s.on = k.on; if (k.speed !== undefined) s.speed = k.speed; }
+    if (o.kind !== 'emitter') { delete k.on; delete k.speed; delete k.radius; delete k.az; delete k.el; } else { delete k.sx; delete k.sy; delete k.sz; }
+    if (k.radius !== undefined) k.radius = Math.min(Math.max(k.radius, 0.03), 0.5);
+    applyPose(s, k);
   } else if (o.rec && o.rec.arr.length >= 4) {
     const a = o.rec.arr, n = a.length / 4;
     let k = t * 60 - o.rec.start; if (k < 0) k = 0; if (k > n - 1) k = n - 1;
@@ -634,6 +662,84 @@ function sampleObjState(o, t) {
     s.z = a[i0 * 4 + 2] + (a[i1 * 4 + 2] - a[i0 * 4 + 2]) * w; s.yaw = a[i0 * 4 + 3] + (a[i1 * 4 + 3] - a[i0 * 4 + 3]) * w;
   } else { s.yaw = (o.yaw || 0) + (o.spin || 0) * t; }
   return s;
+}
+
+// Compact frames (bakes and their cache files; cache.q set): a position in one 32-bit word, q = [bits x, y, z] across the box (the
+// shortest side gets 10 bits, the others 11), and a water point's speed byte and white-water level (0-15) in one 16-bit word (sf:
+// speed | level << 8; 255 = gone). 6 bytes a water point instead of 8, 8 a whitewater point instead of 10, 6 a deep water point instead of 7.
+// Only used when those steps are at most a quarter of the particle spacing (compactBits null otherwise: 16 bits an axis as before).
+function compactBits(b, d) {
+  const e = [b.x1 - b.x0, b.y1 - b.y0, b.z1 - b.z0], s = e.indexOf(Math.min(e[0], e[1], e[2])), q = [11, 11, 11]; q[s] = 10;
+  for (let k = 0; k < 3; k++) if (e[k] / ((1 << q[k]) - 1) > d / 4) return null;
+  return q;
+}
+function packPos32(pos, n, q) {
+  const out = new Uint32Array(n), kx = ((1 << q[0]) - 1) / 65535, ky = ((1 << q[1]) - 1) / 65535, kz = ((1 << q[2]) - 1) / 65535, sy = q[0], sz = q[0] + q[1];
+  for (let i = 0, j = 0; i < n; i++, j += 3) out[i] = (Math.round(pos[j] * kx) | (Math.round(pos[j + 1] * ky) << sy) | (Math.round(pos[j + 2] * kz) << sz)) >>> 0;
+  return out;
+}
+function compactFrame(fr, q) {
+  const n = fr.n, sf = new Uint16Array(n), s = fr.spd, f = fr.fm;
+  if (f) for (let i = 0; i < n; i++) sf[i] = s[i] | (Math.round(f[i] / 17) << 8); else sf.set(s);
+  const out = { n, q, p32: packPos32(fr.pos, n, q), sf, objs: fr.objs };
+  if (fr.b) out.b = fr.b; if (fr.sb) out.sb = fr.sb; if (fr.wws) out.wws = fr.wws;
+  if (fr.sp) out.sp = { n: fr.sp.n, p32: packPos32(fr.sp.pos, fr.sp.n, q), pk: fr.sp.pk, alive: fr.sp.alive };
+  if (fr.dp) { const ds = new Uint16Array(fr.dp.n); ds.set(fr.dp.spd); out.dp = { n: fr.dp.n, p32: packPos32(fr.dp.pos, fr.dp.n, q), sf: ds }; }
+  return out;
+}
+// A tank too big for the compact layout can still use it frame by frame: the box around the water (and deep water) in this frame,
+// with its own bits. Positions are re-measured across that box (fr.fb, fr.b, fr.q). Null when even that box is too big.
+function compactFrameBox(fr, b, d) {
+  const lo = [65535, 65535, 65535], hi = [0, 0, 0];
+  const scan = (pos, spd, n) => { for (let i = 0; i < n; i++) { if (spd[i] === 255) continue; for (let k = 0; k < 3; k++) { const v = pos[i * 3 + k]; if (v < lo[k]) lo[k] = v; if (v > hi[k]) hi[k] = v; } } };
+  scan(fr.pos, fr.spd, fr.n); if (fr.dp) scan(fr.dp.pos, fr.dp.spd, fr.dp.n);
+  const E = [b.x1 - b.x0, b.y1 - b.y0, b.z1 - b.z0], B0 = [b.x0, b.y0, b.z0];
+  for (let k = 0; k < 3; k++) if (hi[k] < lo[k]) { lo[k] = 0; hi[k] = 1; } else { lo[k] = Math.max(0, lo[k] - 1); hi[k] = Math.min(65535, Math.max(hi[k] + 1, lo[k] + 1)); }
+  const fb = { x0: B0[0] + lo[0] / 65535 * E[0], x1: B0[0] + hi[0] / 65535 * E[0], y0: B0[1] + lo[1] / 65535 * E[1], y1: B0[1] + hi[1] / 65535 * E[1], z0: B0[2] + lo[2] / 65535 * E[2], z1: B0[2] + hi[2] / 65535 * E[2] };
+  const q = compactBits(fb, d); if (!q) return null;
+  const re = (pos, n) => { const o = new Uint16Array(n * 3); for (let i = 0; i < n * 3; i++) { const k = i % 3; o[i] = Math.max(0, Math.min(65535, Math.round((pos[i] - lo[k]) * 65535 / (hi[k] - lo[k])))); } return o; };
+  const g = Object.assign({}, fr, { pos: re(fr.pos, fr.n) }); if (fr.dp) g.dp = Object.assign({}, fr.dp, { pos: re(fr.dp.pos, fr.dp.n) });
+  const out = compactFrame(Object.assign(g, { sp: null }), q);
+  out.b = fb; out.fb = true; if (fr.sp) { out.sp = { n: fr.sp.n, p32: packPos32(fr.sp.pos, fr.sp.n, q), pk: fr.sp.pk, alive: fr.sp.alive }; }
+  if (out.dp) Object.assign(out.dp, { fb: true, b: fb, q });
+  return out;
+}
+// Marks the water points of a compact frame that no view can see (sf bit 12), so playback can skip drawing them: points whose
+// grid cell lies at least three cells inside the water (two left specks where gaps between surface points showed deeper points) (cells of 1.25 x the spacing, filled = has a point; cells outside the tank or the
+// frame's box count as empty, so the sides stay drawn). Returns how many were marked.
+function markInterior(fr, b, d) {
+  if (!fr.p32 || !fr.n) return 0;
+  const bb = fr.fb ? fr.b : b, q = fr.q, mx = (1 << q[0]) - 1, my = (1 << q[1]) - 1, mz = (1 << q[2]) - 1, h = d * 1.25;
+  const nx = Math.max(1, Math.ceil((bb.x1 - bb.x0) / h)), ny = Math.max(1, Math.ceil((bb.y1 - bb.y0) / h)), nz = Math.max(1, Math.ceil((bb.z1 - bb.z0) / h));
+  if (nx * ny * nz > 64e6) return 0;
+  const kx = (bb.x1 - bb.x0) / h / mx, ky = (bb.y1 - bb.y0) / h / my, kz = (bb.z1 - bb.z0) / h / mz, sy = q[0], sz = q[0] + q[1];
+  const cellOf = new Int32Array(fr.n), g = new Uint8Array(nx * ny * nz);
+  for (let i = 0; i < fr.n; i++) {
+    if ((fr.sf[i] & 255) === 255) { cellOf[i] = -1; continue; }
+    const v = fr.p32[i], x = Math.min(nx - 1, ((v & mx) * kx) | 0), y = Math.min(ny - 1, (((v >>> sy) & my) * ky) | 0), z = Math.min(nz - 1, (((v >>> sz) & mz) * kz) | 0);
+    const c = x + nx * (y + ny * z); cellOf[i] = c; g[c] = 1;
+  }
+  // three erosions: 1 = filled, 2 = filled with all six neighbours filled, 3 and 4 = the same again
+  const sx = 1, syy = nx, szz = nx * ny;
+  for (let pass = 1; pass <= 3; pass++) {
+    for (let z = 1; z < nz - 1; z++) for (let y = 1; y < ny - 1; y++) {
+      let c = 1 + nx * (y + ny * z);
+      for (let x = 1; x < nx - 1; x++, c++) if (g[c] === pass && g[c - sx] >= pass && g[c + sx] >= pass && g[c - syy] >= pass && g[c + syy] >= pass && g[c - szz] >= pass && g[c + szz] >= pass) g[c] = pass + 1;
+    }
+  }
+  let m = 0;
+  for (let i = 0; i < fr.n; i++) { const c = cellOf[i]; if (c >= 0 && g[c] === 4) { fr.sf[i] |= 4096; m++; } else fr.sf[i] &= ~4096; }
+  return m;
+}
+// point i of a frame (or of its deep water, passing the frame's q) in either layout: [x, y, z] in the box, the speed byte (255 = gone) and the white-water level 0-15
+function framePoint(fr, b, i, q0) {
+  if (fr.fb) b = fr.b;   // a compact frame measured across its own box
+  if (fr.p32) {
+    const q = fr.q || q0, v = fr.p32[i], mx = (1 << q[0]) - 1, my = (1 << q[1]) - 1, mz = (1 << q[2]) - 1, w = fr.sf[i];
+    return [(v & mx) / mx * (b.x1 - b.x0) + b.x0, ((v >>> q[0]) & my) / my * (b.y1 - b.y0) + b.y0, ((v >>> (q[0] + q[1])) & mz) / mz * (b.z1 - b.z0) + b.z0, w & 255, (w >> 8) & 15];
+  }
+  const j = i * 3;
+  return [fr.pos[j] / 65535 * (b.x1 - b.x0) + b.x0, fr.pos[j + 1] / 65535 * (b.y1 - b.y0) + b.y0, fr.pos[j + 2] / 65535 * (b.z1 - b.z0) + b.z0, fr.spd[i], fr.fm ? Math.round(fr.fm[i] / 17) : 0];
 }
 
 function packFrame(sim, states, vs) {
@@ -688,13 +794,24 @@ async function runBake(desc, onFrame, isCancelled) {
 // Cache file, version 2: 'SPLC', 2, length of a JSON block (spacing, fps, object ids, box, scene, bake settings and measurements),
 // the JSON, padding to 4 bytes, frame count, then per frame: points, flags (1 = white water levels follow, 2 = spray follows, 4 = deep water points follow), object poses (6 floats each),
 // positions (3 x uint16 across the box), speed (uint8, 16ths of m/s; 16ths of a scene unit per second when the JSON has no spdMs), white water (uint8), padding to 4 bytes.
+// Flag 16: the frame's whitewater was made by Bake whitewater (afterwards, from the water). Flag 8 = a compact frame (see compactBits; the JSON's q gives the bits): positions as uint32, speed and white-water level as uint16,
+// padding; spray: count, uint32 positions, codes; deep: count, uint32 positions, uint16 speeds, padding.
 function writeCacheParts(c) {
-  const meta = { d: c.d, fps: c.fps, ids: c.ids, b: c.b, org: c.org, maxN: c.maxN, seconds: c.seconds, engine: c.engine, scene: c.scene, desc: c.desc, diag: c.diag, stableIds: !!c.stableIds, scale: c.scale || 1, spdMs: !!c.spdMs };
+  const meta = { d: c.d, fps: c.fps, ids: c.ids, b: c.b, org: c.org, maxN: c.maxN, seconds: c.seconds, engine: c.engine, scene: c.scene, desc: c.desc, diag: c.diag, stableIds: !!c.stableIds, scale: c.scale || 1, spdMs: !!c.spdMs, q: c.q || null,
+    sb: c.sb || ((c.frames || []).find((f) => f && f.sb) || {}).sb || null };   // whitewater area (whitewater positions are across it)
   const mj = new TextEncoder().encode(JSON.stringify(meta)), pad = (k) => (4 - (k % 4)) % 4;
   const parts = [new Uint8Array([83, 80, 76, 67]), new Uint32Array([2, mj.length]), mj, new Uint8Array(pad(mj.length)), new Uint32Array([c.frames.length])];
   for (const fr of c.frames) {
     const sp = fr.sp && fr.sp.n ? fr.sp : null, dp = fr.dp && fr.dp.n ? fr.dp : null;
-    parts.push(new Uint32Array([fr.n, (fr.fm ? 1 : 0) | (sp ? 2 : 0) | (dp ? 4 : 0)]), fr.objs, fr.pos, fr.spd);
+    if (fr.p32) {
+      parts.push(new Uint32Array([fr.n, 8 | (sp ? 2 : 0) | (dp ? 4 : 0) | (fr.wws === 2 ? 16 : 0) | (fr.fb ? 32 : 0)]));
+      if (fr.fb) parts.push(new Float32Array([fr.b.x0, fr.b.y0, fr.b.z0, fr.b.x1, fr.b.y1, fr.b.z1]), new Uint8Array([fr.q[0], fr.q[1], fr.q[2], 0]));   // the frame's own box and bits
+      parts.push(fr.objs, fr.p32, fr.sf, new Uint8Array(pad(fr.n * 2)));
+      if (sp) parts.push(new Uint32Array([sp.n]), sp.p32, sp.pk);
+      if (dp) parts.push(new Uint32Array([dp.n]), dp.p32, dp.sf, new Uint8Array(pad(dp.n * 2)));
+      continue;
+    }
+    parts.push(new Uint32Array([fr.n, (fr.fm ? 1 : 0) | (sp ? 2 : 0) | (dp ? 4 : 0) | (fr.wws === 2 ? 16 : 0)]), fr.objs, fr.pos, fr.spd);
     let bytes = fr.n * 7; if (fr.fm) { parts.push(fr.fm); bytes += fr.n; }
     parts.push(new Uint8Array(pad(bytes)));
     if (sp) parts.push(new Uint32Array([sp.n]), sp.pos, new Uint8Array(pad(sp.n * 6)), sp.pk);
@@ -710,6 +827,20 @@ function parseCache2(buf, dv) {
   for (let f = 0; f < nf; f++) {
     if (o + 8 > buf.byteLength) break;
     const n = dv.getUint32(o, true), fl = dv.getUint32(o + 4, true); o += 8;
+    if (fl & 8) {   // compact frame
+      let fb = null, fq = meta.q;
+      if (fl & 32) { const v = new Float32Array(buf.slice(o, o + 24)); fb = { x0: v[0], y0: v[1], z0: v[2], x1: v[3], y1: v[4], z1: v[5] }; fq = [dv.getUint8(o + 24), dv.getUint8(o + 25), dv.getUint8(o + 26)]; o += 28; }
+      if (o + nobj * 24 + n * 6 > buf.byteLength) break;
+      const objs = new Float32Array(buf.slice(o, o + nobj * 24)); o += nobj * 24;
+      const fr = { n, q: fq, p32: new Uint32Array(buf.slice(o, o + n * 4)), objs }; o += n * 4;
+      if (fb) { fr.fb = true; fr.b = fb; }
+      fr.sf = new Uint16Array(buf.slice(o, o + n * 2)); o += n * 2 + (n % 2) * 2;
+      if (fl & 2) { const ns = dv.getUint32(o, true); o += 4; fr.sp = { n: ns, p32: new Uint32Array(buf.slice(o, o + ns * 4)), pk: new Uint32Array(buf.slice(o + ns * 4, o + ns * 8)), alive: ns }; o += ns * 8; }
+      if (fl & 4) { const nd = dv.getUint32(o, true); o += 4; fr.dp = { n: nd, p32: new Uint32Array(buf.slice(o, o + nd * 4)), sf: new Uint16Array(buf.slice(o + nd * 4, o + nd * 6)) }; o += nd * 6 + (nd % 2) * 2; if (fb) Object.assign(fr.dp, { fb: true, b: fb, q: fq }); }
+      fr.wws = fl & 16 ? 2 : fr.sp ? 1 : 0; if (fr.sp && meta.sb) fr.sb = meta.sb;
+      frames.push(fr); if (n > maxN) maxN = n;
+      continue;
+    }
     const need = nobj * 24 + n * ((fl & 1) ? 8 : 7);
     if (o + need > buf.byteLength) break;
     const objs = new Float32Array(buf.slice(o, o + nobj * 24)); o += nobj * 24;
@@ -730,6 +861,7 @@ function parseCache2(buf, dv) {
       const spd3 = new Uint8Array(buf.slice(o, o + nd)); o += nd + (4 - ((nd * 7) % 4)) % 4;
       fr.dp = { n: nd, pos: pos3, spd: spd3 };
     }
+    fr.wws = fl & 16 ? 2 : fr.sp ? 1 : 0; if (fr.sp && meta.sb) fr.sb = meta.sb;
     frames.push(fr); if (n > maxN) maxN = n;
   }
   return Object.assign({}, meta, { frames, maxN: Math.max(maxN, meta.maxN || 0) });
@@ -818,15 +950,15 @@ function nbSeed(sim, fills, nb, oc, t, g, mode) {
       }
       prims.push(Object.assign({ t: 'box' }, e));
     } else if (f.t === 'vol') {
-      const R = f.R, loc = (x, y, z) => { const dx = x - f.x, dy = y - f.y, dz = z - f.z; sdfSample(f.sdf, R[0] * dx + R[3] * dy + R[6] * dz, R[1] * dx + R[4] * dy + R[7] * dz, R[2] * dx + R[5] * dy + R[8] * dz, SDFTMP); return SDFTMP[0]; };
+      const loc = (x, y, z) => { sdfWorld(f, x, y, z, SDFTMP); return SDFTMP[0]; };
       for (let y = f.lo[1] + d / 2; y < f.hi[1] && !full; y += d) for (let x = f.lo[0] + d / 2; x < f.hi[0] && !full; x += d) for (let z = f.lo[2] + d / 2; z < f.hi[2]; z += d) {
         const s = loc(x, y, z); if (s >= 0 || -s > band) continue;
         // nearest surface point, in world space: on a wall it is not a free surface, so measure the depth straight up instead
-        const nx = SDFTMP[1], ny = SDFTMP[2], nz = SDFTMP[3], wx = R[0] * nx + R[1] * ny + R[2] * nz, wy = R[3] * nx + R[4] * ny + R[5] * nz, wz = R[6] * nx + R[7] * ny + R[8] * nz;
+        const wx = SDFTMP[1], wy = SDFTMP[2], wz = SDFTMP[3];
         if (onWall(x - s * wx, y - s * wy, z - s * wz)) { let up = 0; while (up <= band && y + up < b.y1 && loc(x, y + up, z) < 0) up += d; if (up <= band && y + up < b.y1) put(x, y, z, 0, 0, 0); }
         else put(x, y, z, 0, 0, 0);
       }
-      vols.push({ sdf: f.sdf, x: f.x, y: f.y, z: f.z, R: f.R, vx: 0, vy: 0, vz: 0, wx: 0, wy: 0, wz: 0 });
+      vols.push({ sdf: f.sdf, x: f.x, y: f.y, z: f.z, R: f.R, s: f.s, vx: 0, vy: 0, vz: 0, wx: 0, wy: 0, wz: 0 });
     } else {
       const r = f.r;
       for (let y = -r; y <= r && !full; y += d) for (let x = -r; x <= r && !full; x += d) for (let z = -r; z <= r; z += d) {
@@ -850,4 +982,10 @@ function nbSeed(sim, fills, nb, oc, t, g, mode) {
   else { sim.nbFills = prims; sim.nbFillVols = vols; }
   sim.nbInit = mode || 1; sim.nbCfg = nb; sim.oceanCfg = oc;
   return { seeded, full };
+}
+// how many particles nbSeed would make on a restart (with its spare slots), without a sim: lay is FlipSim.layout of the sim to come.
+// A seed that runs out of particles stops partway across the tank, and that part of the water has no surface particles and drains away
+function nbSeedCount(lay, fills, nb, oc, t, g) {
+  const s = { d: lay.d, h: lay.h, b: lay.b, N: 0, cap: Infinity, add() { this.N++; return true; } };
+  nbSeed(s, fills, nb, oc, t, g, 1); return s.N;
 }

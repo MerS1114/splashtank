@@ -49,9 +49,26 @@
       const o = objs.find((q) => q.id === id); if (!o) return;
       const ob = A.objs, k6 = k * 6;
       o.group.position.set(ob[k6] + og.x, ob[k6 + 1] + og.y, ob[k6 + 2] + og.z);
-      if (o.kind === 'mesh') o.group.rotation.set(ob[k6 + 3], ob[k6 + 4], ob[k6 + 5], 'ZYX');
+      if (o.kind === 'mesh') { o.group.rotation.set(ob[k6 + 3], ob[k6 + 4], ob[k6 + 5], 'ZYX'); sizeAt(o, LC.fnum[lo] / 60); }
     });
     return n;
+  }
+  // whitewater on the timeline, frame by frame: green made by the live sim (the live cache), lilac made while the water was baked,
+  // white made by Bake whitewater (afterwards from the baked water), nothing where a frame has none
+  const WWC = { live: '#6fd36f', 1: '#b48df0', 2: '#f2f2f2' };
+  function wwLane(pc, lcOn, lcEndS) {
+    const el = $('#ww-lane'); if (!el) return;
+    let bg = '', w = 0;
+    if (viewMode() === 'cache' && S.cache && S.cache.frames.length > 1) {
+      const fr = S.cache.frames, F = fr.length, stops = []; let k0 = 0;
+      for (let k = 1; k <= F; k++) {
+        if (k < F && (fr[k].wws || 0) === (fr[k0].wws || 0)) continue;
+        const c = WWC[fr[k0].wws] || 'transparent', a = (k0 / (F - 1)) * 100, z = (Math.min(k, F - 1) / (F - 1)) * 100;
+        stops.push(c + ' ' + a.toFixed(2) + '%', c + ' ' + z.toFixed(2) + '%'); k0 = k;
+      }
+      bg = 'linear-gradient(90deg,' + stops.join(',') + ')'; w = pc((F - 1) / S.cache.fps);
+    } else if (lcOn && S.sprOn) { bg = WWC.live; w = pc(lcEndS); }
+    el.hidden = !bg; if (bg) { if (el._bg !== bg) { el._bg = bg; el.style.background = bg; } el.style.width = w + '%'; }
   }
   function lcUi() {
     const el = $('#lc-info');
@@ -68,6 +85,7 @@
     if (stl) { const show = se > endS + 1e-3; stl.hidden = !show; if (show) { stl.style.left = pc(endS) + '%'; stl.style.width = (pc(se) - pc(endS)) + '%'; } }
     if (bk) { const c = S.cache, show = !!c && !S.baking; bk.hidden = !show; if (show) bk.style.width = pc((c.frames.length - 1) / c.fps) + '%'; }
     if (bp) { bp.hidden = !S.baking; if (S.baking) bp.style.width = pc(S.bakeT || 0) + '%'; }
+    wwLane(pc, on, endS);
     const sr = $('#st-right');
     if (sr) {
       let t = '';

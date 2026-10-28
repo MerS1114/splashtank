@@ -18,13 +18,15 @@
   }
   // a water volume object, as a fill record in solver coordinates
   function volRec(o) {
-    if (!o.water || !o.sdf) return null;
-    const R = eulerMat(o.rx, o.yaw, o.rz), ox = S.org.x, oy = S.org.y, oz = S.org.z, lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
-    for (const q of o.mesh.v) {
+    if (!o.water) return null;
+    ensureSDF(o); if (!o.sdf) return null;
+    const R = eulerMat(o.rx, o.yaw, o.rz), ox = S.org.x, oy = S.org.y, oz = S.org.z, lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9], sx = o.sx || 1, sy = o.sy || 1, sz = o.sz || 1;
+    for (const v of o.mesh.v) {
+      const q = [v[0] * sx, v[1] * sy, v[2] * sz];
       const w = [R[0] * q[0] + R[1] * q[1] + R[2] * q[2] + o.pos.x - ox, R[3] * q[0] + R[4] * q[1] + R[5] * q[2] + o.pos.y - oy, R[6] * q[0] + R[7] * q[1] + R[8] * q[2] + o.pos.z - oz];
       for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], w[k]); hi[k] = Math.max(hi[k], w[k]); }
     }
-    return { t: 'vol', sdf: o.sdf, x: o.pos.x - ox, y: o.pos.y - oy, z: o.pos.z - oz, R, lo, hi };
+    return { t: 'vol', sdf: o.sdf, x: o.pos.x - ox, y: o.pos.y - oy, z: o.pos.z - oz, R, s: sizeOf(o), lo, hi };
   }
   function fillNow(o) {
     if (loadingScene) return;
@@ -40,7 +42,7 @@
     m.needsUpdate = true;
   }
   function applyFills() {
-    if (nbActive()) { nbSeed(sim, resolveFills(), nbCfg(), oceanCfg(), S.frame * DT, S.g / (S.scale || 1), 1); return; }
+    if (nbActive()) { if (nbSeed(sim, resolveFills(), nbCfg(), oceanCfg(), S.frame * DT, S.g / (S.scale || 1), 1).full) flash('Point limit reached, so the starting water is only partly filled and the rest will drain away. Raise Max points or use a coarser spacing.'); return; }
     for (const f of resolveFills()) { if (f.t === 'box') sim.fillBox(f.x0, f.x1, f.y0, f.y1, f.z0, f.z1); else if (f.t === 'vol') fillVolume(sim, f); else sim.fillSphere(f.x, f.y, f.z, f.r, 0, f.vy || 0, 0); }
   }
   const SCENES = {
@@ -88,6 +90,16 @@
       hull.keys = [K(0, 0.5), K(2, 0.5), K(8, 2.55), K(10, 2.55)];   // rises from the sea floor and out through the surface, about 3 m/s
       applyKeysAt(0);
     },
+    'Underwater blast': () => {
+      // a gas bubble from a blast under the surface: a sphere 0.42 m down swells to 5 times its size in 0.05 s (about 10 m/s at its
+      // surface), so it throws the water above it up and breaks the surface, holds, then collapses, and the water rushing back in
+      // meets in the middle and jets up
+      fillBox(0, 1, 0, 1.4, 0, 1);
+      const b = makeObj('sphere', { name: 'Blast', x: 0, y: 0.98, z: 0, r: 0.12 });
+      const K = (t, s) => ({ t, sx: s, sy: s, sz: s });
+      b.keys = [K(0, 1), K(0.25, 1), K(0.3, 5), K(0.5, 4.6), K(0.75, 1)];
+      applyKeysAt(0);
+    },
     'Fountain': () => {
       makeObj('emitter', { x: 0, y: 0.12, z: 0, az: 0, el: 90, speed: 6.2, radius: 0.1 });
       makeObj('sphere', { x: 0, y: 1.75, z: 0, r: 0.4 });
@@ -98,6 +110,8 @@
   const DEF_PARAMS = { foamSens: 1, foamTau: 1.2, gust: 1, airDrag: 0.3, colMax: 100, vmaxW: 50, subMax: 16, scale: 1 };
   let lastHadParams = false;
   const SCENE_CFG = {
+    // a wide tank in narrow band mode (only the water near the surface is particles), so the blast is small next to the sea around it
+    'Underwater blast': { dom: { w: 6, h: 4, d: 6 }, open: ALLC(false), linear: true, dur: 3, nb: true, cap: 450000, cam: { theta: 0.6, phi: 1.3, r: 11 } },
     'Cascade': { dom: { w: 7, h: 8, d: 3.6 }, open: ALLC(true), params: { foamSens: 0.6, foamTau: 2.2, gust: 1.5, airDrag: 0.5 }, cam: { theta: 0.6, phi: 1.2, r: 15 } },
     // at scene scale 10: a 60 m patch of open sea, 16 m deep, 3 m waves 40 m long, and an 18 m hull rising out of it
     'Ocean': { dom: { w: 6, h: 3.2, d: 6 }, open: Object.assign(ALLC(false), { y1: true }), params: { foamSens: 0.8, foamTau: 2, gust: 1, airDrag: 0.3, colMax: 300, vmaxW: 200, subMax: 16, scale: 10 },
@@ -137,6 +151,7 @@
   }
   // restart the particles from the initial fills at time t, keeping objects and keyframes
   function resetSim(t) {
+    S.vpeak = 0; S.subPeak = 0; S.subHold = 0; S.subHoldT = 0;
     S.lcPlay = false; lcDrop(); LC.armed = S.lcOn && !t; S.prevStates = null;
     sim.clear(); runner.em = {}; runner.prev = {}; S.frame = Math.round((t || 0) * 60); S.tl.t = S.frame / 60;
     applyFills(); S.events.forEach((e) => { e.done = e.t < S.tl.t; if (e.done) return; });
@@ -149,8 +164,8 @@
     return {
       objs: objs.map((o) => ({
         id: o.id, shape: o.shape, name: o.name, x: o.target.x, y: o.target.y, z: o.target.z, px: o.pos.x, py: o.pos.y, pz: o.pos.z,
-        rx: o.rx, yaw: o.yaw, rz: o.rz, spin: o.spin, az: o.az, el: o.el, speed: o.speed, radius: o.radius, on: o.on, mode: o.mode, spread: o.spread, density: o.density, turb: o.turb, water: o.water,
-        mesh: o.mesh ? { v: o.mesh.v.map((q) => q.slice()), f: o.mesh.f.map((q) => q.slice()) } : null, sdf: o.sdf || null,
+        rx: o.rx, yaw: o.yaw, rz: o.rz, sx: o.sx, sy: o.sy, sz: o.sz, lockScale: !!o.lockScale, spin: o.spin, az: o.az, el: o.el, speed: o.speed, radius: o.radius, on: o.on, mode: o.mode, spread: o.spread, density: o.density, turb: o.turb, water: o.water,
+        mesh: o.mesh ? { v: o.mesh.v.map((q) => q.slice()), f: o.mesh.f.map((q) => q.slice()) } : null, sdf: o.sdf || null, sdfDirty: !!o.sdfDirty,
         keys: o.keys.map((k) => Object.assign({}, k)), rec: o.rec
       })),
       sel: [...selSet].map((o) => o.id), active: selected ? selected.id : null, ui: uiMode, edit: editO ? editO.id : null

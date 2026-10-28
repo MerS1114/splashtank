@@ -118,8 +118,23 @@ fn nbDeficit(@builtin(global_invocation_id) g: vec3<u32>) {
   if (lw > 0.25 && lw < 0.5) {   // the inner half of the ocean boundary holds the water at the ocean surface: always full below it
     if (cx.y > oceanEta(cx.xz) - 0.25 * P.h || ph < -P.band) { return; }
   } else {
-    if ((ctype[c] & 0xffu) != 1u || ph > -1.0 || ph < -P.band) { return; }
-    if (!calmV(velGVec(cx))) { return; }   // fast water thinning out is spray and foam, not missing water
+    let fast = !calmV(velGVec(cx));
+    if ((ctype[c] & 0xffu) != 1u || ph > -1.0 || (ph < -P.band && !fast)) { return; }
+    // fast water thinning out is spray and foam, not missing water; but a fast water cell with no particles at all is deep water an
+    // impact set moving: it gets particles at any depth, moving with it, so the impact runs as full FLIP (grid-only deep water is
+    // smoothed by its semi-Lagrangian velocity and pushed the lake up in a broad mound instead of throwing a crown; once calm, nbKill
+    // trims them again). Only where the deeper cells around it have no particles either (grid-only water): a gap in a thinning splash
+    // has particles around it, and refilling those added water wherever a splash spread out
+    if (fast) {
+      if (atomicLoad(&cnt[c]) > 0) { return; }
+      for (var q = 0u; q < 6u; q++) {
+        var p = a.p;
+        if (q == 0u) { p.x -= 1; } else if (q == 1u) { p.x += 1; } else if (q == 2u) { p.y -= 1; } else if (q == 3u) { p.y += 1; } else if (q == 4u) { p.z -= 1; } else { p.z += 1; }
+        if (!inDom(p) || !hasStorage(p)) { continue; }
+        let cq = cellIdx(p.x, p.y, p.z);
+        if (phiOf(cq) < ph && atomicLoad(&cnt[cq]) > 0) { return; }
+      }
+    }
   }
   let n = u32(max(atomicLoad(&cnt[c]), 0));
   if (f32(n) >= 0.55 * P.rest) { return; }
@@ -145,6 +160,7 @@ fn nbSpawn(@builtin(global_invocation_id) g: vec3<u32>) {
     var v = velGVec(x);
     if (layerW(x) > 0.25) { v = oceanVel(x); }
     pos[i] = vec4<f32>(x, min(length(v), 63.0)); vel[i] = vec4<f32>(v, 0.0);
+    if (P.ext1.y > 0.5) { for (var a = 0u; a < 3u; a++) { aff[i * 3u + a] = vec4<f32>(0.0); } }   // APIC: a new particle has no gradient yet
   }
 }
 `;

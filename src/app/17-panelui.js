@@ -128,10 +128,12 @@
   function updStatus() {
     const el = $('#st-hints'); if (!el) return;
     let h;
-    if (hoverRow) h = [['Drag', 'change'], ['Click value', 'type'], ['Backspace', 'reset'], ['Ctrl C', 'copy'], ['Ctrl V', 'paste'], ['Right-click', 'more']];
+    if (hoverRow && hoverRow.closest('[data-kg]')) h = [['I', 'key this'], ['Alt I', 'take key off'], ['Drag', 'change'], ['Click value', 'type']];
+    else if (hoverRow) h = [['Drag', 'change'], ['Click value', 'type'], ['Backspace', 'reset'], ['Ctrl C', 'copy'], ['Ctrl V', 'paste'], ['Right-click', 'more']];
     else if (viewMode() === 'cache') h = [['Space', 'play or pause'], ['Drag timeline', 'scrub'], ['MMB', 'orbit'], ['Shift MMB', 'pan'], ['Wheel', 'zoom'], ['F3', 'search settings']];
+    else if (tf && tf.type === 'i') h = [['Mouse in', 'wider'], ['I', tf.individual ? 'as one region' : 'each face'], ['0–9', 'type a width'], ['LMB/Enter', 'confirm'], ['RMB/Esc', 'cancel']];
     else if (tf) h = [['X Y Z', 'axis (twice: ' + (S.orient === 'local' ? 'global' : 'local') + ')'], ['Shift+axis', 'plane'], ['Ctrl', S.snapOn ? 'no snapping' : 'snap'], ['V', 'snap to points'], ['0–9', 'type a value'], ['LMB/Enter', 'confirm'], ['RMB/Esc', 'cancel']];
-    else if (uiMode === 'edit') h = [['1 2 3', 'points, edges, faces'], ['G R S', 'move, rotate, scale'], ['E', 'extrude'], ['A', 'select all'], ['Tab', 'back to objects']];
+    else if (uiMode === 'edit') h = [['1 2 3', 'points, edges, faces'], ['G R S', 'move, rotate, scale'], ['E', 'extrude'], ['I', 'inset'], ['A', 'select all'], ['Tab', 'back to objects']];
     else if (selSet.size) h = [['G R S', 'move, rotate, scale'], ['Shift D', 'duplicate'], ['X', 'delete'], ['I', 'keyframe']].concat(selected && selected.kind === 'mesh' ? [['Tab', 'edit shape']] : []).concat([['F', 'focus'], ['Shift A', 'add'], ['Space', S.playing ? 'stop' : 'start']]);
     else h = [['LMB', 'select'], ['Drag', 'box select'], ['MMB', 'orbit'], ['Shift MMB', 'pan'], ['Wheel', 'zoom'], ['Shift A', 'add'], ['F3', 'search settings'], ['Space', S.playing ? 'stop' : 'start']];
     const s = h.map(([k, t]) => '<span class="h"><kbd>' + k + '</kbd>' + t + '</span>').join('');

@@ -1,11 +1,10 @@
 const {PAGE, OUT} = require('./paths');
-const chromium=require('@sparticuz/chromium').default; const puppeteer=require('puppeteer-core');
+const { launch, pageUrl } = require('./browser');
 const wait=(ms)=>new Promise(r=>setTimeout(r,ms));
 const NB = process.argv[2] === 'nb', ITERS = +(process.argv[6] || 30), SC = process.argv[3] || 'Meteor lake', STEPS = +(process.argv[4] || 90), SPACING = +(process.argv[5] || 0.08);
-(async()=>{ const exe=await chromium.executablePath();
- const br=await puppeteer.launch({executablePath:exe,args:[...chromium.args,'--enable-unsafe-webgpu','--enable-features=Vulkan,WebGPU','--use-webgpu-adapter=swiftshader','--use-angle=swiftshader','--ignore-gpu-blocklist','--allow-file-access-from-files'],headless:'shell'});
+(async()=>{ const br=await launch();
  const pg=await br.newPage(); await pg.setViewport({width:1400,height:900}); const errs=[]; pg.on('console',m=>{const t=m.text(); if(/rror|nvalid|WGSL/i.test(t)) errs.push(t.slice(0,400));}); pg.on('pageerror',e=>errs.push(e.message));
- await pg.goto('file://'+PAGE); await wait(5000);
+ await pg.goto(pageUrl(PAGE)); await wait(5000);
  await pg.select('#scene', SC); await wait(1500);
  await pg.evaluate((sp)=>document.querySelector('#s-res').closest('.row')._st.commit(sp), SPACING); await wait(800);
  await pg.evaluate((it, bd, dbg)=>{ window.__splash.S.iters = it; window.__band = bd; window.__dbg = +dbg; }, ITERS, +(process.argv[7]||3), +(process.argv[8]||0));
