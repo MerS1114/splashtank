@@ -160,6 +160,7 @@ fn nbSpawn(@builtin(global_invocation_id) g: vec3<u32>) {
     var v = velGVec(x);
     if (layerW(x) > 0.25) { v = oceanVel(x); }
     pos[i] = vec4<f32>(x, min(length(v), 63.0)); vel[i] = vec4<f32>(v, 0.0);
+    if (P.ext1.y > 0.5) { for (var a = 0u; a < 3u; a++) { aff[i * 3u + a] = vec4<f32>(0.0); } }   // APIC: a new particle has no gradient yet
   }
 }
 `;

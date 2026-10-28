@@ -86,7 +86,7 @@ function bakeDiag(dst, n, b, vcap) {
 async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
   const sim = new FlipSim(gpu.dev, { d: desc.d, maxN: desc.maxN, size: desc.size, open: desc.open, ratio: desc.cellRatio });
   await sim.whenReady;   // the shared pipelines, compiled once per device
-  sim.recycle = false; sim.cap = desc.maxN; sim.opt.fastAir = !!desc.fastAir; sim.opt.sort = !!desc.sortP; sim.opt.p2gWin = !!desc.p2gWin; sim.opt.ballistic = desc.ballistic !== false; sim.opt.settle = !!desc.settle; sim.opt.settleTol = desc.settleTol; sim.opt.mg = !!desc.mg; sim.opt.sep = desc.sep || 0;
+  sim.recycle = false; sim.cap = desc.maxN; sim.opt.fastAir = !!desc.fastAir; sim.opt.sort = !!desc.sortP; sim.opt.p2gWin = !!desc.p2gWin; sim.opt.ballistic = desc.ballistic !== false; sim.opt.settle = !!desc.settle; sim.opt.settleTol = desc.settleTol; sim.opt.mg = !!desc.mg; sim.opt.sep = desc.sep || 0; sim.opt.apic = !!desc.apic;
   if (desc.spr && desc.sprayCap) sim.setSprayCap(desc.sprayCap);
   if (desc.nbLook) sim.setDeepLook(true);
   const runner = new SceneRunner(sim);
@@ -268,7 +268,7 @@ async function runDetailPass(c, desc, gpu, onProgress, isCancelled) {
   let open = 0; [[R0.x0, b.x0, 1], [R0.x1, b.x1, 2], [R0.y0, b.y0, 4], [R0.y1, b.y1, 8], [R0.z0, b.z0, 16], [R0.z1, b.z1, 32]].forEach(([r, w, bit]) => { if (!near(r, w) || (tankOpen & bit)) open |= bit; });
   const sim = new FlipSim(gpu.dev, { d: dF, maxN, size: [R0.x1 - R0.x0, R0.y1 - R0.y0, R0.z1 - R0.z0], open, ratio, org: [R0.x0, R0.y0, R0.z0] });
   await sim.whenReady;
-  sim.recycle = false; sim.cap = maxN; sim.opt.sort = false; sim.opt.ballistic = desc.ballistic !== false; sim.opt.mg = !!desc.mg; sim.opt.sep = desc.sep || 0;
+  sim.recycle = false; sim.cap = maxN; sim.opt.sort = false; sim.opt.ballistic = desc.ballistic !== false; sim.opt.mg = !!desc.mg; sim.opt.sep = desc.sep || 0; sim.opt.apic = !!desc.apic;
   const R = sim.b, hF = sim.h, Lw = 2 * hc, runner = new SceneRunner(sim), scale = desc.scale || 1;
   const openSide = [(open & 1) && !near(R.x0, b.x0), (open & 2) && !near(R.x1, b.x1), (open & 4) && !near(R.y0, b.y0), (open & 8) && !near(R.y1, b.y1), (open & 16) && !near(R.z0, b.z0), (open & 32) && !near(R.z1, b.z1)];
   const inLayer = (x, y, z) => (openSide[0] && x - R.x0 < Lw) || (openSide[1] && R.x1 - x < Lw) || (openSide[2] && y - R.y0 < Lw) || (openSide[3] && R.y1 - y < Lw) || (openSide[4] && z - R.z0 < Lw) || (openSide[5] && R.z1 - z < Lw);
@@ -295,7 +295,7 @@ async function runDetailPass(c, desc, gpu, onProgress, isCancelled) {
     }
   }
   const kill = (s) => { const o = s * 4; pS[o] = 0; pS[o + 1] = -1.0e6; pS[o + 2] = 0; pS[o + 3] = 0; vS[o] = vS[o + 1] = vS[o + 2] = vS[o + 3] = 0; free.push(s); };
-  const upload = () => { sim.N = n; sim.dev.queue.writeBuffer(sim.bPos, 0, pS, 0, n * 4); sim.dev.queue.writeBuffer(sim.bVel, 0, vS, 0, n * 4); };
+  const upload = () => { sim.N = n; sim.dev.queue.writeBuffer(sim.bPos, 0, pS, 0, n * 4); sim.dev.queue.writeBuffer(sim.bVel, 0, vS, 0, n * 4); if (sim.opt.apic) { sim.ensureAff(); sim.zeroAff(0, n); } };
   const velStage = gpu.dev.createBuffer({ size: maxN * 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   async function readBack() {
     const bytes = Math.max(n, 1) * 16, e = gpu.dev.createCommandEncoder(); e.copyBufferToBuffer(sim.bVel, 0, velStage, 0, bytes); gpu.dev.queue.submit([e.finish()]);

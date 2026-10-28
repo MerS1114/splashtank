@@ -7,7 +7,7 @@
 // node tests/accuracy.js [cases "still,dam,slosh"] [spacing 0.0125] [js run in the page before each case, e.g. "S.airDrag=0"]
 // Prints one line per case to compare runs. Uses the real GPU with SPLASH_GPU=1.
 const { open, done } = require('./lib');
-const CASES = (process.argv[2] || 'still,dam,slosh').split(','), SP = +(process.argv[3] || 0.0125), OV = process.argv[4] || '';
+const CASES = (process.argv[2] || 'still,dam,volume,slosh,swirl').split(','), SP = +(process.argv[3] || 0.0125), OV = process.argv[4] || '';
 // Martin and Moyce (1952), n^2 = 2 (column twice as high as wide), as reprinted in the SPH and MPS literature
 const MM = [[0.41, 1.11], [0.84, 1.22], [1.19, 1.44], [1.43, 1.67], [1.63, 1.89], [1.83, 2.11], [1.98, 2.33], [2.20, 2.56], [2.32, 2.78], [2.51, 3.00], [2.65, 3.22], [2.83, 3.44], [2.98, 3.67], [3.11, 3.89], [3.33, 4.11]];
 const scene = (size, fills) => ({ app: 'SplashTank', version: 2, box: { size, open: {} }, solver: { engine: 'flip', nbOn: false, sprOn: false, airOn: false, dripOn: false, scale: 1, subMax: 16, vmaxW: 50, colMax: 100 }, fills, events: [], objs: [], timeline: { dur: 30, t: 0, auto: true, smooth: true, end: 'hold' } });
@@ -78,6 +78,29 @@ const f3 = (v) => (Math.round(v * 1000) / 1000).toString();
       });
       console.log('volume: settled depth ' + r.out.map((v) => (100 * (v / want - 1)).toFixed(1) + '%').join(', ') + ' off the starting volume every 2 s (wants ' + f3(want) + ' m; the top particle sits about half a spacing under the surface), most substeps ' + r.sub);
       await t.shot('acc_volume'); await done(t);
+    } else if (cs === 'swirl') {
+      // a Taylor-Green vortex filling a closed tank: u = U sin(pi x/L) cos(pi y/L), v = -U cos(pi x/L) sin(pi y/L) meets every wall
+      // and is a steady flow of ideal water, so all of its motion should stay (real water's viscosity takes a few millionths a second
+      // here). The share of kinetic energy and of the swirl's turning left after 1, 2 and 3 s is what the solver loses.
+      const L = 1, D = 0.1, U = 0.5;
+      const t = await setup(scene({ w: L, h: L, d: D }, []));
+      await t.ev(PAGE);
+      const r = await t.ev(async (L, D, U) => {
+        const s = window.__splash, sim = s.getSim(), A = window.__acc, d = sim.d, b = sim.b;
+        sim.clear();
+        for (let x = b.x0 + d / 2; x < b.x1; x += d) for (let y = b.y0 + d / 2; y < b.y1; y += d) for (let z = b.z0 + d / 2; z < b.z1; z += d) {
+          const X = Math.PI * (x - b.x0) / L, Y = Math.PI * (y - b.y0) / L;
+          sim.add(x, y, z, U * Math.sin(X) * Math.cos(Y), -U * Math.cos(X) * Math.sin(Y), 0);
+        }
+        // kinetic energy per particle, and how much the flow still matches the vortex (projection onto its shape)
+        const meas = (q) => { let ke = 0, pr = 0, nn = 0, n2 = 0; for (let i = 0; i < q.n; i++) { if (q.p[i * 4 + 1] < -1e5) continue; const X = Math.PI * (q.p[i * 4] - b.x0) / L, Y = Math.PI * (q.p[i * 4 + 1] - b.y0) / L; const su = Math.sin(X) * Math.cos(Y), sv = -Math.cos(X) * Math.sin(Y); const u = q.v[i * 4], v = q.v[i * 4 + 1], w = q.v[i * 4 + 2]; ke += u * u + v * v + w * w; pr += u * su + v * sv; n2 += su * su + sv * sv; nn++; } const amp = pr / n2; return { ke: ke / nn, amp, noise: Math.max(0, ke - amp * amp * n2) / nn }; };
+        const out = []; let sub = 0;
+        sub = Math.max(sub, await A.step(1)); const m0 = meas(await A.read());
+        for (let k = 1; k <= 3; k++) { sub = Math.max(sub, await A.step(60)); out.push(meas(await A.read())); }
+        return { m0, out, sub, h: sim.h, ke0: U * U / 2 };
+      }, L, D, U);
+      console.log('swirl: energy left ' + r.out.map((m) => (100 * m.ke / r.m0.ke).toFixed(1) + '%').join(', ') + ' after 1, 2, 3 s; vortex strength left ' + r.out.map((m) => (100 * m.amp / r.m0.amp).toFixed(1) + '%').join(', ') + ', motion not part of the vortex (noise) ' + r.out.map((m) => (100 * m.noise / r.m0.ke).toFixed(1) + '%').join(', ') + ' of the starting energy (after one step it was ' + (r.m0.amp / 0.5).toFixed(3) + ' of the U set); most substeps ' + r.sub + ', cell ' + r.h + ' m');
+      await t.shot('acc_swirl'); await done(t);
     } else if (cs === 'slosh') {
       const L = 1, D = 0.2, hd = 0.5, Am = +(process.env.ACC_AMP || 0.08);
       const t = await setup(scene({ w: L, h: 1, d: D }, []));
