@@ -22,6 +22,8 @@ struct Params {
   ext0: vec4<f32>,                                         // words 416-419: x fast drops fly free (ballistic), y settled-water tolerance in cells per step (0 off), z particle separation (share of the crowding undone per step, 0 off), w spare
   ext1: vec4<f32>,                                         // words 420-423: x multigrid correction weight, y APIC transfer (1 on), z w spare
   mgD: array<vec4<u32>, 4>,                                // words 424-439: multigrid's dense levels 4-7: size x, y, z and where they start in mg
+  ext2: vec4<f32>,                                         // words 440-443: air turbulence: x size of the largest eddies (solver units), y octaves, z how fast it changes (/s), w swirl kept (vorticity confinement)
+  ext3: vec4<f32>,                                         // words 444-447: x real air flow (1: carried along, incompressible), y water feels the air field (1), z drag on water (/s), w pressure sweeps
 };
 // a particle flying free of the grid (ballistic) keeps its white-water level in vel.w plus 2
 const BALLISTIC: f32 = 1.5;

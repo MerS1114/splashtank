@@ -64,26 +64,144 @@ fn airSplatS(@builtin(global_invocation_id) g: vec3<u32>) {
   let sp = sPos[j]; if (sp.w <= 0.0 || sVel[j].w > 1.5 || !inTank(sp.xyz)) { return; }
   airPush(sp.xyz, sVel[j].xyz, 0.25);
 }
-// each air cell: spreads a little to its neighbours, is pulled towards what pushed it, moves with an object it is inside, and settles back to the wind
+// Air turbulence: curl noise (Bridson et al. 2007), the curl of three noise potentials, so it is divergence-free like real eddies. The
+// largest eddies are P.ext2.x across (solver units), each further octave half the size with 0.79 of the speed (Kolmogorov: speed goes as
+// size^(1/3)), drifting through time at P.ext2.z. Its strength is the Air turbulence setting (P.q7, m/s). 0 without real air flow.
+fn turbPot(q: vec3<f32>, k: u32) -> f32 { return 2.0 * vnz(q + vec3<f32>(f32(k) * 31.7, f32(k) * 17.3, f32(k) * 47.1)) - 1.0; }
+fn turbAt(x: vec3<f32>) -> vec3<f32> {
+  if (P.q7 <= 0.0 || P.ext2.x <= 0.0 || P.ext3.x < 0.5) { return vec3<f32>(0.0); }
+  var s = vec3<f32>(0.0); var L = P.ext2.x; var amp = 1.0; var norm = 0.0;
+  let t = P.q8 * P.ext2.z; let oct = u32(clamp(P.ext2.y, 1.0, 5.0)); let e = 0.15;
+  for (var o = 0u; o < oct; o++) {
+    let q = x / L + vec3<f32>(t, 0.7 * t, -0.4 * t) + vec3<f32>(f32(o) * 5.3);
+    let ex = vec3<f32>(e, 0.0, 0.0); let ey = vec3<f32>(0.0, e, 0.0); let ez = vec3<f32>(0.0, 0.0, e);
+    let d3y = turbPot(q + ey, 2u) - turbPot(q - ey, 2u); let d2z = turbPot(q + ez, 1u) - turbPot(q - ez, 1u);
+    let d1z = turbPot(q + ez, 0u) - turbPot(q - ez, 0u); let d3x = turbPot(q + ex, 2u) - turbPot(q - ex, 2u);
+    let d2x = turbPot(q + ex, 1u) - turbPot(q - ex, 1u); let d1y = turbPot(q + ey, 0u) - turbPot(q - ey, 0u);
+    s += amp * vec3<f32>(d3y - d2z, d1z - d3x, d2x - d1y) / (2.0 * e);
+    norm += amp; L *= 0.5; amp *= 0.79;
+  }
+  return s * (0.45 * P.q7 / norm);
+}
+// the curl of the air at a cell (central differences), for keeping swirls
+fn airCurl(ci: vec3<i32>) -> vec3<f32> {
+  let ax = air[airIdx(ci + vec3<i32>(1, 0, 0))].xyz - air[airIdx(ci - vec3<i32>(1, 0, 0))].xyz;
+  let ay = air[airIdx(ci + vec3<i32>(0, 1, 0))].xyz - air[airIdx(ci - vec3<i32>(0, 1, 0))].xyz;
+  let az = air[airIdx(ci + vec3<i32>(0, 0, 1))].xyz - air[airIdx(ci - vec3<i32>(0, 0, 1))].xyz;
+  return vec3<f32>(ay.z - az.y, az.x - ax.z, ax.y - ay.x) / (2.0 * P.airH);
+}
+// Each air cell. With real air flow (P.ext3.x): carried along by itself (semi-Lagrangian), swirls kept by vorticity confinement (Fedkiw et
+// al. 2001, strength P.ext2.w), and where it sits inside water it moves with the water and is a moving wall for the pressure solve below
+// (air2.w = 1). Always: spreads a little to its neighbours, is pulled towards what pushed it (surface water, spray), moves with an object
+// it is inside (also a wall), and settles back to the wind plus turbulence.
 @compute @workgroup_size(256)
 fn airUpdate(@builtin(global_invocation_id) g: vec3<u32>) {
   let c = gid1(g); if (c >= P.aNx * P.aNy * P.aNz) { return; }
   let ci = vec3<i32>(i32(c % P.aNx), i32((c / P.aNx) % P.aNy), i32(c / (P.aNx * P.aNy)));
+  let x = vec3<f32>(P.x0, P.y0, P.z0) + (vec3<f32>(ci) + vec3<f32>(0.5)) * P.airH;
+  let real = P.ext3.x > 0.5;
   var a = air[c].xyz;
+  if (real) { a = airAt(x - P.dt * a); }
   let nb = (air[airIdx(ci + vec3<i32>(1, 0, 0))].xyz + air[airIdx(ci - vec3<i32>(1, 0, 0))].xyz + air[airIdx(ci + vec3<i32>(0, 1, 0))].xyz +
             air[airIdx(ci - vec3<i32>(0, 1, 0))].xyz + air[airIdx(ci + vec3<i32>(0, 0, 1))].xyz + air[airIdx(ci - vec3<i32>(0, 0, 1))].xyz) / 6.0;
-  a = mix(a, nb, P.airBlur);
+  a = mix(a, nb, P.airBlur * select(1.0, 0.3, real));   // real air flow: the blur only stands in for viscosity, so much less
+  if (real && P.ext2.w > 0.0) {
+    let wv = airCurl(ci);
+    let gw = vec3<f32>(length(airCurl(ci + vec3<i32>(1, 0, 0))) - length(airCurl(ci - vec3<i32>(1, 0, 0))),
+                       length(airCurl(ci + vec3<i32>(0, 1, 0))) - length(airCurl(ci - vec3<i32>(0, 1, 0))),
+                       length(airCurl(ci + vec3<i32>(0, 0, 1))) - length(airCurl(ci - vec3<i32>(0, 0, 1))));
+    let gl = length(gw);
+    if (gl > 1.0e-6) { a += P.dt * P.ext2.w * P.airH * cross(gw / gl, wv); }
+  }
   let w = f32(atomicLoad(&airAcc[c * 4u + 3u])) / 256.0;
   if (w > 0.0) {
     let vt = vec3<f32>(f32(atomicLoad(&airAcc[c * 4u])), f32(atomicLoad(&airAcc[c * 4u + 1u])), f32(atomicLoad(&airAcc[c * 4u + 2u]))) / (w * 256.0);
     a = mix(a, vt, 1.0 - exp(-P.airCouple * min(w, 8.0) * P.dt));
   }
-  let x = vec3<f32>(P.x0, P.y0, P.z0) + (vec3<f32>(ci) + vec3<f32>(0.5)) * P.airH;
+  a = mix(a, vec3<f32>(P.q1, P.q2, P.q3) + turbAt(x), 1.0 - exp(-P.airDecay * P.dt));
+  var wall = 0.0;
   for (var k = 0u; k < P.ncols; k++) {
-    if (colNear(k, x) && sdfEval(k, x).x < 0.6 * P.airH) { a = colSurfVel(k, x); break; }
+    if (colNear(k, x) && sdfEval(k, x).x < 0.6 * P.airH) { a = colSurfVel(k, x); wall = 1.0; break; }
   }
-  a = mix(a, vec3<f32>(P.q1, P.q2, P.q3), 1.0 - exp(-P.airDecay * P.dt));
-  air2[c] = vec4<f32>(a, 0.0);
+  if (real && wall < 0.5 && inTank(x)) {   // inside the water: the air there is the water, moving with it
+    let wc = particleCell(x);
+    if (hasStorage(wc) && ctypeOf(wc.x, wc.y, wc.z) == 1u) { a = sampleNew(x); wall = 1.0; }
+  }
+  air2[c] = vec4<f32>(a, wall);
+}
+// Real air flow: the air is made incompressible on its grid, so it flows around the water and objects instead of piling into them (a
+// falling body pushes air out ahead and draws it in behind; spray drags air along and the air around makes way). Velocities sit at cell
+// centres (an approximate projection: divergence from central differences, a 7-point pressure solve), walls (water, objects; air2.w = 1)
+// keep their velocity, the edges of the air grid are open air (pressure 0) except a closed floor. air.x holds the divergence, air.y the
+// pressure, until airProj writes the corrected velocity into air2 and airCopy brings it back.
+fn airOpenAt(q: vec3<i32>) -> i32 {   // 1 inside the grid, 0 open air past an edge, -1 a closed floor
+  if (q.y < 0) { return select(-1, 0, (P.open & 4u) != 0u); }
+  if (q.x < 0 || q.z < 0 || q.x >= i32(P.aNx) || q.y >= i32(P.aNy) || q.z >= i32(P.aNz)) { return 0; }
+  return 1;
+}
+@compute @workgroup_size(256)
+fn airDiv(@builtin(global_invocation_id) g: vec3<u32>) {
+  let c = gid1(g); if (c >= P.aNx * P.aNy * P.aNz) { return; }
+  if (air2[c].w > 0.5) { air[c] = vec4<f32>(0.0); return; }
+  let ci = vec3<i32>(i32(c % P.aNx), i32((c / P.aNx) % P.aNy), i32(c / (P.aNx * P.aNy)));
+  var d = 0.0;
+  for (var ax = 0u; ax < 3u; ax++) {
+    var e = vec3<i32>(0); e[ax] = 1;
+    let hi = ci + e; let lo = ci - e;
+    let vh = select(air2[c][ax], air2[airIdx(hi)][ax], airOpenAt(hi) == 1);
+    let vl = select(select(air2[c][ax], 0.0, airOpenAt(lo) == -1), air2[airIdx(lo)][ax], airOpenAt(lo) == 1);
+    d += (vh - vl) / (2.0 * P.airH);
+  }
+  air[c] = vec4<f32>(d, 0.0, 0.0, 0.0);
+}
+fn airRelax(c: u32, color: u32) {
+  let ci = vec3<i32>(i32(c % P.aNx), i32((c / P.aNx) % P.aNy), i32(c / (P.aNx * P.aNy)));
+  if (u32((ci.x + ci.y + ci.z) & 1) != color || air2[c].w > 0.5) { return; }
+  var sum = 0.0; var n = 0.0;
+  for (var q = 0u; q < 6u; q++) {
+    var e = vec3<i32>(0); e[q / 2u] = select(-1, 1, (q & 1u) == 1u);
+    let nb = ci + e; let o = airOpenAt(nb);
+    if (o == -1) { continue; }                      // closed floor: no flow through
+    if (o == 0) { n += 1.0; continue; }             // open air past the edge: pressure 0
+    let k = airIdx(nb); if (air2[k].w > 0.5) { continue; }   // a wall: no flow through
+    sum += air[k].y; n += 1.0;
+  }
+  if (n < 0.5) { return; }
+  let p = air[c]; let pg = (sum - p.x * P.airH * P.airH) / n;
+  air[c] = vec4<f32>(p.x, p.y + 1.6 * (pg - p.y), 0.0, 0.0);
+}
+@compute @workgroup_size(256)
+fn airRed(@builtin(global_invocation_id) g: vec3<u32>) { let c = gid1(g); if (c >= P.aNx * P.aNy * P.aNz) { return; } airRelax(c, 0u); }
+@compute @workgroup_size(256)
+fn airBlack(@builtin(global_invocation_id) g: vec3<u32>) { let c = gid1(g); if (c >= P.aNx * P.aNy * P.aNz) { return; } airRelax(c, 1u); }
+@compute @workgroup_size(256)
+fn airProj(@builtin(global_invocation_id) g: vec3<u32>) {
+  let c = gid1(g); if (c >= P.aNx * P.aNy * P.aNz) { return; }
+  if (air2[c].w > 0.5) { return; }
+  let ci = vec3<i32>(i32(c % P.aNx), i32((c / P.aNx) % P.aNy), i32(c / (P.aNx * P.aNy)));
+  let p0 = air[c].y; var gr = vec3<f32>(0.0);
+  for (var ax = 0u; ax < 3u; ax++) {
+    var e = vec3<i32>(0); e[ax] = 1;
+    let hi = ci + e; let lo = ci - e; let oh = airOpenAt(hi); let ol = airOpenAt(lo);
+    var ph = 0.0; if (oh == 1) { ph = select(air[airIdx(hi)].y, p0, air2[airIdx(hi)].w > 0.5); } else if (oh == -1) { ph = p0; }
+    var pl = 0.0; if (ol == 1) { pl = select(air[airIdx(lo)].y, p0, air2[airIdx(lo)].w > 0.5); } else if (ol == -1) { pl = p0; }
+    gr[ax] = (ph - pl) / (2.0 * P.airH);
+  }
+  air2[c] = vec4<f32>(air2[c].xyz - gr, 0.0);
+}
+// Water feels the air (Air and wind > Water feels the air): water that is exposed (few particles around it) is dragged towards the air
+// field's velocity instead of a fixed wind with noise, so wind gusts, a body's wake and air pushed out ahead of a splash act on spray and
+// thin sheets, and wind tears at crests. Buried water hardly feels it. g2p and the fast drops skip their own wind drag while this is on.
+@compute @workgroup_size(256)
+fn airDragW(@builtin(global_invocation_id) g: vec3<u32>) {
+  let i = gid1(g); if (i >= P.n) { return; }
+  let p = pos[i].xyz; if (pos[i].y < DEADY || vel[i].w >= 1.5) { return; }   // dead, or flying free (the ballistic kernel drags those)
+  let c = particleCell(p); var rho = 1.0;
+  if (hasStorage(c)) { rho = f32(atomicLoad(&cnt[cellIdx(c.x, c.y, c.z)])) / P.rest; }
+  let exposure = 1.0 - 0.97 * smoothstep(0.1, 0.65, rho);
+  let kd = P.ext3.z * (0.04 + 1.5 * exposure * exposure);
+  let v = vel[i].xyz;
+  vel[i] = vec4<f32>(v + (airAt(p) - v) * (1.0 - exp(-kd * P.dt)), vel[i].w);
 }
 @compute @workgroup_size(256)
 fn airCopy(@builtin(global_invocation_id) g: vec3<u32>) { let c = gid1(g); if (c >= P.aNx * P.aNy * P.aNz) { return; } air[c] = air2[c]; }
@@ -249,7 +367,7 @@ fn sprayStep(@builtin(global_invocation_id) g: vec3<u32>) {
   if (kind <= 1u) {
     let mist = kind == 1u;
     var gust = vec3<f32>(0.0);
-    if (P.q7 > 0.0) {
+    if (P.q7 > 0.0 && P.ext3.x < 0.5) {   // with real air flow the turbulence is in the air field itself
       let gp = p * 0.55 * P.vs; let tt = P.q8 * 0.6;
       gust = vec3<f32>(vnz(gp + vec3<f32>(tt, 0.0, 0.0)), vnz(gp + vec3<f32>(17.3, tt, 4.1)), vnz(gp + vec3<f32>(5.7, 9.2, tt))) * 2.0 - vec3<f32>(1.0);
     }

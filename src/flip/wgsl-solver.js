@@ -531,7 +531,7 @@ fn g2pRest(i: u32, p: vec3<f32>, v0: vec3<f32>, fcell: vec3<i32>, vn: vec3<f32>,
     let gp = p * 0.55; let tt = P.q8 * 0.6;
     gust = vec3<f32>(vnz(gp + vec3<f32>(tt, 0.0, 0.0)), vnz(gp + vec3<f32>(17.3, tt, 4.1)), vnz(gp + vec3<f32>(5.7, 9.2, tt))) * 2.0 - vec3<f32>(1.0);
   }
-  let kd = P.q4 * (0.04 + 1.5 * exposure * exposure);
+  let kd = select(P.q4 * (0.04 + 1.5 * exposure * exposure), 0.0, P.ext3.y > 0.5);   // water feels the air field instead (airDragW)
   let airv = vec3<f32>(P.q1, P.q2, P.q3) + gust * P.q7;
   v = v + (airv - v) * (1.0 - exp(-kd * P.dt));
   let sp = length(v);
@@ -572,7 +572,8 @@ fn ballistic(@builtin(global_invocation_id) g: vec3<u32>) {
       gust = vec3<f32>(vnz(gp + vec3<f32>(tt, 0.0, 0.0)), vnz(gp + vec3<f32>(17.3, tt, 4.1)), vnz(gp + vec3<f32>(5.7, 9.2, tt))) * 2.0 - vec3<f32>(1.0);
     }
     v.y -= P.gravity * dt;
-    v = v + (vec3<f32>(P.q1, P.q2, P.q3) + gust * P.q7 - v) * (1.0 - exp(-kd * dt));
+    var airv = vec3<f32>(P.q1, P.q2, P.q3) + gust * P.q7; if (P.ext3.y > 0.5) { airv = airAt(p); }   // the air field when the water feels it
+    v = v + (airv - v) * (1.0 - exp(-kd * dt));
     let sp = length(v); if (sp > P.vmax) { v = v * (P.vmax / sp); }
     let pt = p + v * dt; let pc = collideP(pt); let dsp = pc - pt;
     if (dot(dsp, dsp) > 1.0e-12) { let nrm = normalize(dsp); let vd = dot(v, nrm); if (vd < 0.0) { v = v - vd * nrm; } }

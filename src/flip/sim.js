@@ -10,7 +10,7 @@
 function flipWGSL(sg) { return (sg ? 'enable subgroups;\n' : '') + FLIP_WGSL_CORE + FLIP_WGSL_BLOCKS + FLIP_WGSL_SOLVER + FLIP_WGSL_WHITEWATER + FLIP_WGSL_NARROWBAND + FLIP_WGSL_MG + (sg ? FLIP_WGSL_SUBGROUPS : ''); }
 
 const FLIP_SLOT = { cells: 512 };   // one block of the sparse grid: 8 x 8 x 8 cells
-const FLIP_PARAMS_BYTES = 1760;      // the solver's uniform block: settings, whitewater, air and drips (words 68-83), starting-water shapes (84), ocean waves (148), more whitewater (404), whitewater area (408)
+const FLIP_PARAMS_BYTES = 1792;      // the solver's uniform block: settings, whitewater, air and drips (words 68-83), starting-water shapes (84), ocean waves (148), more whitewater (404), whitewater area (408)
 const FLIP_DEEPMAX = 200000;
 // the whitewater area: the tank widened k times about its centre and raised to up times its height (floor kept); never smaller than the tank
 function wwAreaBox(b, a) {
@@ -24,10 +24,10 @@ const FLIP_L = {
   initNew: [0, 7, 8, 10, 11, 12, 21, 31, 39], slotListBuild: [0, 12, 16, 18], argsSlots: [12, 14], growFree: [12, 20, 25],
   sortClear: [22], sortHist: [0, 1, 22], sortScan: [22], sortScatter: [0, 1, 2, 22, 23, 24, 26, 27], sortCopy: [0, 1, 2, 23, 24, 26, 27], unsort: [0, 1, 23, 26],
   clearSlots: [3, 5, 6, 9, 12, 18], p2g: [0, 1, 2, 3, 5, 6, 12, 16, 42], p2gWin: [0, 1, 2, 3, 5, 6, 12, 16], solidBuild: [0, 7, 10, 11, 12, 18, 19], classify: [0, 6, 7, 8, 12, 16, 18, 19, 31], sprayEmit: [0, 1, 2, 6, 7, 16, 28, 29, 30], spinEmit: [0, 1, 2, 3, 6, 16, 28, 29, 30], wwAdvect: [0, 1, 2], sprayStep: [0, 10, 11, 28, 29, 30, 32, 33], sprayDisp: [0, 15, 28, 29, 30], sprayDispSG: [0, 15, 28, 29, 30], dispBegin: [30], packDisp: [1, 12, 15, 30, 37, 38], wwSample: [0, 3, 6, 7, 16, 28, 29, 33], wwArgs: [0, 14, 30],
-  airClear: [0, 34], airSplatW: [0, 1, 2, 6, 16, 34], airSplatS: [0, 28, 29, 34], airUpdate: [0, 10, 11, 32, 34, 35], airCopy: [0, 32, 35], dripStep: [0, 6, 7, 10, 16, 28, 29, 30, 36],
+  airClear: [0, 34], airSplatW: [0, 1, 2, 6, 16, 34], airSplatS: [0, 28, 29, 34], airUpdate: [0, 3, 7, 10, 11, 16, 32, 34, 35], airDiv: [0, 32, 35], airRed: [0, 32, 35], airBlack: [0, 32, 35], airProj: [0, 32, 35], airDragW: [0, 1, 2, 6, 16, 32], airCopy: [0, 32, 35], dripStep: [0, 6, 7, 10, 16, 28, 29, 30, 36],
   normFaces: [0, 3, 5, 7, 10, 12, 16, 18, 19], divergence: [0, 3, 6, 7, 9, 12, 16, 18, 19],
   listClear: [12], settleMark: [0, 7, 8, 9, 12, 16, 18, 19, 39], buildList: [0, 7, 12, 13, 18, 19, 39], buildListSG: [0, 7, 12, 13, 18, 19, 39], listArgs: [0, 12, 14], rbRed: [0, 7, 8, 9, 12, 13, 16, 19], rbBlack: [0, 7, 8, 9, 12, 13, 16, 19],
-  project: [0, 3, 7, 8, 12, 16, 18, 19], extrap: [0, 3, 5, 7, 12, 16, 18, 19], g2pA: [0, 1, 2, 3, 6, 10, 11, 16, 42], g2pAo: [0, 1, 2, 3, 5, 6, 10, 11, 16, 42], sepClear: [0, 12, 18, 19, 41], sepRed: [0, 6, 7, 12, 13, 16, 19, 41], sepBlack: [0, 6, 7, 12, 13, 16, 19, 41], sepMove: [0, 1, 2, 7, 10, 11, 16, 41], subsample: [0, 1, 15], g2p: [0, 1, 2, 3, 5, 6, 10, 11, 16], ballistic: [0, 1, 2, 6, 10, 11, 16], g2pWin: [0, 1, 2, 3, 5, 6, 10, 11, 16],
+  project: [0, 3, 7, 8, 12, 16, 18, 19], extrap: [0, 3, 5, 7, 12, 16, 18, 19], g2pA: [0, 1, 2, 3, 6, 10, 11, 16, 42], g2pAo: [0, 1, 2, 3, 5, 6, 10, 11, 16, 42], sepClear: [0, 12, 18, 19, 41], sepRed: [0, 6, 7, 12, 13, 16, 19, 41], sepBlack: [0, 6, 7, 12, 13, 16, 19, 41], sepMove: [0, 1, 2, 7, 10, 11, 16, 41], subsample: [0, 1, 15], g2p: [0, 1, 2, 3, 5, 6, 10, 11, 16], ballistic: [0, 1, 2, 6, 10, 11, 16, 32], g2pWin: [0, 1, 2, 3, 5, 6, 10, 11, 16],
   nbPhi: [0, 6, 7, 9, 12, 16, 18, 19, 31], nbJacA: [0, 7, 9, 12, 16, 18, 19], nbJacB: [0, 7, 9, 12, 16, 18, 19], nbVel: [0, 3, 5, 7, 12, 16, 18, 19, 31],
   saveVel: [0, 3, 12, 18, 19, 31], nbKill: [0, 1, 2, 7, 16], nbReset: [12], nbDead: [0, 1, 12, 13], nbDeficit: [0, 6, 7, 12, 13, 16, 18, 19, 31], nbArgs: [0, 12, 14],
   nbSpawn: [0, 1, 2, 12, 13, 16, 31, 42], deepClear: [0, 15], deepPick: [0, 6, 7, 12, 15, 16, 18, 19, 31], deepFin: [12], ...FLIP_MG_L };
@@ -271,6 +271,10 @@ class FlipSim {
     u32[76] = ad ? ad.nx : 1; u32[77] = ad ? ad.ny : 1; u32[78] = ad ? ad.nz : 1;
     if (dr) this.dripUpdate(o.cols.slice(0, nc)); u32[79] = dr ? this.ndrip : 0;
     f32[80] = dr ? dr.rate : 0; f32[81] = dr ? dr.dry : 1; f32[82] = airo ? (airo.blur === undefined ? 0.35 : airo.blur) : 0;
+    // real air flow (airUpdate .. airProj) and the water feeling it (airDragW); turbulence size in solver units, octaves, change, swirl
+    this.airReal = !!(airo && ad && airo.real); this.airFeel = this.airReal && !!airo.feel && !this.opt.noFoam; this.airIters = (airo && airo.iters) || 20;
+    f32[440] = airo ? airo.size || 0 : 0; f32[441] = airo ? airo.oct || 3 : 3; f32[442] = airo ? airo.speed || 0 : 0; f32[443] = airo && this.airReal ? airo.swirl || 0 : 0;
+    f32[444] = this.airReal ? 1 : 0; f32[445] = this.airFeel ? 1 : 0; f32[446] = o.drag || 0; f32[447] = this.airIters;
     this.ab = wwAreaBox(b, ww.area); f32.set([this.ab.x0, this.ab.y0, this.ab.z0, 0, this.ab.x1, this.ab.y1, this.ab.z1, 0], 408);
     f32[83] = ww.spin === undefined ? 0.5 : ww.spin; f32[404] = Math.cos((ww.edge === undefined ? 70 : ww.edge) * Math.PI / 180); f32[405] = ww.erode === undefined ? 0.25 : ww.erode;
     f32[406] = ww.land === undefined ? 1 : ww.land; f32[407] = ww.trail === undefined ? 1 : ww.trail;
@@ -386,10 +390,13 @@ class FlipSim {
         dispatch(ps, 'sepMove', N);
       } }] : []),
       // opt.noFoam (benchmark row C) also leaves out the whitewater stages, so the row shows what whitewater costs
-      ...(this.sprayCap > 0 && this.airOnStep && !this.opt.noFoam ? [{ name: 'air', fn: (ps) => {   // air field first, so the whitewater moves with this step's air
+      ...(this.airOnStep && !this.opt.noFoam ? [{ name: 'air', fn: (ps) => {   // air field first, so the whitewater moves with this step's air
         const na = this.airDims.n;
         dispatch(ps, 'wwArgs', 1);
-        dispatch(ps, 'airClear', na); dispatch(ps, 'airSplatW', N); indirect(ps, 'airSplatS', 112); dispatch(ps, 'airUpdate', na); dispatch(ps, 'airCopy', na);
+        dispatch(ps, 'airClear', na); dispatch(ps, 'airSplatW', N); indirect(ps, 'airSplatS', 112); dispatch(ps, 'airUpdate', na);
+        if (this.airReal) { dispatch(ps, 'airDiv', na); for (let it = 0; it < this.airIters; it++) { dispatch(ps, 'airRed', na); dispatch(ps, 'airBlack', na); } dispatch(ps, 'airProj', na); }
+        dispatch(ps, 'airCopy', na);
+        if (this.airFeel) dispatch(ps, 'airDragW', N);   // the water feels this step's air
       } }] : []),
       // whitewater in three timed parts: sampling the water at each point, moving the points, and making new ones from the water
       ...(this.sprayCap > 0 && !this.opt.noFoam ? [

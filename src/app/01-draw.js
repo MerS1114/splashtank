@@ -63,7 +63,7 @@
     return { g: S.g * k, iters: S.iters, visc: S.visc, flip: S.flip, comp: S.sep > 0 ? 0 : 6, wind: windVec().map((v) => v * k), drag: S.airDrag * k, gust: S.gust * k, foamSens: S.foamSens * k, foamTau: S.foamTau,
       colMax: S.colMax * k, vmax: S.vmaxW * k, scale: S.scale || 1, vs: S.scale || 1, tear: S.tear * 0.5 * Math.pow(S.cellRatio, 3),
       spr: S.sprOn ? { rate: 12 * S.sprAmt, min: S.sprMin, life: S.sprLife, mist: S.sprMist, drag: S.sprDrag, mdrag: S.mistDrag, ww: { foamLife: S.wwFoamLife, rise: S.wwRise * k, crest: S.wwCrest, impact: S.wwImpact, spin: S.wwSpin, edge: S.wwEdge, erode: S.wwErode, land: S.wwLand, trail: S.wwTrail, area: wwArea() } } : null,
-      air: S.sprOn && S.airOn ? { on: true, couple: S.airCouple, decay: S.airDecay } : null,
+      air: S.airOn ? { on: true, couple: S.airCouple, decay: S.airDecay, real: S.airReal, feel: S.airFeel, size: S.turbSize * k, oct: S.turbOct, speed: S.turbSpeed, swirl: S.airSwirl, iters: 20 } : null,
       drip: S.sprOn && S.dripOn ? { on: true, rate: S.dripRate, dry: S.dripDry } : null,
       nb: nbCfg(), ocean: oceanCfg(), time: S.frame * DT };
   }
