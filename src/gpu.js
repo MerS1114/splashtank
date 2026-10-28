@@ -34,9 +34,13 @@ fn sdfEval(k: u32, p: vec3<f32>) -> vec4<f32> {
   return vec4<f32>(phi * colSize(k), wn / max(length(wn), 1e-9));
 }
 // world velocity of the collider's surface at p
+// (a growing shape adds, per own axis i, column i of R times the rate of size i times the point's unscaled coordinate i:
+// with row i = column i / size i that is row i (row i . d) size i rate i, and w holds size i rate i)
 fn colSurfVel(k: u32, p: vec3<f32>) -> vec3<f32> {
-  let c = cols[k * 8u + 5u].xyz;
-  return cols[k * 8u + 6u].xyz + cross(cols[k * 8u + 7u].xyz, p - c);
+  let c = cols[k * 8u + 5u].xyz; let d = p - c;
+  let r0 = cols[k * 8u + 2u]; let r1 = cols[k * 8u + 3u]; let r2 = cols[k * 8u + 4u];
+  let grow = r0.xyz * (dot(r0.xyz, d) * r0.w) + r1.xyz * (dot(r1.xyz, d) * r1.w) + r2.xyz * (dot(r2.xyz, d) * r2.w);
+  return cols[k * 8u + 6u].xyz + cross(cols[k * 8u + 7u].xyz, d) + grow;
 }
 `;
 
@@ -57,13 +61,14 @@ function packColliders(sim, cols) {
     sim.sdfSig = sig;
   }
   for (let k = 0; k < nc; k++) {
-    const c = cols[k], sd = c.sdf, R = c.R, j = k * 32, s = c.s || [1, 1, 1];
+    const c = cols[k], sd = c.sdf, R = c.R, j = k * 32, s = c.s || [1, 1, 1], g = c.g || [0, 0, 0];
     cf[j] = offs.get(sd.id); cf[j + 1] = sd.dims[0]; cf[j + 2] = sd.dims[1]; cf[j + 3] = sd.dims[2];
     cf[j + 4] = sd.origin[0]; cf[j + 5] = sd.origin[1]; cf[j + 6] = sd.origin[2]; cf[j + 7] = sd.cell;
-    // the rows take a world offset to the shape's own unscaled coordinates: (R s)^-1 = s^-1 R^T, row i = column i of R over size i
-    cf[j + 8] = R[0] / s[0]; cf[j + 9] = R[3] / s[0]; cf[j + 10] = R[6] / s[0]; cf[j + 11] = 0;
-    cf[j + 12] = R[1] / s[1]; cf[j + 13] = R[4] / s[1]; cf[j + 14] = R[7] / s[1]; cf[j + 15] = 0;
-    cf[j + 16] = R[2] / s[2]; cf[j + 17] = R[5] / s[2]; cf[j + 18] = R[8] / s[2]; cf[j + 19] = 0;
+    // the rows take a world offset to the shape's own unscaled coordinates: (R s)^-1 = s^-1 R^T, row i = column i of R over size i;
+    // their w is size i times its rate of change, for the surface speed of a growing or shrinking shape (colSurfVel)
+    cf[j + 8] = R[0] / s[0]; cf[j + 9] = R[3] / s[0]; cf[j + 10] = R[6] / s[0]; cf[j + 11] = g[0];
+    cf[j + 12] = R[1] / s[1]; cf[j + 13] = R[4] / s[1]; cf[j + 14] = R[7] / s[1]; cf[j + 15] = g[1];
+    cf[j + 16] = R[2] / s[2]; cf[j + 17] = R[5] / s[2]; cf[j + 18] = R[8] / s[2]; cf[j + 19] = g[2];
     cf[j + 20] = c.x; cf[j + 21] = c.y; cf[j + 22] = c.z; cf[j + 23] = Math.min(s[0], s[1], s[2]);   // distances in the grid times this are metres
     cf[j + 24] = c.vx; cf[j + 25] = c.vy; cf[j + 26] = c.vz; cf[j + 27] = 0;
     cf[j + 28] = c.wx; cf[j + 29] = c.wy; cf[j + 30] = c.wz; cf[j + 31] = 0;

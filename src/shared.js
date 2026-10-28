@@ -538,7 +538,8 @@ class SceneRunner {
     const lim2 = Math.pow(par.colMax || 20, 2);   // faster than this, an object's move counts as a jump and gives the water no speed
     const colOf = (o) => {   // collider record with velocity and angular velocity, for the pressure solves
       const R = eulerMat(o.rx || 0, o.yaw || 0, o.rz || 0), p = prev[o.id];
-      prev[o.id] = { x: o.x, y: o.y, z: o.z, R };
+      const sz = [o.sx || 1, o.sy || 1, o.sz || 1];
+      prev[o.id] = { x: o.x, y: o.y, z: o.z, R, sz };
       const c = { sdf: o.sdf, x: o.x, y: o.y, z: o.z, R, s: sizeOf(o), vx: 0, vy: 0, vz: 0, wx: 0, wy: 0, wz: 0 };
       if (p) {
         const vx = (o.x - p.x) / dt, vy = (o.y - p.y) / dt, vz = (o.z - p.z) / dt;
@@ -547,6 +548,10 @@ class SceneRunner {
         for (let r = 0; r < 3; r++) for (let q = 0; q < 3; q++) d[r * 3 + q] = R[r * 3] * P[q * 3] + R[r * 3 + 1] * P[q * 3 + 1] + R[r * 3 + 2] * P[q * 3 + 2];
         const wx = (d[7] - d[5]) / (2 * dt), wy = (d[2] - d[6]) / (2 * dt), wz = (d[3] - d[1]) / (2 * dt);
         if (wx * wx + wy * wy + wz * wz < lim2) { c.wx = wx; c.wy = wy; c.wz = wz; }
+        // growing or shrinking: per axis size times its rate of change (packColliders turns it into the surface's outward speed)
+        const ps = p.sz || [1, 1, 1], ext = o.sdf ? 0.5 * o.sdf.cell * Math.max(o.sdf.dims[0], o.sdf.dims[1], o.sdf.dims[2]) : 0.5;
+        const g = sz.map((v, i) => v * (v - ps[i]) / dt);
+        if (g.some((v, i) => v) && Math.max(...g.map((v, i) => Math.abs(v / sz[i]) * ext)) ** 2 < lim2) c.g = g;
       }
       return c;
     };

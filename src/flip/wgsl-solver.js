@@ -408,13 +408,14 @@ fn hash1(n0: u32) -> f32 {
   var x = n0; x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u;
   return f32(x) * 2.3283064e-10;
 }
+var<private> colHitV: vec3<f32>;   // collideP: the surface velocity of the last collider that pushed the point out (0 for none)
 fn collideP(pin: vec3<f32>) -> vec3<f32> {
   var p = pin;
-  let m = P.margin;
+  let m = P.margin; colHitV = vec3<f32>(0.0);
   for (var k = 0u; k < P.ncols; k++) {
     if (!colNear(k, p)) { continue; }
     let e = sdfEval(k, p);
-    if (e.x < P.q0) { p += e.yzw * (P.q0 - e.x); }
+    if (e.x < P.q0) { p += e.yzw * (P.q0 - e.x); colHitV = colSurfVel(k, p); }
   }
   let big = 1.0e9;
   let lo = vec3<f32>(select(P.x0 + m, -big, (P.open & 1u) != 0u), select(P.y0 + m, -big, (P.open & 4u) != 0u), select(P.z0 + m, -big, (P.open & 16u) != 0u));
@@ -539,8 +540,8 @@ fn g2pRest(i: u32, p: vec3<f32>, v0: vec3<f32>, fcell: vec3<i32>, vn: vec3<f32>,
   let pt = p + v * P.dt;
   let pc = collideP(pt);
   let dsp = pc - pt;
-  if (dot(dsp, dsp) > 1.0e-12) {
-    let nrm = normalize(dsp); let vd = dot(v, nrm);
+  if (dot(dsp, dsp) > 1.0e-12) {   // moving into a surface: take on its speed along the normal (a moving, turning or growing collider throws the water)
+    let nrm = normalize(dsp); let vd = dot(v - colHitV, nrm);
     if (vd < 0.0) { v = v - vd * nrm; }
   }
   let o = P.open;
@@ -576,7 +577,7 @@ fn ballistic(@builtin(global_invocation_id) g: vec3<u32>) {
     v = v + (airv - v) * (1.0 - exp(-kd * dt));
     let sp = length(v); if (sp > P.vmax) { v = v * (P.vmax / sp); }
     let pt = p + v * dt; let pc = collideP(pt); let dsp = pc - pt;
-    if (dot(dsp, dsp) > 1.0e-12) { let nrm = normalize(dsp); let vd = dot(v, nrm); if (vd < 0.0) { v = v - vd * nrm; } }
+    if (dot(dsp, dsp) > 1.0e-12) { let nrm = normalize(dsp); let vd = dot(v - colHitV, nrm); if (vd < 0.0) { v = v - vd * nrm; } }
     p = pc;
     let o = P.open;
     if (o != 0u && (((o & 1u) != 0u && p.x < P.x0) || ((o & 2u) != 0u && p.x > P.x1) || ((o & 4u) != 0u && p.y < P.y0) ||

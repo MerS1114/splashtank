@@ -119,7 +119,7 @@ async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
     for (let s = 0; s < sub; s++) {
       const t = (f - 1) * dtF + (s + 1) * dt;
       while (ei < ev.length && ev[ei].t <= t) { const e = ev[ei++]; sim.fillSphere(e.x, e.y, e.z, e.r, 0, -1, 0); }
-      runner.step(dt, sampleAll(t), { g: desc.g, iters, flip: desc.flip, comp: desc.comp, wind: desc.wind, drag: desc.drag, foamTau: desc.foamTau, gust: desc.gust, foamSens: desc.foamSens, colMax: desc.colMax, vmax: desc.vmaxW, scale: desc.scale || 1, vs: desc.scale || 1, tear: desc.tear || 0, spr: desc.spr || null,
+      runner.step(dt, sampleAll(t), { g: desc.g, iters, flip: desc.flip, apicFlip: desc.apicFlip, comp: desc.comp, wind: desc.wind, drag: desc.drag, foamTau: desc.foamTau, gust: desc.gust, foamSens: desc.foamSens, colMax: desc.colMax, vmax: desc.vmaxW, scale: desc.scale || 1, vs: desc.scale || 1, tear: desc.tear || 0, spr: desc.spr || null,
         nb: nbc, ocean: oc, time: t, air: desc.air || null, drip: desc.drip || null });
     }
     n = await sim.readbackInto(dst);
@@ -282,7 +282,7 @@ async function runDetailPass(c, desc, gpu, onProgress, isCancelled) {
   const openSide = [(open & 1) && !near(R.x0, b.x0), (open & 2) && !near(R.x1, b.x1), (open & 4) && !near(R.y0, b.y0), (open & 8) && !near(R.y1, b.y1), (open & 16) && !near(R.z0, b.z0), (open & 32) && !near(R.z1, b.z1)];
   const inLayer = (x, y, z) => (openSide[0] && x - R.x0 < Lw) || (openSide[1] && R.x1 - x < Lw) || (openSide[2] && y - R.y0 < Lw) || (openSide[3] && R.y1 - y < Lw) || (openSide[4] && z - R.z0 < Lw) || (openSide[5] && R.z1 - z < Lw);
   const inside = (x, y, z) => x >= R.x0 && x <= R.x1 && y >= R.y0 && y <= R.y1 && z >= R.z0 && z <= R.z1;
-  const par = (t) => ({ g: desc.g, iters: desc.iters, flip: desc.flip, comp: desc.comp, wind: desc.wind, drag: desc.drag, foamTau: desc.foamTau, gust: desc.gust, foamSens: desc.foamSens, colMax: desc.colMax,
+  const par = (t) => ({ g: desc.g, iters: desc.iters, flip: desc.flip, apicFlip: desc.apicFlip, comp: desc.comp, wind: desc.wind, drag: desc.drag, foamTau: desc.foamTau, gust: desc.gust, foamSens: desc.foamSens, colMax: desc.colMax,
     vmax: desc.vmaxW, scale, vs: scale, tear: desc.tear || 0, spr: null, nb: null, ocean: null, time: t, air: null, drip: null });
   const sampleAll = (t) => desc.objs.map((o) => sampleObjState(o, t));
   const pS = sim.pS, vS = sim.vS, dst = new Float32Array(maxN * 4), free = [];

@@ -237,7 +237,10 @@ class FlipSim {
     // the FLIP ratio is for a step of 1/60 s: every step blends in some smoothed grid motion, so five substeps at the same ratio smoothed a
     // splash five times as much (an impact lost half its spray once substeps rose with its speed). Per step it is ratio^(dt*60).
     const apic = !!this.opt.apic && !this.wwOnly; if (apic) this.ensureAff();
-    const flip = apic ? 0 : Math.pow(Math.min(Math.max(o.flip === undefined ? 0.95 : o.flip, 0), 1), dt * 60);   // APIC takes the grid velocity whole
+    // APIC takes the grid velocity plus, when the GPU can read the old grid (g2pAo), a FLIP part (Splash detail, o.apicFlip): pure APIC
+    // smooths away the small fast motion that tears a crown into spray and stirs the mist
+    const fr = apic ? (this.pipes.g2pAo ? (o.apicFlip === undefined ? 0 : o.apicFlip) : 0) : (o.flip === undefined ? 0.95 : o.flip);
+    const flip = Math.pow(Math.min(Math.max(fr, 0), 1), dt * 60);
     const F = [dt, h, 1 / h, o.g, flip, this.rest, o.comp === undefined ? 6 : o.comp, this.opt.mg ? 1.4 : (o.omega || this.omega()),
       b.x0, b.y0, b.z0, o.vmax || 14, 0.3 * this.d, 65536, b.x1, b.y1, b.z1, 0.3 * h,
       (o.wind && o.wind[0]) || 0, (o.wind && o.wind[1]) || 0, (o.wind && o.wind[2]) || 0, o.drag || 0, o.foamTau || 1.2, o.foamSens || 1, o.gust || 0, this.tm || 0, this.opt.noFoam ? 1 : 0, this.opt.noCull ? 1 : 0, this.stride, this.opt.fastAir ? 1 : 0];

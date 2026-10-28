@@ -90,6 +90,16 @@
       hull.keys = [K(0, 0.5), K(2, 0.5), K(8, 2.55), K(10, 2.55)];   // rises from the sea floor and out through the surface, about 3 m/s
       applyKeysAt(0);
     },
+    'Underwater blast': () => {
+      // a gas bubble from a blast under the surface: a sphere 0.42 m down swells to 5 times its size in 0.05 s (about 10 m/s at its
+      // surface), so it throws the water above it up and breaks the surface, holds, then collapses, and the water rushing back in
+      // meets in the middle and jets up
+      fillBox(0, 1, 0, 1.4, 0, 1);
+      const b = makeObj('sphere', { name: 'Blast', x: 0, y: 0.98, z: 0, r: 0.12 });
+      const K = (t, s) => ({ t, sx: s, sy: s, sz: s });
+      b.keys = [K(0, 1), K(0.25, 1), K(0.3, 5), K(0.5, 4.6), K(0.75, 1)];
+      applyKeysAt(0);
+    },
     'Fountain': () => {
       makeObj('emitter', { x: 0, y: 0.12, z: 0, az: 0, el: 90, speed: 6.2, radius: 0.1 });
       makeObj('sphere', { x: 0, y: 1.75, z: 0, r: 0.4 });
@@ -100,6 +110,8 @@
   const DEF_PARAMS = { foamSens: 1, foamTau: 1.2, gust: 1, airDrag: 0.3, colMax: 100, vmaxW: 50, subMax: 16, scale: 1 };
   let lastHadParams = false;
   const SCENE_CFG = {
+    // a wide tank in narrow band mode (only the water near the surface is particles), so the blast is small next to the sea around it
+    'Underwater blast': { dom: { w: 6, h: 4, d: 6 }, open: ALLC(false), linear: true, dur: 3, nb: true, cap: 450000, cam: { theta: 0.6, phi: 1.3, r: 11 } },
     'Cascade': { dom: { w: 7, h: 8, d: 3.6 }, open: ALLC(true), params: { foamSens: 0.6, foamTau: 2.2, gust: 1.5, airDrag: 0.5 }, cam: { theta: 0.6, phi: 1.2, r: 15 } },
     // at scene scale 10: a 60 m patch of open sea, 16 m deep, 3 m waves 40 m long, and an 18 m hull rising out of it
     'Ocean': { dom: { w: 6, h: 3.2, d: 6 }, open: Object.assign(ALLC(false), { y1: true }), params: { foamSens: 0.8, foamTau: 2, gust: 1, airDrag: 0.3, colMax: 300, vmaxW: 200, subMax: 16, scale: 10 },
