@@ -87,6 +87,11 @@ async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
   const sim = new FlipSim(gpu.dev, { d: desc.d, maxN: desc.maxN, size: desc.size, open: desc.open, ratio: desc.cellRatio });
   await sim.whenReady;   // the shared pipelines, compiled once per device
   sim.recycle = false; sim.cap = desc.maxN; sim.opt.fastAir = !!desc.fastAir; sim.opt.sort = !!desc.sortP; sim.opt.p2gWin = !!desc.p2gWin; sim.opt.ballistic = desc.ballistic !== false; sim.opt.settle = !!desc.settle; sim.opt.settleTol = desc.settleTol; sim.opt.mg = !!desc.mg; sim.opt.sep = desc.sep || 0; sim.opt.apic = !!desc.apic;
+  // Accuracy: Accurate: the water moves at most 0.6 of a cell a substep (Normal 1.5), particle separation relaxes twice as long, and the
+  // pressure iterations follow the water: after each frame the pressure left unsolved is measured, and the iterations rise until it is
+  // under ACC_TOL of the divergence (up to 8 times the normal count), and ease back when it is well under
+  const acc = !!desc.accurate, ACC_TOL = 0.001; let iters = desc.iters;
+  if (acc) sim.opt.sepIters = 16;
   if (desc.spr && desc.sprayCap) sim.setSprayCap(desc.sprayCap);
   if (desc.nbLook) sim.setDeepLook(true);
   const runner = new SceneRunner(sim);
@@ -98,7 +103,7 @@ async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
     else sim.fillSphere(f.x, f.y, f.z, f.r, 0, f.vy || 0, 0);
   }
   const dst = new Float32Array(desc.maxN * 4);
-  const fps = desc.fps, F = desc.frames, dtF = 1 / fps, minSub = desc.substeps, cfl = desc.cfl || 1.5, maxSub = Math.max(minSub, desc.maxSub || 16);
+  const fps = desc.fps, F = desc.frames, dtF = 1 / fps, minSub = desc.substeps, cfl = desc.cfl || (acc ? 0.6 : 1.5), maxSub = Math.max(minSub, acc ? Math.max(64, desc.maxSub || 0) : desc.maxSub || 16);
   const ev = desc.events.slice().sort((a, b) => a.t - b.t); let ei = 0;
   const t0 = Date.now();
   const sampleAll = (t) => desc.objs.map((o) => sampleObjState(o, t));
@@ -114,7 +119,7 @@ async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
     for (let s = 0; s < sub; s++) {
       const t = (f - 1) * dtF + (s + 1) * dt;
       while (ei < ev.length && ev[ei].t <= t) { const e = ev[ei++]; sim.fillSphere(e.x, e.y, e.z, e.r, 0, -1, 0); }
-      runner.step(dt, sampleAll(t), { g: desc.g, iters: desc.iters, flip: desc.flip, comp: desc.comp, wind: desc.wind, drag: desc.drag, foamTau: desc.foamTau, gust: desc.gust, foamSens: desc.foamSens, colMax: desc.colMax, vmax: desc.vmaxW, scale: desc.scale || 1, vs: desc.scale || 1, tear: desc.tear || 0, spr: desc.spr || null,
+      runner.step(dt, sampleAll(t), { g: desc.g, iters, flip: desc.flip, comp: desc.comp, wind: desc.wind, drag: desc.drag, foamTau: desc.foamTau, gust: desc.gust, foamSens: desc.foamSens, colMax: desc.colMax, vmax: desc.vmaxW, scale: desc.scale || 1, vs: desc.scale || 1, tear: desc.tear || 0, spr: desc.spr || null,
         nb: nbc, ocean: oc, time: t, air: desc.air || null, drip: desc.drip || null });
     }
     n = await sim.readbackInto(dst);
@@ -124,7 +129,11 @@ async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
     vmax = Math.max(1, mv);
     const st = sim.stats || {};
     const diag = Object.assign(bakeDiag(dst, n, sim.b, desc.vmaxW), { sub, objectSpeed: objV, fastestParticle: st.vmax, fluidCells: st.fluid, settled: st.settled, blocksUsed: st.sc, blockPool: sim.scap,
-      blocksNoRoom: (sim.ovfTotal || 0) - ovf0, ms: performance.now() - tf0 });
+      blocksNoRoom: (sim.ovfTotal || 0) - ovf0, ms: performance.now() - tf0, iters });
+    if (acc) {   // the pressure left unsolved after the frame's last substep steers the next frame's iterations
+      const q = await sim.presResidual(); diag.unsolved = q ? q.rel : null;
+      if (q && q.rel > ACC_TOL) iters = Math.min(desc.iters * 8, Math.ceil(iters * 1.5)); else if (q && q.rel < ACC_TOL / 4) iters = Math.max(desc.iters, Math.floor(iters * 0.85));
+    }
     const frame = packFrameBuf(dst, n, sim.b, sampleAll(f * dtF), desc.scale);
     if (sim.sprayCap) { const sd = await sim.readSpray(); if (sd) { frame.sp = packSprayFrame(sd, sim.ab || sim.b, 200000, (desc.spr && desc.spr.ww && desc.spr.ww.foamLife) || 3); diag.sprayPoints = frame.sp.alive; frame.sb = Object.assign({}, sim.ab || sim.b); } }
     if (desc.nbLook) { const dd = await sim.readDeep(); if (dd && dd.n) { frame.dp = packDeep(dd.p, dd.n, sim.b, desc.scale); diag.deepPoints = dd.n; } }

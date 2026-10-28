@@ -509,8 +509,11 @@ async function initGpu() {
     // timestamp queries (when the GPU offers them) time the solver on the GPU itself, without the wait for the browser to report back
     // subgroups (when offered) let the FLIP list kernels take room for a whole subgroup with one atomic add (wgsl-subgroups.js)
     const dev = await adapter.requestDevice({ requiredFeatures: ['timestamp-query', 'subgroups'].filter((f) => adapter.features.has(f)), requiredLimits: {
-      maxStorageBufferBindingSize: Math.min(lim.maxStorageBufferBindingSize, 1 << 29),
-      maxBufferSize: Math.min(lim.maxBufferSize, 1 << 29)
+      // what the GPU offers (desktop cards: 16 storage buffers a kernel and 2 GB buffers against the 8 and 512 MB asked for before), so finer
+      // grids fit and kernels may use a ninth buffer (flipStorage in flip/sim.js decides which kernels can be made)
+      maxStorageBufferBindingSize: lim.maxStorageBufferBindingSize,
+      maxBufferSize: lim.maxBufferSize,
+      maxStorageBuffersPerShaderStage: Math.min(lim.maxStorageBuffersPerShaderStage, 16)
     } });
     const log = (m) => { (window.__errLog = window.__errLog || []).push({ t: new Date().toISOString(), msg: String(m).slice(0, 400) }); };
     dev.addEventListener('uncapturederror', (ev) => log('GPU: ' + (ev.error && ev.error.message)));

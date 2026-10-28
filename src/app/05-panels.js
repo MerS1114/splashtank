@@ -349,6 +349,9 @@
     dRow.innerHTML = '<label data-tip="Preview bakes exactly what you see in the live view (the live spacing), quickly. Final and Fine divide the spacing by 1.5 and 2 and raise Max points to match, for a more detailed bake of the same scene (about 4 and 10 times the time).">Quality</label><div class="seg" id="seg-bkdetail" role="group" aria-label="Bake quality"><button type="button" data-v="1">Preview</button><button type="button" data-v="1.5">Final</button><button type="button" data-v="2">Fine</button></div>';
     bakeHolder.appendChild(dRow); setSeg($('#seg-bkdetail'), S.bkDetail);
     seg('#seg-bkdetail', (v) => { S.bkDetail = +v; updateEst(); });
+    const aRow = document.createElement('div'); aRow.className = 'row plain';
+    aRow.innerHTML = '<label data-tip="Normal bakes with the live solver\'s settings. Accurate takes more, smaller steps (water moves at most 0.6 of a grid cell a step instead of 1.5) and solves the pressure until the water is incompressible to a tenth of a percent, measuring after every frame and adding iterations where an impact needs them. Slower, often 2 to 4 times; for final bakes on a strong GPU.">Accuracy</label><div class="seg" id="seg-bkacc" role="group" aria-label="Accuracy"><button type="button" data-v="normal">Normal</button><button type="button" data-v="accurate">Accurate</button></div>';
+    bakeHolder.appendChild(aRow); setSeg($('#seg-bkacc'), S.bkAcc); seg('#seg-bkacc', (v) => { S.bkAcc = v; aRow.classList.toggle('nd', v !== 'normal'); }); aRow.classList.toggle('nd', S.bkAcc !== 'normal');
     const ri = document.createElement('div'); ri.className = 'pos'; ri.id = 'bake-res'; bakeHolder.appendChild(ri);
     updateEst();
   }

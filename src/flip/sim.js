@@ -27,7 +27,7 @@ const FLIP_L = {
   airClear: [0, 34], airSplatW: [0, 1, 2, 6, 16, 34], airSplatS: [0, 28, 29, 34], airUpdate: [0, 10, 11, 32, 34, 35], airCopy: [0, 32, 35], dripStep: [0, 6, 7, 10, 16, 28, 29, 30, 36],
   normFaces: [0, 3, 5, 7, 10, 12, 16, 18, 19], divergence: [0, 3, 6, 7, 9, 12, 16, 18, 19],
   listClear: [12], settleMark: [0, 7, 8, 9, 12, 16, 18, 19, 39], buildList: [0, 7, 12, 13, 18, 19, 39], buildListSG: [0, 7, 12, 13, 18, 19, 39], listArgs: [0, 12, 14], rbRed: [0, 7, 8, 9, 12, 13, 16, 19], rbBlack: [0, 7, 8, 9, 12, 13, 16, 19],
-  project: [0, 3, 7, 8, 12, 16, 18, 19], extrap: [0, 3, 5, 7, 12, 16, 18, 19], g2pA: [0, 1, 2, 3, 6, 10, 11, 16, 42], sepClear: [0, 12, 18, 19, 41], sepRed: [0, 6, 7, 12, 13, 16, 19, 41], sepBlack: [0, 6, 7, 12, 13, 16, 19, 41], sepMove: [0, 1, 2, 7, 10, 11, 16, 41], subsample: [0, 1, 15], g2p: [0, 1, 2, 3, 5, 6, 10, 11, 16], ballistic: [0, 1, 2, 6, 10, 11, 16], g2pWin: [0, 1, 2, 3, 5, 6, 10, 11, 16],
+  project: [0, 3, 7, 8, 12, 16, 18, 19], extrap: [0, 3, 5, 7, 12, 16, 18, 19], g2pA: [0, 1, 2, 3, 6, 10, 11, 16, 42], g2pAo: [0, 1, 2, 3, 5, 6, 10, 11, 16, 42], sepClear: [0, 12, 18, 19, 41], sepRed: [0, 6, 7, 12, 13, 16, 19, 41], sepBlack: [0, 6, 7, 12, 13, 16, 19, 41], sepMove: [0, 1, 2, 7, 10, 11, 16, 41], subsample: [0, 1, 15], g2p: [0, 1, 2, 3, 5, 6, 10, 11, 16], ballistic: [0, 1, 2, 6, 10, 11, 16], g2pWin: [0, 1, 2, 3, 5, 6, 10, 11, 16],
   nbPhi: [0, 6, 7, 9, 12, 16, 18, 19, 31], nbJacA: [0, 7, 9, 12, 16, 18, 19], nbJacB: [0, 7, 9, 12, 16, 18, 19], nbVel: [0, 3, 5, 7, 12, 16, 18, 19, 31],
   saveVel: [0, 3, 12, 18, 19, 31], nbKill: [0, 1, 2, 7, 16], nbReset: [12], nbDead: [0, 1, 12, 13], nbDeficit: [0, 6, 7, 12, 13, 16, 18, 19, 31], nbArgs: [0, 12, 14],
   nbSpawn: [0, 1, 2, 12, 13, 16, 31, 42], deepClear: [0, 15], deepPick: [0, 6, 7, 12, 15, 16, 18, 19, 31], deepFin: [12], ...FLIP_MG_L };
@@ -36,11 +36,14 @@ const FLIP_L = {
 // for many seconds on some GPUs (D3D shader compiles). pipes is set once all of them are ready.
 const FLIP_PIPES = new WeakMap();
 const WWSTAGES = new Set(['blocks', 'clear', 'p2g', 'classify', 'normFaces', 'air', 'ww sample', 'ww move', 'ww emit']);
+// storage buffers a kernel binds (0 and 38 are uniform blocks, 14 is the indirect arguments, bound as storage): kernels that need more than
+// the device offers (g2pAo needs 9) are not made, and the sim uses its 8-buffer version
+function flipStorage(name) { return FLIP_L[name].filter((k) => k !== 0 && k !== 38).length; }
 function flipPipes(device) {
   let sh = FLIP_PIPES.get(device); if (sh) return sh;
-  const sg = !!(device.features && device.features.has('subgroups'));
+  const sg = !!(device.features && device.features.has('subgroups')), sb = (device.limits && device.limits.maxStorageBuffersPerShaderStage) || 8;
   sh = { pipes: null, ms: 0, sg }; FLIP_PIPES.set(device, sh);
-  const t0 = performance.now(), mod = device.createShaderModule({ code: flipWGSL(sg) }), names = Object.keys(FLIP_L).filter((n) => sg || !n.endsWith('SG'));
+  const t0 = performance.now(), mod = device.createShaderModule({ code: flipWGSL(sg) }), names = Object.keys(FLIP_L).filter((n) => (sg || !n.endsWith('SG')) && flipStorage(n) <= sb);
   const one = (name) => {
     const desc = { layout: 'auto', compute: { module: mod, entryPoint: name } };
     if (!device.createComputePipelineAsync) return Promise.resolve(device.createComputePipeline(desc));
@@ -376,7 +379,7 @@ class FlipSim {
         sweep(2);
       } },
       { name: 'project', fn: (ps) => { indirect(ps, 'project', 64); if (nb) indirect(ps, 'saveVel', 64); if (this.opt.extrap !== false) indirect(ps, 'extrap', 64); } },
-      { name: 'g2p', fn: (ps) => dispatch(ps, apicOn ? 'g2pA' : this.opt.p2gWin ? 'g2pWin' : 'g2p', N) },
+      { name: 'g2p', fn: (ps) => dispatch(ps, apicOn ? (this.pipes.g2pAo ? 'g2pAo' : 'g2pA') : this.opt.p2gWin ? 'g2pWin' : 'g2p', N) },
       ...(this.opt.ballistic ? [{ name: 'ballistic', fn: (ps) => dispatch(ps, 'ballistic', N) }] : []),
       ...(this.opt.sep > 0 ? [{ name: 'separation', fn: (ps) => {   // particle separation (sepRelax): the potential over the fluid cells, then move the particles
         indirect(ps, 'sepClear', 64); for (let it = 0; it < (this.opt.sepIters || 8); it++) { indirect(ps, 'sepRed', 0); indirect(ps, 'sepBlack', 16); }

@@ -1,4 +1,39 @@
 // FLIP shader: one solver step (clear, particle to grid, classify, divergence, pressure, project, collisions, grid to particle).
+// The APIC grid to particle kernel in two versions (flipG2pA below): g2pA within 8 storage buffers, g2pAo also reading the old grid velocity
+// (a ninth) for the white water's turbulence term. Two texts, because a kernel that merely mentions a buffer needs it bound.
+function flipG2pA(name, old) { return /* wgsl */ `// Grid to particle, APIC (Simulation > Velocity transfer > APIC, Houdini's "Swirly"; Jiang et al. 2015 on a MAC grid with trilinear
+// weights): the particle takes the grid velocity (no FLIP part, so no FLIP noise) and keeps, per axis, the gradient of that velocity
+// component (the weights' gradients times the face velocities), which p2g adds back: rotation and shear survive the round trip that
+// plain PIC smooths away. g2pA does not read the old grid velocity (that keeps it within 8 storage buffers), so g2pRest gets the
+// particle's own velocity as the old one: impact white water still sees the change, the turbulence term (particle against grid) is 0.
+// g2pAo, for GPUs that offer a ninth storage buffer (most desktop cards), reads it too, so every white water source works.
+@compute @workgroup_size(256)
+fn ${name}(@builtin(global_invocation_id) g: vec3<u32>) {
+  let i = gid1(g); if (i >= P.n) { return; }
+  if (pos[i].y < DEADY || isBallistic(i)) { return; }
+  let p = pos[i].xyz; let v0 = vel[i].xyz; let fcell = particleCell(p);
+  var vn = v0 - vec3<f32>(0.0, P.gravity * P.dt, 0.0); var vo = v0;
+  var cm = array<vec3<f32>, 3>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+  if (hasStorage(fcell)) {
+    for (var axis = 0u; axis < 3u; axis++) {
+      var q = (p - vec3<f32>(P.x0, P.y0, P.z0)) * P.ih;
+      if (axis == 0u) { q.y -= 0.5; q.z -= 0.5; } else if (axis == 1u) { q.x -= 0.5; q.z -= 0.5; } else { q.x -= 0.5; q.y -= 0.5; }
+      let f0 = floor(q); let fr = q - f0; let i0 = vec3<i32>(f0);
+      var s = 0.0; var so = 0.0; var gr = vec3<f32>(0.0);
+      for (var c = 0u; c < 8u; c++) {
+        let dx = i32(c & 1u); let dy = i32((c >> 1u) & 1u); let dz = i32((c >> 2u) & 1u);
+        let wx = select(1.0 - fr.x, fr.x, dx == 1); let wy = select(1.0 - fr.y, fr.y, dy == 1); let wz = select(1.0 - fr.z, fr.z, dz == 1);
+        let gv = gvR(faceIndex(axis, i0.x + dx, i0.y + dy, i0.z + dz));
+        s += wx * wy * wz * gv;${old ? `\n        so += wx * wy * wz * gv0R(faceIndex(axis, i0.x + dx, i0.y + dy, i0.z + dz));` : ''}
+        gr += vec3<f32>(select(-1.0, 1.0, dx == 1) * wy * wz, wx * select(-1.0, 1.0, dy == 1) * wz, wx * wy * select(-1.0, 1.0, dz == 1)) * (P.ih * gv);
+      }
+      vn[axis] = s; vo[axis] = so; cm[axis] = gr;
+    }
+  }
+  for (var axis = 0u; axis < 3u; axis++) { aff[i * 3u + axis] = vec4<f32>(cm[axis], 0.0); }
+  g2pRest(i, p, v0, fcell, vn, ${old ? 'vo' : 'v0'});
+}
+`; }
 const FLIP_WGSL_SOLVER = /* wgsl */ `
 // ---- the solver ----
 // clears every block in use plus the spare slot 0
@@ -407,38 +442,7 @@ fn g2p(@builtin(global_invocation_id) g: vec3<u32>) {
   if (hasStorage(fcell)) { let s2 = sampleBoth(p); vn = s2.vn; vo = s2.vo; }
   g2pRest(i, p, v0, fcell, vn, vo);
 }
-// Grid to particle, APIC (Simulation > Velocity transfer > APIC, Houdini's "Swirly"; Jiang et al. 2015 on a MAC grid with trilinear
-// weights): the particle takes the grid velocity (no FLIP part, so no FLIP noise) and keeps, per axis, the gradient of that velocity
-// component (the weights' gradients times the face velocities), which p2g adds back: rotation and shear survive the round trip that
-// plain PIC smooths away. It does not read the old grid velocity (that keeps it within 8 buffers), so g2pRest gets the particle's own
-// velocity as the old one: the impact white water still sees the change, the turbulence term (particle against grid) is 0.
-@compute @workgroup_size(256)
-fn g2pA(@builtin(global_invocation_id) g: vec3<u32>) {
-  let i = gid1(g); if (i >= P.n) { return; }
-  if (pos[i].y < DEADY || isBallistic(i)) { return; }
-  let p = pos[i].xyz; let v0 = vel[i].xyz; let fcell = particleCell(p);
-  var vn = v0 - vec3<f32>(0.0, P.gravity * P.dt, 0.0);
-  var cm = array<vec3<f32>, 3>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
-  if (hasStorage(fcell)) {
-    for (var axis = 0u; axis < 3u; axis++) {
-      var q = (p - vec3<f32>(P.x0, P.y0, P.z0)) * P.ih;
-      if (axis == 0u) { q.y -= 0.5; q.z -= 0.5; } else if (axis == 1u) { q.x -= 0.5; q.z -= 0.5; } else { q.x -= 0.5; q.y -= 0.5; }
-      let f0 = floor(q); let fr = q - f0; let i0 = vec3<i32>(f0);
-      var s = 0.0; var gr = vec3<f32>(0.0);
-      for (var c = 0u; c < 8u; c++) {
-        let dx = i32(c & 1u); let dy = i32((c >> 1u) & 1u); let dz = i32((c >> 2u) & 1u);
-        let wx = select(1.0 - fr.x, fr.x, dx == 1); let wy = select(1.0 - fr.y, fr.y, dy == 1); let wz = select(1.0 - fr.z, fr.z, dz == 1);
-        let gv = gvR(faceIndex(axis, i0.x + dx, i0.y + dy, i0.z + dz));
-        s += wx * wy * wz * gv;
-        gr += vec3<f32>(select(-1.0, 1.0, dx == 1) * wy * wz, wx * select(-1.0, 1.0, dy == 1) * wz, wx * wy * select(-1.0, 1.0, dz == 1)) * (P.ih * gv);
-      }
-      vn[axis] = s; cm[axis] = gr;
-    }
-  }
-  for (var axis = 0u; axis < 3u; axis++) { aff[i * 3u + axis] = vec4<f32>(cm[axis], 0.0); }
-  g2pRest(i, p, v0, fcell, vn, v0);
-}
-// Grid to particle, grouped (Speed-ups > Grouped transfer, with p2gWin): the 256 particles of a workgroup usually lie within a few cells
+${flipG2pA('g2pA', false)}${flipG2pA('g2pAo', true)}// Grid to particle, grouped (Speed-ups > Grouped transfer, with p2gWin): the 256 particles of a workgroup usually lie within a few cells
 // once sorted, so the grid faces around them (an 11x11x11 window, one axis at a time, new and old velocity) are read into workgroup memory
 // once, instead of every particle looking up 48 faces, each through its block, on its own. The same sums in the same order: identical.
 @compute @workgroup_size(256)
