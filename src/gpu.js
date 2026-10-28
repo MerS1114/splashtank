@@ -1,8 +1,10 @@
 // WebGPU version of the same position based fluid solver. Mirrors FluidSim, including the boundary density.
 
 // shared by the PBF and FLIP shaders. cols holds 8 vec4 per collider, sdf all distance grids back to back.
-// (off nx ny nz) (origin cell) (Rt row 0) (Rt row 1) (Rt row 2) (position) (velocity) (angular velocity)
+// (off nx ny nz) (origin cell) (Rt row 0 / sx) (Rt row 1 / sy) (Rt row 2 / sz) (position, smallest size) (velocity) (angular velocity)
+// The rows take a world offset to the shape's own unscaled coordinates; sizes other than 1 come from the object's Scale.
 const SDF_WGSL = /* wgsl */ `
+fn colSize(k: u32) -> f32 { let s = cols[k * 8u + 5u].w; return select(1.0, s, s > 0.0); }
 fn sdfEval(k: u32, p: vec3<f32>) -> vec4<f32> {
   let a = cols[k * 8u]; let b = cols[k * 8u + 1u];
   let r0 = cols[k * 8u + 2u].xyz; let r1 = cols[k * 8u + 3u].xyz; let r2 = cols[k * 8u + 4u].xyz;
@@ -29,7 +31,7 @@ fn sdfEval(k: u32, p: vec3<f32>) -> vec4<f32> {
     let l = length(gl); gl = gl / max(l, 1e-9);
   }
   let wn = r0 * gl.x + r1 * gl.y + r2 * gl.z;
-  return vec4<f32>(phi, wn);
+  return vec4<f32>(phi * colSize(k), wn / max(length(wn), 1e-9));
 }
 // world velocity of the collider's surface at p
 fn colSurfVel(k: u32, p: vec3<f32>) -> vec3<f32> {
@@ -55,13 +57,14 @@ function packColliders(sim, cols) {
     sim.sdfSig = sig;
   }
   for (let k = 0; k < nc; k++) {
-    const c = cols[k], sd = c.sdf, R = c.R, j = k * 32;
+    const c = cols[k], sd = c.sdf, R = c.R, j = k * 32, s = c.s || [1, 1, 1];
     cf[j] = offs.get(sd.id); cf[j + 1] = sd.dims[0]; cf[j + 2] = sd.dims[1]; cf[j + 3] = sd.dims[2];
     cf[j + 4] = sd.origin[0]; cf[j + 5] = sd.origin[1]; cf[j + 6] = sd.origin[2]; cf[j + 7] = sd.cell;
-    cf[j + 8] = R[0]; cf[j + 9] = R[3]; cf[j + 10] = R[6]; cf[j + 11] = 0;
-    cf[j + 12] = R[1]; cf[j + 13] = R[4]; cf[j + 14] = R[7]; cf[j + 15] = 0;
-    cf[j + 16] = R[2]; cf[j + 17] = R[5]; cf[j + 18] = R[8]; cf[j + 19] = 0;
-    cf[j + 20] = c.x; cf[j + 21] = c.y; cf[j + 22] = c.z; cf[j + 23] = 0;
+    // the rows take a world offset to the shape's own unscaled coordinates: (R s)^-1 = s^-1 R^T, row i = column i of R over size i
+    cf[j + 8] = R[0] / s[0]; cf[j + 9] = R[3] / s[0]; cf[j + 10] = R[6] / s[0]; cf[j + 11] = 0;
+    cf[j + 12] = R[1] / s[1]; cf[j + 13] = R[4] / s[1]; cf[j + 14] = R[7] / s[1]; cf[j + 15] = 0;
+    cf[j + 16] = R[2] / s[2]; cf[j + 17] = R[5] / s[2]; cf[j + 18] = R[8] / s[2]; cf[j + 19] = 0;
+    cf[j + 20] = c.x; cf[j + 21] = c.y; cf[j + 22] = c.z; cf[j + 23] = Math.min(s[0], s[1], s[2]);   // distances in the grid times this are metres
     cf[j + 24] = c.vx; cf[j + 25] = c.vy; cf[j + 26] = c.vz; cf[j + 27] = 0;
     cf[j + 28] = c.wx; cf[j + 29] = c.wy; cf[j + 30] = c.wz; cf[j + 31] = 0;
   }

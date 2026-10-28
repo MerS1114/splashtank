@@ -133,7 +133,8 @@ fn colNear(k: u32, p: vec3<f32>) -> bool {
   let lp = vec3<f32>(dot(cols[k * 8u + 2u].xyz, d), dot(cols[k * 8u + 3u].xyz, d), dot(cols[k * 8u + 4u].xyz, d));
   let g = (lp - b.xyz) / b.w;
   let dims = cols[k * 8u].yzw;
-  return all(g > vec3<f32>(-1.0 - P.q0 / b.w)) && all(g < dims + vec3<f32>(P.q0 / b.w));
+  let m = P.q0 / (b.w * colSize(k));   // the margin in grid cells (the grid's cells are b.w times the object's size)
+  return all(g > vec3<f32>(-1.0 - m)) && all(g < dims + vec3<f32>(m));
 }
 fn colAt(p: vec3<f32>) -> i32 {
   for (var k = 0u; k < P.ncols; k++) { if (colNear(k, p) && sdfEval(k, p).x < P.q0) { return i32(k); } }

@@ -12,7 +12,7 @@
       d: bk.d, maxN: bk.maxN, fps: bk.fps, substeps: bk.sub, frames: Math.round(bk.dur * bk.fps), g: S.g / (S.scale || 1), iters: bk.iters, visc: S.visc, flip: S.flip, comp: S.sep > 0 ? 0 : 6, sep: S.sep, apic: S.xfer === 'apic', accurate: S.bkAcc === 'accurate', cellRatio: S.cellRatio, fastAir: S.fastAir, sortP: S.sortP, p2gWin: S.p2gWin, ballistic: S.ballistic, settle: S.settle, settleTol: S.settleTol, mg: S.mg, maxSub: bk.maxSub, detail: S.bkDetail || 1, colMax: simPar().colMax, vmaxW: simPar().vmax, wind: simPar().wind, drag: simPar().drag, gust: simPar().gust, foamSens: simPar().foamSens, foamTau: S.foamTau,
       scale: S.scale || 1, tear: simPar().tear, spr: simPar().spr, air: simPar().air, drip: simPar().drip, nb: bakeNb(bk.d), ocean: oceanCfg(), sprayCap: S.sprOn && S.engine === 'flip' ? S.sprCap : 0, nbLook: !!(S.nbLook && nbActive()), size: [S.dom.w, S.dom.h, S.dom.d], open: openMask(),
       fills: resolveFills().map((f) => Object.assign({}, f)), events: S.events.map((e) => Object.assign({}, e)),
-      objs: objs.map((o) => Object.assign(snap(o), { rec: o.rec && o.rec.arr.length >= 4 ? { start: o.rec.start, arr: Float32Array.from(o.rec.arr, (v, i) => v - (i % 4 === 0 ? S.org.x : i % 4 === 1 ? S.org.y : i % 4 === 2 ? S.org.z : 0)) } : null, keys: o.keys.length ? o.keys.map((k) => Object.assign({}, k, { x: k.x - S.org.x, y: k.y - S.org.y, z: k.z - S.org.z })) : null, smooth: S.tl.smooth }))
+      objs: objs.map((o) => Object.assign(snap(o), { rec: o.rec && o.rec.arr.length >= 4 ? { start: o.rec.start, arr: Float32Array.from(o.rec.arr, (v, i) => v - (i % 4 === 0 ? S.org.x : i % 4 === 1 ? S.org.y : i % 4 === 2 ? S.org.z : 0)) } : null, keys: o.keys.length ? o.keys.map((k) => k.x === undefined ? Object.assign({}, k) : Object.assign({}, k, { x: k.x - S.org.x, y: k.y - S.org.y, z: k.z - S.org.z })) : null, smooth: S.tl.smooth }))
     };
   }
   function setBakeUI(running) {
@@ -361,7 +361,7 @@
       const o = objs.find((q) => q.id === id); if (!o) return;
       const k4 = k * 6, ao = A.objs, bo = B.objs, L = (j) => ao[k4 + j] + (bo[k4 + j] - ao[k4 + j]) * w;
       o.group.position.set(L(0) + og.x, L(1) + og.y, L(2) + og.z);
-      if (o.kind === 'mesh') o.group.rotation.set(L(3), L(4), L(5), 'ZYX');
+      if (o.kind === 'mesh') { o.group.rotation.set(L(3), L(4), L(5), 'ZYX'); sizeAt(o, (a + w) / c.fps); }
     });
     return w < 0.5 ? SLOTS[sa].alive : SLOTS[sb].alive;
   }

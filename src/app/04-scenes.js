@@ -18,13 +18,15 @@
   }
   // a water volume object, as a fill record in solver coordinates
   function volRec(o) {
-    if (!o.water || !o.sdf) return null;
-    const R = eulerMat(o.rx, o.yaw, o.rz), ox = S.org.x, oy = S.org.y, oz = S.org.z, lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
-    for (const q of o.mesh.v) {
+    if (!o.water) return null;
+    ensureSDF(o); if (!o.sdf) return null;
+    const R = eulerMat(o.rx, o.yaw, o.rz), ox = S.org.x, oy = S.org.y, oz = S.org.z, lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9], sx = o.sx || 1, sy = o.sy || 1, sz = o.sz || 1;
+    for (const v of o.mesh.v) {
+      const q = [v[0] * sx, v[1] * sy, v[2] * sz];
       const w = [R[0] * q[0] + R[1] * q[1] + R[2] * q[2] + o.pos.x - ox, R[3] * q[0] + R[4] * q[1] + R[5] * q[2] + o.pos.y - oy, R[6] * q[0] + R[7] * q[1] + R[8] * q[2] + o.pos.z - oz];
       for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], w[k]); hi[k] = Math.max(hi[k], w[k]); }
     }
-    return { t: 'vol', sdf: o.sdf, x: o.pos.x - ox, y: o.pos.y - oy, z: o.pos.z - oz, R, lo, hi };
+    return { t: 'vol', sdf: o.sdf, x: o.pos.x - ox, y: o.pos.y - oy, z: o.pos.z - oz, R, s: sizeOf(o), lo, hi };
   }
   function fillNow(o) {
     if (loadingScene) return;
@@ -150,8 +152,8 @@
     return {
       objs: objs.map((o) => ({
         id: o.id, shape: o.shape, name: o.name, x: o.target.x, y: o.target.y, z: o.target.z, px: o.pos.x, py: o.pos.y, pz: o.pos.z,
-        rx: o.rx, yaw: o.yaw, rz: o.rz, spin: o.spin, az: o.az, el: o.el, speed: o.speed, radius: o.radius, on: o.on, mode: o.mode, spread: o.spread, density: o.density, turb: o.turb, water: o.water,
-        mesh: o.mesh ? { v: o.mesh.v.map((q) => q.slice()), f: o.mesh.f.map((q) => q.slice()) } : null, sdf: o.sdf || null,
+        rx: o.rx, yaw: o.yaw, rz: o.rz, sx: o.sx, sy: o.sy, sz: o.sz, lockScale: !!o.lockScale, spin: o.spin, az: o.az, el: o.el, speed: o.speed, radius: o.radius, on: o.on, mode: o.mode, spread: o.spread, density: o.density, turb: o.turb, water: o.water,
+        mesh: o.mesh ? { v: o.mesh.v.map((q) => q.slice()), f: o.mesh.f.map((q) => q.slice()) } : null, sdf: o.sdf || null, sdfDirty: !!o.sdfDirty,
         keys: o.keys.map((k) => Object.assign({}, k)), rec: o.rec
       })),
       sel: [...selSet].map((o) => o.id), active: selected ? selected.id : null, ui: uiMode, edit: editO ? editO.id : null

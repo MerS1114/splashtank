@@ -2,34 +2,66 @@
   const kfNames = $('#kf-names'), kfTracks = $('#kf-tracks');
   const FPS_TL = 24;
   function sortKeys(o) { o.keys.sort((a, c) => a.t - c.t); }
-  function poseOf(o) {
-    const src = S.playing ? o.pos : o.target;
-    const k = { t: 0, x: src.x, y: src.y, z: src.z, rx: o.rx || 0, yaw: o.yaw || 0, rz: o.rz || 0 };
-    if (o.kind === 'emitter') { k.on = o.on; k.speed = o.speed; }
+  // the channel groups an object can key (KEY_GROUPS in shared.js), as Blender's Location, Rotation and Scale; a source has Aim, Radius,
+  // Speed and Emitting instead of Rotation and Scale
+  const GROUP_NAME = { loc: 'Location', rot: 'Rotation', scale: 'Scale', aim: 'Aim', radius: 'Radius', speed: 'Speed', on: 'Emitting' };
+  const objGroups = (o) => o.kind === 'emitter' ? ['loc', 'aim', 'radius', 'speed', 'on'] : ['loc', 'rot', 'scale'];
+  // the groups a transform keys when auto keying is on, as in Blender: Move keys Location, Rotate keys Rotation (a source's Aim), Scale
+  // keys Scale (a source's Radius)
+  const tfGroups = (o, type) => type === 'g' ? ['loc'] : type === 'r' ? [o.kind === 'emitter' ? 'aim' : 'rot'] : [o.kind === 'emitter' ? 'radius' : 'scale'];
+  function poseOf(o, groups) {
+    const src = S.playing ? o.pos : o.target, k = { t: 0 };
+    const val = { x: src.x, y: src.y, z: src.z, rx: o.rx || 0, yaw: o.yaw || 0, rz: o.rz || 0, sx: o.sx || 1, sy: o.sy || 1, sz: o.sz || 1, az: o.az, el: o.el, radius: o.radius, speed: o.speed, on: o.on };
+    for (const g of groups) for (const c of KEY_GROUPS[g]) k[c] = val[c];
     return k;
   }
-  function addKey(o, t) {
+  const keyGroupsOf = (k) => Object.keys(KEY_GROUPS).filter((g) => keyHas(k, g));
+  // key the given channel groups (all the object's groups if none given) at time t; a key already on that frame gets them added or updated
+  function addKey(o, t, groups, quiet) {
+    groups = (groups || objGroups(o)).filter((g) => objGroups(o).includes(g)); if (!groups.length) return;
     t = clamp(Math.round(t * FPS_TL) / FPS_TL, 0, S.tl.dur);
-    const k = poseOf(o); k.t = t;
+    const k = poseOf(o, groups); k.t = t;
     const ex = o.keys.find((q) => Math.abs(q.t - t) < 0.5 / FPS_TL);
     if (ex) Object.assign(ex, k, { t: ex.t }); else o.keys.push(k);
-    sortKeys(o); S.selKey = { o, k: ex || k }; renderKF(); updateEst(); lcClear();
+    sortKeys(o); S.selKey = { o, k: ex || k };
+    if (!quiet) { renderKF(); updateEst(); lcClear(); markKeyed(); }
   }
-  function autoKey(o) { if (S.tl.auto && o.keys.length) addKey(o, S.tl.t); }
+  // Blender's auto keying (the record button): with it on, changing an object keys what changed, on the frame shown
+  function autoKey(o, groups) { if (S.tl.auto && !S.playing) addKey(o, S.tl.t, groups); }
+  // Alt+I: take the given groups (all if none given) off the key on the frame shown; a key left with nothing is removed
+  function clearKeyAt(o, t, groups) {
+    const ex = o.keys.find((q) => Math.abs(q.t - t) < 0.5 / FPS_TL); if (!ex) return false;
+    for (const g of groups || Object.keys(KEY_GROUPS)) for (const c of KEY_GROUPS[g]) delete ex[c];
+    if (!keyGroupsOf(ex).length) { o.keys.splice(o.keys.indexOf(ex), 1); if (S.selKey && S.selKey.k === ex) S.selKey = null; }
+    renderKF(); updateEst(); lcClear(); markKeyed(); return true;
+  }
   function deleteKey() {
     const sk = S.selKey; if (!sk) return;
     const i = sk.o.keys.indexOf(sk.k); if (i >= 0) sk.o.keys.splice(i, 1);
-    S.selKey = null; renderKF(); updateEst(); lcClear();
+    S.selKey = null; renderKF(); updateEst(); lcClear(); markKeyed();
+  }
+  // fields coloured as in Blender: yellow where the group has a key on the frame shown, green where it is animated
+  function markKeyed() {
+    const o = selected; if (!o) return;
+    const at = o.keys.find((q) => Math.abs(q.t - S.tl.t) < 0.5 / FPS_TL);
+    document.querySelectorAll('#params [data-kg]').forEach((row) => {
+      const g = row.dataset.kg, any = o.keys.some((k) => keyHas(k, g)), now = !!at && keyHas(at, g);
+      row.classList.toggle('kf-now', now); row.classList.toggle('kf-anim', any && !now);
+    });
+  }
+  // a shape's size at time t from its Scale keys (bake and live cache playback, which record only position and rotation)
+  function sizeAt(o, t) {
+    const k = o.keys.length && o.keys.some((q) => keyHas(q, 'scale')) ? keyPose(o.keys, t, S.tl.smooth) : null;
+    if (k) o.group.scale.set(k.sx, k.sy, k.sz); else o.group.scale.set(o.sx || 1, o.sy || 1, o.sz || 1);
   }
   // put every keyed object where its keys say it is at time t
   function applyKeysAt(t) {
     for (const o of objs) {
       if (!o.keys.length) continue;
-      const k = keyPose(o.keys, t, S.tl.smooth);
-      o.target.set(k.x, k.y, k.z); o.pos.copy(o.target); o.rx = k.rx || 0; o.yaw = k.yaw || 0; o.rz = k.rz || 0;
-      if (o.kind === 'emitter') { if (k.on !== undefined) o.on = k.on; if (k.speed !== undefined) o.speed = k.speed; }
+      poseObj(o, keyPose(o.keys, t, S.tl.smooth));
       syncMesh(o);
     }
+    refreshFields(); markKeyed();
   }
   function setDur(v) {
     v = clamp(Math.round(v * 2) / 2, 1, 60); S.tl.dur = v; S.bk.dur = v;
@@ -66,7 +98,7 @@
       const row = document.createElement('div'); row.className = 'kf-row' + (o === selected ? ' cur' : ''); row.dataset.role = 'row'; row.dataset.oid = o.id;
       for (const k of o.keys) {
         const d = document.createElement('div'); d.className = 'kf-key' + (o.kind === 'emitter' ? ' emitter' : '') + (S.selKey && S.selKey.k === k ? ' cur' : '');
-        d.style.left = (k.t / span) * 100 + '%'; d.dataset.role = 'key'; d.title = o.name + ' at ' + k.t.toFixed(2) + ' s';
+        d.style.left = (k.t / span) * 100 + '%'; d.dataset.role = 'key'; d.title = o.name + ' at ' + k.t.toFixed(2) + ' s: ' + keyGroupsOf(k).map((g) => GROUP_NAME[g]).join(', ');
         d._o = o; d._k = k; row.appendChild(d);
       }
       kfTracks.appendChild(row);

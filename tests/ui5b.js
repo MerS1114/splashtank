@@ -34,13 +34,13 @@ const wait=(ms)=>new Promise(r=>setTimeout(r,ms));
  console.log('magnet edge snap while playing', JSON.stringify(r2));
  await pg.click('#btn-play'); await wait(300);
  // 4. local vs global scale on a turned cube
- const sc = await ev(()=>{ const s=window.__splash, o=s.objs.find(q=>q.kind==='mesh'); s.select(o); o.yaw=Math.PI/4; o.rx=0; o.rz=0; const ext=(o)=>{ const R=[[1,0,0],[0,1,0],[0,0,1]]; let lx=[1e9,-1e9]; o.mesh.v.forEach(q=>{ lx[0]=Math.min(lx[0],q[0]); lx[1]=Math.max(lx[1],q[0]); }); return +(lx[1]-lx[0]).toFixed(3); };
+ const sc = await ev(()=>{ const s=window.__splash, o=s.objs.find(q=>q.kind==='mesh'); s.select(o); o.yaw=Math.PI/4; o.rx=0; o.rz=0; const ext=(o)=>{ const R=[[1,0,0],[0,1,0],[0,0,1]]; let lx=[1e9,-1e9]; o.mesh.v.forEach(q=>{ lx[0]=Math.min(lx[0],q[0]); lx[1]=Math.max(lx[1],q[0]); }); return +((lx[1]-lx[0])*(o.sx||1)).toFixed(3); };
    const e0=ext(o);
    s.setOrient('local'); s.startTf('s',{axis:'x'}); for(const k of ['2','Enter']) s.modalKey(new KeyboardEvent('keydown',{key:k})); const eL=ext(o);
    s.undo(); const o2=s.objs.find(q=>q.kind==='mesh'); o2.yaw=Math.PI/4; s.select(o2);
    s.setOrient('global'); s.startTf('s',{axis:'x'}); for(const k of ['2','Enter']) s.modalKey(new KeyboardEvent('keydown',{key:k}));
    const o3=s.objs.find(q=>q.kind==='mesh'); const wx=[1e9,-1e9]; o3.mesh.v.forEach(q=>{ const c=Math.cos(o3.yaw), sn=Math.sin(o3.yaw); const x=c*q[0]+sn*q[2]; wx[0]=Math.min(wx[0],x); wx[1]=Math.max(wx[1],x); });
-   return {e0, local:eL, globalLocalX:ext(o3), worldX:+(wx[1]-wx[0]).toFixed(3)}; });
+   return {e0, local:eL, globalLocalX:ext(o3), scaleLocal:[o3.sx,o3.sy,o3.sz].map(v=>+v.toFixed(3))}; });
  console.log('scale local/global', JSON.stringify(sc));
  await ev(()=>window.__splash.undo()); await wait(200);
  // 5. edit mode looks

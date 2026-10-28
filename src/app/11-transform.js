@@ -36,10 +36,11 @@
       const list = [...selSet];
       if (!list.length) { flash('Click an object first.'); return; }
       pivot = new THREE.Vector3(); list.forEach((o) => pivot.add(o.target)); pivot.multiplyScalar(1 / list.length);
-      rec = { edit: false, list, v0: list.map((o) => o.kind === 'mesh' && o.mesh ? o.mesh.v.map((q) => q.slice()) : null), orig: list.map((o) => ({ x: o.target.x, y: o.target.y, z: o.target.z, rx: o.rx, yaw: o.yaw, rz: o.rz, az: o.az, el: o.el, radius: o.radius })) };
+      rec = { edit: false, list, orig: list.map((o) => ({ x: o.target.x, y: o.target.y, z: o.target.z, rx: o.rx, yaw: o.yaw, rz: o.rz, sx: o.sx || 1, sy: o.sy || 1, sz: o.sz || 1, az: o.az, el: o.el, radius: o.radius })) };
     }
     if (!opts.noUndo) pushUndo();
-    tf = Object.assign(rec, { type, pivot, axis: opts.axis || null, nrm: opts.nrm || null, plane: false, local: false, num: '', m0: { x: lastM.x, y: lastM.y }, fromDrag: !!opts.fromDrag, structural: !!opts.noUndo, ang: 0, prevA: null, d: new THREE.Vector3(), f: [1, 1, 1] });
+    tf = Object.assign(rec, { type, pivot, axis: opts.axis || null, nrm: opts.nrm || null, plane: false, local: false, num: '', m0: opts.m0 || { x: lastM.x, y: lastM.y }, fromDrag: !!opts.fromDrag, structural: !!opts.noUndo, ang: 0, prevA: null, d: new THREE.Vector3(), f: [1, 1, 1] });
+    if (type === 'i') { tf.inset = rec.vs.map((i) => opts.insetMap.get(i) || { d: [0, 0, 0], max: 0 }); tf.insetBase = opts.insetBase; tf.individual = !!opts.individual; tf.dist = 0; }
     const p = toScreen(pivot); tf.prevA = Math.atan2(lastM.y - p.y, lastM.x - p.x);
     canvas.style.cursor = type === 'g' ? 'move' : 'crosshair';
     evalTf(); hud();
@@ -75,6 +76,12 @@
       if (t.num !== '') { const v = parseFloat(t.num); ang = isNaN(v) ? 0 : v / R2D; }
       else if (snapAct(cur)) ang = Math.round(ang * R2D / 5) * 5 / R2D;
       t.angRad = ang; t.angDeg = ang * R2D; t.rotAxis = axis.clone().normalize();
+    } else if (t.type === 'i') {   // inset: how far the mouse has come towards the faces' centre, in metres at the faces
+      const p = toScreen(t.pivot), d0 = Math.hypot(p0.x - p.x, p0.y - p.y), d1 = Math.hypot(cur.x - p.x, cur.y - p.y);
+      const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0), q = toScreen(t.pivot.clone().add(right)), ppm = Math.max(Math.hypot(q.x - p.x, q.y - p.y), 1e-3);
+      let dist = t.num !== '' ? parseFloat(t.num) : Math.max(0, (d0 - d1) / ppm);
+      if (isNaN(dist)) dist = 0; if (t.num === '' && snapAct(cur)) dist = Math.round(dist / 0.01) * 0.01;
+      t.dist = Math.max(0, dist);
     } else {
       const p = toScreen(t.pivot);
       let k;
@@ -85,7 +92,7 @@
       }
       k = Math.max(0.02, k); t.k = k;
       const f = [1, 1, 1];
-      if (!t.axis) f[0] = f[1] = f[2] = k;
+      if (!t.axis || (!t.edit && t.list.every((o) => o.lockScale || o.kind !== 'mesh'))) f[0] = f[1] = f[2] = k;   // locked proportions scale evenly
       else if (t.plane) { for (let i = 0; i < 3; i++) if ('xyz'[i] !== t.axis) f[i] = k; }
       else f['xyz'.indexOf(t.axis)] = k;
       t.f = f;
@@ -122,7 +129,7 @@
     if (t.edit) { t.o.group.updateMatrixWorld(true); t.orig.forEach((q) => srcs.push(worldOfLocal(t.o, q))); }
     else t.list.forEach((o, k) => {
       const q = t.orig[k], P0 = new THREE.Vector3(q.x, q.y, q.z);
-      if (o.kind === 'mesh' && o.mesh) { const R = eulerMat(q.rx, q.yaw, q.rz); o.mesh.v.forEach((v) => srcs.push(new THREE.Vector3(R[0] * v[0] + R[1] * v[1] + R[2] * v[2], R[3] * v[0] + R[4] * v[1] + R[5] * v[2], R[6] * v[0] + R[7] * v[1] + R[8] * v[2]).add(P0))); }
+      if (o.kind === 'mesh' && o.mesh) { const R = eulerMat(q.rx, q.yaw, q.rz); o.mesh.v.forEach((v0) => { const v = [v0[0] * q.sx, v0[1] * q.sy, v0[2] * q.sz]; srcs.push(new THREE.Vector3(R[0] * v[0] + R[1] * v[1] + R[2] * v[2], R[3] * v[0] + R[4] * v[1] + R[5] * v[2], R[6] * v[0] + R[7] * v[1] + R[8] * v[2]).add(P0)); }); }
       srcs.push(P0);
     });
     t._src = srcs; return srcs;
@@ -150,16 +157,19 @@
   function applyTf() {
     const t = tf;
     if (t.edit) {
-      const o = t.o, R = eulerMat(o.rx, o.yaw, o.rz), V = o.mesh.v;
+      // worked in the object's rotated frame at its real size (points times Scale), then divided by Scale again, so moves, turns and
+      // scales of points are true to the view on a scaled object
+      const o = t.o, R = eulerMat(o.rx, o.yaw, o.rz), V = o.mesh.v, s = [o.sx || 1, o.sy || 1, o.sz || 1], pv = [t.pivL[0] * s[0], t.pivL[1] * s[1], t.pivL[2] * s[2]];
       const toL = (w) => new THREE.Vector3(R[0] * w.x + R[3] * w.y + R[6] * w.z, R[1] * w.x + R[4] * w.y + R[7] * w.z, R[2] * w.x + R[5] * w.y + R[8] * w.z);
       t.vs.forEach((vi, k) => {
-        const q = t.orig[k]; let r;
+        const q0 = t.orig[k], q = [q0[0] * s[0], q0[1] * s[1], q0[2] * s[2]]; let r;
         if (t.type === 'g') { const dl = toL(t.d); r = [q[0] + dl.x, q[1] + dl.y, q[2] + dl.z]; }
         else if (t.type === 'r') {
-          const al = toL(t.rotAxis).normalize(), v = new THREE.Vector3(q[0] - t.pivL[0], q[1] - t.pivL[1], q[2] - t.pivL[2]).applyAxisAngle(al, t.angRad || 0);
-          r = [t.pivL[0] + v.x, t.pivL[1] + v.y, t.pivL[2] + v.z];
-        } else { const M = t._M || (t._M = scaleMatL(R, t.f, useLocalAx())), w = mul3(M, q[0] - t.pivL[0], q[1] - t.pivL[1], q[2] - t.pivL[2]); r = [t.pivL[0] + w[0], t.pivL[1] + w[1], t.pivL[2] + w[2]]; }
-        V[vi] = r;
+          const al = toL(t.rotAxis).normalize(), v = new THREE.Vector3(q[0] - pv[0], q[1] - pv[1], q[2] - pv[2]).applyAxisAngle(al, t.angRad || 0);
+          r = [pv[0] + v.x, pv[1] + v.y, pv[2] + v.z];
+        } else if (t.type === 'i') { const iv = t.inset[k], d = Math.min(t.dist || 0, iv.max); r = [q[0] + iv.d[0] * d, q[1] + iv.d[1] * d, q[2] + iv.d[2] * d]; }
+        else { const M = t._M || (t._M = scaleMatL(R, t.f, useLocalAx())), w = mul3(M, q[0] - pv[0], q[1] - pv[1], q[2] - pv[2]); r = [pv[0] + w[0], pv[1] + w[1], pv[2] + w[2]]; }
+        V[vi] = [r[0] / s[0], r[1] / s[1], r[2] / s[2]];
       });
       t._M = null; meshGeo(o); updateOverlay();
     } else {
@@ -179,9 +189,13 @@
           }
         } else {
           if (multi) { o.target.set(t.pivot.x + (q.x - t.pivot.x) * t.f[0], t.pivot.y + (q.y - t.pivot.y) * t.f[1], t.pivot.z + (q.z - t.pivot.z) * t.f[2]); if (o.kind === 'emitter') clampEm(o, o.target); }
-          if (o.kind === 'mesh' && t.v0[k]) {   // the shape is scaled along the global or the object's own axes
-            const M = scaleMatL(eulerMat(q.rx, q.yaw, q.rz), t.f, frameObj() ? useLocalAx() : S.orient === 'local');
-            o.mesh.v = t.v0[k].map((v) => mul3(M, v[0], v[1], v[2])); meshGeo(o);
+          if (o.kind === 'mesh') {   // the object's Scale, along its own axes; a factor along a global axis goes to its own axes by how much each lines up with it
+            let lf = t.f;
+            if (!(frameObj() ? useLocalAx() : S.orient === 'local')) {
+              const R = eulerMat(q.rx, q.yaw, q.rz); lf = [0, 0, 0];
+              for (let i = 0; i < 3; i++) for (let a = 0; a < 3; a++) lf[i] += R[a * 3 + i] * R[a * 3 + i] * t.f[a];
+            }
+            o.sx = clamp(q.sx * lf[0], 0.02, 1000); o.sy = clamp(q.sy * lf[1], 0.02, 1000); o.sz = clamp(q.sz * lf[2], 0.02, 1000);
           }
           else o.radius = clamp(q.radius * t.k, 0.03, 0.5);
         }
@@ -196,14 +210,10 @@
     const t = tf; if (!t) return;
     tf = null; canvas.style.cursor = 'default';
     if (t.edit) {
-      rebuildSDFLater(t.o);
+      shapeChanged(t.o);   // the water sees the new shape once you leave edit mode, play, step or reset (see ensureSDF)
       meshGeo(t.o); edList = meshEdges(t.o.mesh); updateOverlay();
     } else {
-      for (const o of t.list) {
-        if (t.type === 's' && o.kind === 'mesh') { o.group.scale.set(1, 1, 1); meshGeo(o); rebuildSDFLater(o); }
-        syncMesh(o);
-        if (!S.playing && o.keys.length) autoKey(o);
-      }
+      for (const o of t.list) { syncMesh(o); autoKey(o, tfGroups(o, t.type)); }
       updateEst();
     }
     renderUI(); hud();
@@ -211,7 +221,6 @@
   function cancelTf() {
     if (!tf) return;
     const t = tf; tf = null; canvas.style.cursor = 'default';
-    if (!t.edit) t.list.forEach((o) => o.group.scale.set(1, 1, 1));
     const keep = t.edit && !t.structural ? { sm: ES.sm, v: new Set(ES.v), e: new Set(ES.e), f: new Set(ES.f) } : null;
     undo(true);   // back to the state saved when the move started
     if (keep && uiMode === 'edit') { ES.sm = keep.sm; ES.v = keep.v; ES.e = keep.e; ES.f = keep.f; updateOverlay(); renderUI(); hud(); }
@@ -247,6 +256,10 @@
     else if (k === '-') { e.preventDefault(); tf.num = tf.num.startsWith('-') ? tf.num.slice(1) : '-' + tf.num; }
     else if (k === 'Backspace') { e.preventDefault(); tf.num = tf.num.slice(0, -1); }
     else if (k === 'Tab') { e.preventDefault(); return; }
+    else if (K === 'i' && tf.type === 'i') {   // I again: each face on its own (or back to one region), keeping the inset so far
+      e.preventDefault(); const t = tf; tf = null; insetFaces.m0 = t.m0; insetFaces(!t.individual, t.insetBase); insetFaces.m0 = null;
+      if (tf) { tf.num = t.num; evalTf(); hud(); } return;
+    }
     else return;
     evalTf();
   }

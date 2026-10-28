@@ -49,7 +49,7 @@
       const o = objs.find((q) => q.id === id); if (!o) return;
       const ob = A.objs, k6 = k * 6;
       o.group.position.set(ob[k6] + og.x, ob[k6 + 1] + og.y, ob[k6 + 2] + og.z);
-      if (o.kind === 'mesh') o.group.rotation.set(ob[k6 + 3], ob[k6 + 4], ob[k6 + 5], 'ZYX');
+      if (o.kind === 'mesh') { o.group.rotation.set(ob[k6 + 3], ob[k6 + 4], ob[k6 + 5], 'ZYX'); sizeAt(o, LC.fnum[lo] / 60); }
     });
     return n;
   }

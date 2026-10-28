@@ -309,6 +309,14 @@ input[type=checkbox]:disabled { opacity: 0.5; cursor: default; }
 .row.face input[type=number], .row.vec input { width: 100%; min-width: 0; height: 22px; font: 400 11.5px var(--font-mono); color: #f2f2f2; background: var(--field); border: 0; border-radius: 4px; padding: 0 6px; text-align: center; }
 .row.vec { grid-template-columns: 70px repeat(3, minmax(0, 1fr)); column-gap: 3px; }
 .row.vec > label { text-align: right; padding-right: 5px; }
+.row.vec:has(.lockbtn), .row.vec.lockpad { grid-template-columns: 70px repeat(3, minmax(0, 1fr)) 22px; }
+.lockbtn { width: 22px; height: 22px; padding: 0; display: grid; place-items: center; color: #9a9a9a; background: transparent; border: 0; border-radius: 4px; cursor: pointer; }
+.lockbtn:hover { background: var(--field); color: #e6e6e6; }
+.lockbtn[aria-pressed="true"] { color: #ffc233; }
+/* keyed fields, as in Blender: yellow with a key on the frame shown, green when animated */
+.row.vec.kf-now input, .row.kf-now .num { background: #8a7a2a; }
+.row.vec.kf-anim input, .row.kf-anim .num { background: #3e6b3a; }
+label.check.kf-now span { color: #e8cc55; } label.check.kf-anim span { color: #7fc27a; }
 details.sub { border-radius: 4px; background: rgba(0, 0, 0, 0.1); }
 details.sub > summary { list-style: none; cursor: pointer; user-select: none; display: flex; align-items: center; gap: 7px; height: 24px; padding: 0 8px; font-weight: 500; font-size: 12px; color: #d6d6d6; border-radius: 4px; background: #383838; }
 details.sub[open] > summary { font-weight: 600; color: #ececec; border-radius: 4px 4px 0 0; }
@@ -482,9 +490,9 @@ kbd { font: 500 10px var(--font-mono); color: #e8e8e8; background: #3c3c3c; bord
           <button class="ib" id="kf-next" type="button" title="Next key (Up arrow)" aria-label="Next key"><svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M10.5 4.5L13 7l-2.5 2.5L8 7zM1 2v10l6-5z"/></svg></button>
           <span class="stat" id="kf-time">0.00 s</span>
           <span class="vsep"></span>
-          <button class="kbtn" id="kf-add" type="button" title="Key the selected object at the playhead (I)" aria-label="Add key"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M7 1.5l5.5 5.5L7 12.5 1.5 7z"/><path d="M7 4.6v4.8M4.6 7h4.8"/></svg><span>Add key</span></button>
+          <button class="kbtn" id="kf-add" type="button" title="Key the selected objects' Location, Rotation and Scale at the playhead (I in the view). Hover a field and press I to key only that one; Alt+I takes it off again." aria-label="Add key"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M7 1.5l5.5 5.5L7 12.5 1.5 7z"/><path d="M7 4.6v4.8M4.6 7h4.8"/></svg><span>Add key</span></button>
           <button class="kbtn" id="kf-del" type="button" title="Delete the selected key (Delete)" aria-label="Delete key"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M7 1.5l5.5 5.5L7 12.5 1.5 7z"/><path d="M4.6 7h4.8"/></svg><span>Delete key</span></button>
-          <label class="tog" title="Auto-key: moving a keyed object changes its key at the playhead"><input type="checkbox" id="kf-auto" checked><i></i><span>Auto key</span></label>
+          <label class="tog" title="Auto key, as Blender's record button: while it is on, whatever you change on an object is keyed at the playhead (Move keys Location, Rotate keys Rotation, Scale keys Scale, a typed field keys its own group), on any object."><input type="checkbox" id="kf-auto"><i></i><span>Auto key</span></label>
           <span class="grow"></span>
           <span class="seg" id="kf-interp" role="group" aria-label="Interpolation"><button type="button" data-v="smooth" aria-pressed="true">Smooth</button><button type="button" data-v="linear" aria-pressed="false">Linear</button></span>
           <span class="seg" id="kf-end" role="group" aria-label="At the end"><button type="button" data-v="hold" aria-pressed="true">Hold</button><button type="button" data-v="stop" aria-pressed="false">Stop</button><button type="button" data-v="loop" aria-pressed="false">Loop</button></span>

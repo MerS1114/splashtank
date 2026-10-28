@@ -4,7 +4,7 @@
     return b.map((o, i) => {
       const p = a[i]; if (!p || p.id !== o.id) return o;
       const L = (k) => (p[k] || 0) + ((o[k] || 0) - (p[k] || 0)) * w;
-      return Object.assign({}, o, { x: L('x'), y: L('y'), z: L('z'), rx: L('rx'), yaw: L('yaw'), rz: L('rz') });
+      return Object.assign({}, o, { x: L('x'), y: L('y'), z: L('z'), rx: L('rx'), yaw: L('yaw'), rz: L('rz'), sx: L('sx'), sy: L('sy'), sz: L('sz') });
     });
   }
   function stepOnce() {
@@ -12,9 +12,7 @@
     const maxMove = S.dragSpeed / (S.scale || 1) * DT, states = [], tn = (S.frame + 1) * DT;
     for (const o of objs) {
       if (o.keys.length) {
-        const k = keyPose(o.keys, tn, S.tl.smooth);
-        o.target.set(k.x, k.y, k.z); o.pos.copy(o.target); o.rx = k.rx || 0; o.yaw = k.yaw || 0; o.rz = k.rz || 0;
-        if (o.kind === 'emitter') { if (k.on !== undefined) o.on = k.on; if (k.speed !== undefined) o.speed = k.speed; }
+        poseObj(o, keyPose(o.keys, tn, S.tl.smooth));
         states.push(snap(o)); continue;
       }
       const dx = o.target.x - o.pos.x, dy = o.target.y - o.pos.y, dz = o.target.z - o.pos.z, L = Math.hypot(dx, dy, dz);

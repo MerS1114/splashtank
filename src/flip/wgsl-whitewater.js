@@ -493,7 +493,7 @@ fn dripStep(@builtin(global_invocation_id) g: vec3<u32>) {
   let a = drip[s * 2u]; let b = drip[s * 2u + 1u];
   let k = u32(a.w); if (k >= P.ncols) { return; }
   let r0 = cols[k * 8u + 2u].xyz; let r1 = cols[k * 8u + 3u].xyz; let r2 = cols[k * 8u + 4u].xyz;
-  let wp = cols[k * 8u + 5u].xyz + r0 * a.x + r1 * a.y + r2 * a.z;
+  let wp = cols[k * 8u + 5u].xyz + r0 * (a.x / dot(r0, r0)) + r1 * (a.y / dot(r1, r1)) + r2 * (a.z / dot(r2, r2));   // row i is column i of R over size i
   let wn = normalize(r0 * b.x + r1 * b.y + r2 * b.z);
   let probe = wp + wn * P.h * 0.75;
   let here = wetAt(probe);

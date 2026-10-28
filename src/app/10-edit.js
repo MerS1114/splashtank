@@ -24,6 +24,8 @@
       s += t.num !== '' ? t.num + ' m' : (t.axis && !t.plane ? d.dot(curAxis()).toFixed(3) + ' m' : 'x ' + d.x.toFixed(3) + '  y ' + d.y.toFixed(3) + '  z ' + d.z.toFixed(3));
     } else if (t.type === 'r') {
       s = (t.list && t.list.length && t.list.every((q) => q.kind === 'emitter') ? 'Aim' : 'Rotate') + (axs ? ' ' + axs : ' (view)') + '   ' + (t.num !== '' ? t.num : ((t.angDeg || 0)).toFixed(1)) + '°';
+    } else if (t.type === 'i') {
+      s = 'Inset' + (t.individual ? ' each face' : '') + '   ' + (t.num !== '' ? t.num : (t.dist || 0).toFixed(3)) + ' m   (I: ' + (t.individual ? 'as one region' : 'each face on its own') + ')';
     } else {
       s = 'Scale' + (axs ? ' ' + axs : '') + '   ' + (t.num !== '' ? t.num : (t.k || 1).toFixed(3));
     }
@@ -110,6 +112,7 @@
     const o = editO;
     if (ov) { [ov.pts, ov.fdots, ov.lines, ov.fill].forEach((x) => { o.group.remove(x); x.geometry.dispose(); x.material.dispose(); }); ov = null; }
     o.wire.visible = true;
+    if (o.sdfDirty && !o.sdfJob) rebuildSDFLater(o);   // the edits so far, worked out in the background now that editing is done
     uiMode = 'object'; editO = null; edList = null; clearSel(); objs.forEach(syncMesh);
     if (!quiet) { renderUI(); hud(); }
   }
@@ -164,6 +167,7 @@
     const r1 = document.createElement('div'); r1.className = 'btnrow';
     btn(r1, 'Move (G)', 'btn-g', () => startTf('g')); btn(r1, 'Rotate (R)', 'btn-r', () => startTf('r')); btn(r1, 'Scale (S)', 'btn-s', () => startTf('s'));
     btn(r1, 'Extrude (E)', 'btn-extrude', () => extrudeFaces());
+    btn(r1, 'Inset (I)', 'btn-inset', () => insetFaces(false));
     p.appendChild(r1);
     const r2 = document.createElement('div'); r2.className = 'btnrow';
     btn(r2, 'Select all (A)', 'btn-all', () => selectAllEdit(true)); btn(r2, 'None (Alt+A)', 'btn-none', () => selectAllEdit(false));
@@ -171,7 +175,7 @@
     p.appendChild(r2);
     const info = document.createElement('div'); info.className = 'pos'; info.id = 'edit-info'; p.appendChild(info);
     const note = document.createElement('div'); note.className = 'pos';
-    note.textContent = 'Drag in empty space to box select. Shift+click adds or removes. The water sees the new shape as soon as you confirm each change. Keep the shape closed: extrude and move, but do not leave holes.';
+    note.textContent = 'Drag in empty space to box select. Shift+click adds or removes. Nothing is worked out for the water while you edit: it sees the new shape when you leave edit mode (Tab) or press play. Keep the shape closed: extrude, inset and move, but do not leave holes.';
     p.appendChild(note); updateOverlay();
   }
   function selectAllEdit(all) {
@@ -207,9 +211,60 @@
     m.v = nv; m.f = m.f.map((f) => f.map((v) => ren.get(v)));
     edList = meshEdges(m); clearSel(); ES.sm = 'f'; fs.forEach((i) => ES.f.add(i));
     meshGeo(o); updateOverlay(); renderUI(); hud();
-    const R = eulerMat(o.rx, o.yaw, o.rz), nl = new THREE.Vector3(nx, ny, nz).normalize();
+    const R = eulerMat(o.rx, o.yaw, o.rz), nl = new THREE.Vector3(nx / (o.sx || 1), ny / (o.sy || 1), nz / (o.sz || 1)).normalize();   // a normal goes through Scale divided
     const nw = new THREE.Vector3(R[0] * nl.x + R[1] * nl.y + R[2] * nl.z, R[3] * nl.x + R[4] * nl.y + R[5] * nl.z, R[6] * nl.x + R[7] * nl.y + R[8] * nl.z).normalize();
     startTf('g', { axis: 'n', nrm: nw, noUndo: true });
+  }
+  // Inset (I), as in Blender: the selected faces get a smaller copy of themselves inside them, joined to the old outline by a ring of new
+  // faces, all in the faces' own plane; moving the mouse towards the faces makes the ring wider. The selection is insetted as one region
+  // (only its outline gets a ring); pressing I again while insetting does each face on its own. base: the shape before the inset (to switch).
+  function insetFaces(individual, base) {
+    if (uiMode !== 'edit') return;
+    const o = editO;
+    if (base) { o.mesh = { v: base.v.map((q) => q.slice()), f: base.f.map((q) => q.slice()) }; ES.sm = 'f'; ES.f = new Set(base.fs); }
+    let m = o.mesh;
+    const fs = ES.sm === 'f' ? [...ES.f] : [...facesFromVerts(selVerts())];
+    if (!fs.length) { flash('Inset needs faces. Press 3, click a face, then press I.'); return; }
+    if (!base) { pushUndo(); m = o.mesh; base = { v: m.v.map((q) => q.slice()), f: m.f.map((q) => q.slice()), fs: fs.slice() }; }
+    const s = [o.sx || 1, o.sy || 1, o.sz || 1], P = (i) => [m.v[i][0] * s[0], m.v[i][1] * s[1], m.v[i][2] * s[2]];   // points at their real size
+    const nrm = (f) => { let nx = 0, ny = 0, nz = 0; for (let k = 0; k < f.length; k++) { const a = P(f[k]), b2 = P(f[(k + 1) % f.length]); nx += (a[1] - b2[1]) * (a[2] + b2[2]); ny += (a[2] - b2[2]) * (a[0] + b2[0]); nz += (a[0] - b2[0]) * (a[1] + b2[1]); } const l = Math.hypot(nx, ny, nz) || 1; return [nx / l, ny / l, nz / l]; };
+    const groups = individual ? fs.map((fi) => [fi]) : [fs];
+    const inset = new Map();   // new point -> { d: direction it moves per metre of inset, max: how far it may go }
+    const sides = [];
+    for (const gr of groups) {
+      const cnt = new Map(), dirEdge = new Map();
+      gr.forEach((fi) => { const f = m.f[fi]; f.forEach((a, k) => { const b2 = f[(k + 1) % f.length], key = Math.min(a, b2) + ',' + Math.max(a, b2); cnt.set(key, (cnt.get(key) || 0) + 1); dirEdge.set(key, [a, b2, fi]); }); });
+      const map = new Map();
+      gr.forEach((fi) => m.f[fi].forEach((vi) => { if (!map.has(vi)) { map.set(vi, m.v.length); m.v.push(m.v[vi].slice()); } }));
+      // each outline edge a->b (in its face's winding) moves inwards along n x (b - a); a point moves so both its edges move by the inset
+      const acc = new Map();
+      cnt.forEach((c, key) => {
+        if (c !== 1) return;
+        const [a, b2, fi] = dirEdge.get(key), n = nrm(m.f[fi]), A = P(a), B = P(b2), e = [B[0] - A[0], B[1] - A[1], B[2] - A[2]];
+        let w = [n[1] * e[2] - n[2] * e[1], n[2] * e[0] - n[0] * e[2], n[0] * e[1] - n[1] * e[0]]; const l = Math.hypot(w[0], w[1], w[2]) || 1; w = w.map((x) => x / l);
+        for (const v of [a, b2]) { const q = acc.get(v) || []; q.push(w); acc.set(v, q); }
+        sides.push([a, b2, map.get(b2), map.get(a)]);
+      });
+      const cen = [0, 0, 0]; map.forEach((nv, vi) => { const q = P(vi); for (let k = 0; k < 3; k++) cen[k] += q[k] / map.size; });
+      let lim = Infinity; const dirs = new Map();
+      acc.forEach((ws, v) => {
+        let d;
+        if (ws.length === 2) { const a = ws[0], b2 = ws[1], dt = a[0] * b2[0] + a[1] * b2[1] + a[2] * b2[2], k = 1 / Math.max(1 + dt, 0.15); d = [(a[0] + b2[0]) * k, (a[1] + b2[1]) * k, (a[2] + b2[2]) * k]; }
+        else { d = [0, 0, 0]; ws.forEach((w) => { for (let k = 0; k < 3; k++) d[k] += w[k] / ws.length; }); }
+        const q = P(v), dl = Math.hypot(d[0], d[1], d[2]) || 1; lim = Math.min(lim, 0.95 * Math.hypot(q[0] - cen[0], q[1] - cen[1], q[2] - cen[2]) / dl);
+        dirs.set(map.get(v), d);
+      });
+      map.forEach((nv) => inset.set(nv, { d: dirs.get(nv) || [0, 0, 0], max: dirs.has(nv) ? lim : 0 }));
+      gr.forEach((fi) => { m.f[fi] = m.f[fi].map((vi) => map.get(vi)); });
+    }
+    sides.forEach((q) => m.f.push(q));
+    const used = new Set(); m.f.forEach((f) => f.forEach((v) => used.add(v)));
+    const ren = new Map(), nv = []; m.v.forEach((q, i) => { if (used.has(i)) { ren.set(i, nv.length); nv.push(q); } });
+    m.v = nv; m.f = m.f.map((f) => f.map((v) => ren.get(v)));
+    const insetN = new Map(); inset.forEach((val, i) => { if (ren.has(i)) insetN.set(ren.get(i), val); });
+    edList = meshEdges(m); clearSel(); ES.sm = 'f'; fs.forEach((i) => ES.f.add(i));
+    meshGeo(o); updateOverlay(); renderUI(); hud();
+    startTf('i', { noUndo: true, insetMap: insetN, insetBase: base, individual, m0: insetFaces.m0 });
   }
   function editPick(cx, cy) {
     const o = editO; o.group.updateMatrixWorld(true);

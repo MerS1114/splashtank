@@ -12,7 +12,7 @@
     dom: { w: 3, h: 2.6, d: 3 }, min: { x: -1.5, y: 0, z: -1.5 }, org: { x: 0, y: 0, z: 0 }, simOrg: { x: 0, y: 0, z: 0 },
     open: { x0: false, x1: false, y0: false, y1: false, z0: false, z1: false },
     wind: { speed: 0, az: 0, up: 0 }, airDrag: 0.3, cellRatio: 2, detail: 0, liteRun: true, pbQ: 'smooth', pbLvl: 0, hideIn: true, surface: false, surfSmooth: 1, surfAniso: true, surfNrf: false, gpuKeepMB: 2048, gust: 1.0, foamSens: 1.0, foam: 0.8, foamTau: 1.2, handles: true,
-    tl: { dur: 5, t: 0, auto: true, smooth: true, end: 'hold' }, selKey: null,
+    tl: { dur: 5, t: 0, auto: false, smooth: true, end: 'hold' }, selKey: null,
     bk: { dur: 5, fps: 24 }, bkDetail: 1, bkAcc: 'normal',
     nbOn: false, nbBand: 3, oceanView: true,
     ocean: { on: false, height: 2, length: 30, dir: 0, spread: 25, level: 0.5, layer: 0.15, seed: 1 },

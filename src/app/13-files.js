@@ -6,7 +6,7 @@
       box: { min: S.min, size: S.dom, open: S.open },
       solver: { engine: S.engine, g: S.g, visc: S.visc, iters: S.iters, flip: S.flip, sep: S.sep, xfer: S.xfer, cap: S.cap, wind: S.wind, airDrag: S.airDrag, cellRatio: S.cellRatio, detail: S.detail, gust: S.gust, foamSens: S.foamSens, foam: S.foam, foamTau: S.foamTau, colMax: S.colMax, dragSpeed: S.dragSpeed, vmaxW: S.vmaxW, subMin: S.subMin, subMax: S.subMax, scale: S.scale, tear: S.tear, sprOn: S.sprOn, sprAmt: S.sprAmt, sprMin: S.sprMin, sprLife: S.sprLife, sprMist: S.sprMist, sprDrag: S.sprDrag, mistDrag: S.mistDrag, sprCap: S.sprCap, streak: S.streak, wwFoamLife: S.wwFoamLife, wwRise: S.wwRise, wwCrest: S.wwCrest, wwImpact: S.wwImpact, wwSpin: S.wwSpin, wwEdge: S.wwEdge, wwErode: S.wwErode, wwLand: S.wwLand, wwTrail: S.wwTrail, wwArea: S.wwArea, wwAreaUp: S.wwAreaUp, airOn: S.airOn, airCouple: S.airCouple, airDecay: S.airDecay, airReal: S.airReal, airFeel: S.airFeel, turbSize: S.turbSize, turbOct: S.turbOct, turbSpeed: S.turbSpeed, airSwirl: S.airSwirl, dripOn: S.dripOn, dripRate: S.dripRate, dripDry: S.dripDry, nbOn: S.nbOn, nbBand: S.nbBand, nbLook: S.nbLook, oceanView: S.oceanView }, ocean: S.ocean,
       timeline: S.tl, bake: { dur: S.bk.dur, fps: S.bk.fps, detail: S.bkDetail, accuracy: S.bkAcc }, fills: S.fills, events: S.events.map((e) => Object.assign({}, e, { done: false })),
-      objs: sn.objs.map((d) => Object.assign({}, d, { sdf: null, rec: d.rec ? { start: d.rec.start, arr: Array.from(d.rec.arr) } : null }))
+      objs: sn.objs.map((d) => Object.assign({}, d, { sdf: null, sdfDirty: undefined, rec: d.rec ? { start: d.rec.start, arr: Array.from(d.rec.arr) } : null }))
     };
   }
   function applySceneData(d) {
