@@ -42,7 +42,7 @@
     m.needsUpdate = true;
   }
   function applyFills() {
-    if (nbActive()) { nbSeed(sim, resolveFills(), nbCfg(), oceanCfg(), S.frame * DT, S.g / (S.scale || 1), 1); return; }
+    if (nbActive()) { if (nbSeed(sim, resolveFills(), nbCfg(), oceanCfg(), S.frame * DT, S.g / (S.scale || 1), 1).full) flash('Point limit reached, so the starting water is only partly filled and the rest will drain away. Raise Max points or use a coarser spacing.'); return; }
     for (const f of resolveFills()) { if (f.t === 'box') sim.fillBox(f.x0, f.x1, f.y0, f.y1, f.z0, f.z1); else if (f.t === 'vol') fillVolume(sim, f); else sim.fillSphere(f.x, f.y, f.z, f.r, 0, f.vy || 0, 0); }
   }
   const SCENES = {

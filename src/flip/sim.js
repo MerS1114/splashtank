@@ -56,16 +56,24 @@ function flipPipes(device) {
   return sh;
 }
 class FlipSim {
-  constructor(device, opt) {
-    const d = (this.d = opt.d), ratio = (this.ratio = Math.max(1.4, Math.min(4, opt.ratio || 2))), h = (this.h = ratio * d);
-    this.rest = ratio * ratio * ratio; this.opt = { noFoam: false, noCull: false, noSolidCache: false, fastAir: false, sort: false, sortEvery: 16, iters: 0 };
+  // the grid a sim with these options gets: spacing, cell size, cells a side and the box (the bake counts its starting water with it first)
+  static layout(opt) {
+    const d = opt.d, ratio = Math.max(1.4, Math.min(4, opt.ratio || 2)), h = ratio * d;
     const sz = opt.size || [3, 2.6, 3];
-    this.nx = Math.max(4, Math.round(sz[0] / h)); this.ny = Math.max(4, Math.round(sz[1] / h)); this.nz = Math.max(4, Math.round(sz[2] / h));
-    const W = this.nx * h, H = this.ny * h, D = this.nz * h;
+    const nx = Math.max(4, Math.round(sz[0] / h)), ny = Math.max(4, Math.round(sz[1] / h)), nz = Math.max(4, Math.round(sz[2] / h));
+    const W = nx * h, H = ny * h, D = nz * h;
     // opt.org: the box's low corner (the detail pass simulates only a region of the tank); otherwise centred on x and z, standing on y = 0
     const o0 = opt.org || [-W / 2, 0, -D / 2];
-    this.b = { x0: o0[0], x1: o0[0] + W, y0: o0[1], y1: o0[1] + H, z0: o0[2], z1: o0[2] + D };
-    this.size = [W, H, D];
+    return { d, ratio, h, nx, ny, nz, b: { x0: o0[0], x1: o0[0] + W, y0: o0[1], y1: o0[1] + H, z0: o0[2], z1: o0[2] + D }, size: [W, H, D] };
+  }
+  // the most particles one sim can hold here: its biggest per-particle buffer (APIC's three rows, 48 bytes) must fit one GPU buffer
+  static maxPoints(device, apic) { return Math.floor((device.limits.maxStorageBufferBindingSize || (1 << 27)) / (apic ? 48 : 16)); }
+  constructor(device, opt) {
+    const lay = FlipSim.layout(opt), d = (this.d = lay.d), ratio = (this.ratio = lay.ratio), h = (this.h = lay.h);
+    this.rest = ratio * ratio * ratio; this.opt = { noFoam: false, noCull: false, noSolidCache: false, fastAir: false, sort: false, sortEvery: 16, iters: 0 };
+    this.nx = lay.nx; this.ny = lay.ny; this.nz = lay.nz;
+    this.b = lay.b;
+    this.size = lay.size;
     this.open = opt.open | 0;
     this.dev = device; this.MAXN = opt.maxN; this.cap = opt.maxN; this.N = 0; this.ring = 0; this.recycle = true;
     this.busy = false; this.needRead = true; this.lastMs = 0; this.outN = 0; this.out = opt.out || null;

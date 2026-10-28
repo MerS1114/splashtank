@@ -120,10 +120,10 @@
     const ncell = nx * ny * nz, ntiles = Math.ceil((nx + 1) / 8) * Math.ceil((ny + 1) / 8) * Math.ceil((nz + 1) / 8);
     // FLIP stores the grid in 8x8x8 blocks only near particles, about 20 KB a block (cells and faces). Particles: position, velocity,
     // fluid cell lists, plus the sort copy when sorting is on; the live view reads back at most about 300k points through a ring of three.
-    const sm = Math.min(maxN, 300001), perP = 16 + 16 + 8 + (S.sortP ? 32 : 0), block = 512 * 40 + 12;
+    const sm = Math.min(maxN, 300001), perP = 16 + 16 + 8 + (S.sortP ? 32 : 0) + (S.xfer === 'apic' ? 48 : 0), block = 512 * 40 + 12;
     const start = Math.max(64, Math.ceil(maxN / 1024)), compact = Math.ceil(maxN / ratio / ratio / ratio / 512 * 2.5);   // blocks when all points sit in solid water
     const particles = maxN * perP + sm * 16 * 4 + ntiles * 16;
-    const biggest = Math.max(maxN * 16, start * 6144, ntiles * 8), total = particles + start * block;
+    const biggest = Math.max(maxN * (S.engine === 'flip' && S.xfer === 'apic' ? 48 : 16), start * 6144, ntiles * 8), total = particles + start * block;
     return { nx, ny, nz, ncell, biggest, total, particles, block, compact };
   }
   function resInfoText(d, ratio) {
@@ -139,7 +139,7 @@
   const gs = $('#g-sim');
   function setSpacing(v) {
     const P = PRESET[S.engine], old = S.liveD; v = clamp(v, P.dMin, 0.16);
-    const cap = v < old ? Math.min(P.capMax, Math.round(S.cap * Math.pow(old / v, 3) / 1000) * 1000) : S.cap;   // keep the same fill proportions when the spacing shrinks
+    const cap = v < old ? Math.max(S.cap, Math.min(P.capAuto || P.capMax, Math.round(S.cap * Math.pow(old / v, 3) / 1000) * 1000)) : S.cap;   // keep the same fill proportions when the spacing shrinks (raised by itself only up to capAuto)
     const c = gridCost(v, S.cellRatio, cap), lim = S.gpu ? S.gpu.maxBuf : 1 << 27;
     if (S.engine !== 'cpu' && c.biggest > lim) { flash('That spacing is too big for this GPU. Raise Grid cell size or shrink the box first.'); buildLiveUI(); return; }
     S.liveD = v; S.cap = cap; makeSim(); resetSim(S.tl.t); buildLiveUI();

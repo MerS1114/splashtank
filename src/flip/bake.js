@@ -84,9 +84,21 @@ function bakeDiag(dst, n, b, vcap) {
 }
 // Same contract as runBakeGpu. Substeps adapt to the fastest particle of the last frame so fast splashes get small steps and calm frames get few.
 async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
-  const sim = new FlipSim(gpu.dev, { d: desc.d, maxN: desc.maxN, size: desc.size, open: desc.open, ratio: desc.cellRatio });
+  const oc = desc.ocean && desc.ocean.on ? desc.ocean : null, nbc = desc.nb && (desc.nb.on || oc) ? desc.nb : null;
+  // narrow band: the starting band must fit, or the seed stops partway across the tank and the water there drains away. Max points is
+  // raised to the starting water plus room for impacts to refill the band from (up to what one GPU buffer holds)
+  const so = { d: desc.d, maxN: desc.maxN, size: desc.size, open: desc.open, ratio: desc.cellRatio };
+  let maxN = desc.maxN, need = 0;
+  if (nbc || oc) {
+    need = nbSeedCount(FlipSim.layout(so), desc.fills, nbc || { on: true, band: 3 }, oc, 0, desc.g);
+    const lim = FlipSim.maxPoints(gpu.dev, !!desc.apic);
+    if (need > lim) throw new Error('The starting water needs ' + Math.round(need / 1e5) / 10 + 'M points, more than one GPU buffer holds here (' + Math.round(lim / 1e5) / 10 + 'M). Use less detail, a coarser spacing or a thinner narrow band.');
+    if (need * 1.15 > maxN) maxN = Math.min(lim, Math.ceil(need * 1.3));
+    so.maxN = maxN;
+  }
+  const sim = new FlipSim(gpu.dev, so);
   await sim.whenReady;   // the shared pipelines, compiled once per device
-  sim.recycle = false; sim.cap = desc.maxN; sim.opt.fastAir = !!desc.fastAir; sim.opt.sort = !!desc.sortP; sim.opt.p2gWin = !!desc.p2gWin; sim.opt.ballistic = desc.ballistic !== false; sim.opt.settle = !!desc.settle; sim.opt.settleTol = desc.settleTol; sim.opt.mg = !!desc.mg; sim.opt.sep = desc.sep || 0; sim.opt.apic = !!desc.apic;
+  sim.recycle = false; sim.cap = maxN; sim.opt.fastAir = !!desc.fastAir; sim.opt.sort = !!desc.sortP; sim.opt.p2gWin = !!desc.p2gWin; sim.opt.ballistic = desc.ballistic !== false; sim.opt.settle = !!desc.settle; sim.opt.settleTol = desc.settleTol; sim.opt.mg = !!desc.mg; sim.opt.sep = desc.sep || 0; sim.opt.apic = !!desc.apic;
   // Accuracy: Accurate: the water moves at most 0.6 of a cell a substep (Normal 1.5), particle separation relaxes twice as long, and the
   // pressure iterations follow the water: after each frame the pressure left unsolved is measured, and the iterations rise until it is
   // under ACC_TOL of the divergence (up to 8 times the normal count), and ease back when it is well under
@@ -95,14 +107,13 @@ async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
   if (desc.spr && desc.sprayCap) sim.setSprayCap(desc.sprayCap);
   if (desc.nbLook) sim.setDeepLook(true);
   const runner = new SceneRunner(sim);
-  const oc = desc.ocean && desc.ocean.on ? desc.ocean : null, nbc = desc.nb && (desc.nb.on || oc) ? desc.nb : null;
   if (nbc || oc) nbSeed(sim, desc.fills, nbc || { on: true, band: 3 }, oc, 0, desc.g, 1);
   else for (const f of desc.fills) {
     if (f.t === 'box') sim.fillBox(f.x0, f.x1, f.y0, f.y1, f.z0, f.z1);
     else if (f.t === 'vol') fillVolume(sim, f);
     else sim.fillSphere(f.x, f.y, f.z, f.r, 0, f.vy || 0, 0);
   }
-  const dst = new Float32Array(desc.maxN * 4);
+  const dst = new Float32Array(maxN * 4);
   const fps = desc.fps, F = desc.frames, dtF = 1 / fps, minSub = desc.substeps, cfl = desc.cfl || (acc ? 0.6 : 1.5), maxSub = Math.max(minSub, acc ? Math.max(64, desc.maxSub || 0) : desc.maxSub || 16);
   const ev = desc.events.slice().sort((a, b) => a.t - b.t); let ei = 0;
   const t0 = Date.now();
@@ -111,7 +122,7 @@ async function runBakeFlipGpu(desc, gpu, onFrame, isCancelled) {
   for (const o of sampleAll(0)) if (o.kind === 'emitter') vmax = Math.max(vmax, o.speed || 0);
   if (sim.N > 0) await sim.prime({ g: desc.g, iters: desc.iters, cols: [] });   // size the block pool for the starting water
   let n = await sim.readbackInto(dst);
-  onFrame(packFrameBuf(dst, n, sim.b, sampleAll(0), desc.scale), { f: 0, F, n, elapsed: 0, full: false, diag: Object.assign(bakeDiag(dst, n, sim.b, desc.vmaxW), { sub: 0, blockPool: sim.scap }) });
+  onFrame(packFrameBuf(dst, n, sim.b, sampleAll(0), desc.scale), { f: 0, F, n, elapsed: 0, full: false, diag: Object.assign(bakeDiag(dst, n, sim.b, desc.vmaxW), { sub: 0, blockPool: sim.scap, pointCap: maxN, startNeed: need }) });
   let ok = true;
   for (let f = 1; f <= F; f++) {
     const objV = objSpeed(sampleAll((f - 1) * dtF), sampleAll(f * dtF), dtF, desc.colMax);   // objects' own motion during this frame is known ahead

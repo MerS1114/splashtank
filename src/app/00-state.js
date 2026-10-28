@@ -2,7 +2,7 @@
   const clamp = (v, a, b) => Math.min(Math.max(v, a), b);
   const PRESET = {
     gpu: { liveD: 0.06, cap: 60000, iters: 3, capMax: 250000, dMin: 0.03, bk: { d: 0.04, sub: 3, iters: 3, maxN: 400000 }, bkMax: 1500000, bkDMin: 0.02 },
-    flip: { liveD: 0.04, cap: 120000, iters: 30, capMax: 4000000, dMin: 0.01, bk: { d: 0.025, sub: 2, iters: 60, maxN: 1000000 }, bkMax: 3000000, bkDMin: 0.012 },
+    flip: { liveD: 0.04, cap: 120000, iters: 30, capMax: 16000000, capAuto: 4000000, dMin: 0.01, bk: { d: 0.025, sub: 2, iters: 60, maxN: 1000000 }, bkMax: 3000000, bkDMin: 0.012 },
     cpu: { liveD: 0.12, cap: 6000, iters: 2, capMax: 14000, dMin: 0.07, bk: { d: 0.06, sub: 3, iters: 3, maxN: 80000 }, bkMax: 200000, bkDMin: 0.03 }
   };
   const S = {

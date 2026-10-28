@@ -72,12 +72,14 @@
       if (d.atWaterSpeedLimit > 0) cache.vcapFrames = (cache.vcapFrames || 0) + 1;
       if (d.sub && d.sub >= ((cache.desc && cache.desc.maxSub) || 16)) cache.subCapFrames = (cache.subCapFrames || 0) + 1;
     }
+    if (info.f === 0 && info.diag && info.diag.pointCap) cache.pointCap = info.diag.pointCap;   // the bake may raise Max points so the starting water fits
     if (info.diag && cache.diag) cache.diag.push(Object.assign({ f: info.f, t: info.f / cache.fps, n: info.n, elapsed: info.elapsed }, info.diag));
     cache.maxN = Math.max(cache.maxN, fr.n);
     const pct = (info.f / info.F) * 100; S.bakeT = info.f / cache.fps; lcUi();
     $('#bake-prog').style.width = pct + '%';
     const eta = info.f > 0 ? (info.elapsed / info.f) * (info.F - info.f) : 0;
-    $('#bake-status').innerHTML = 'Frame <b>' + info.f + '</b> of ' + info.F + ' · <b>' + fmtN(info.n) + '</b> points · ' + fmtTime(info.elapsed) + ' elapsed, about ' + fmtTime(eta) + ' left' + (info.full ? '<br>Max points reached, emission stopped.' : '');
+    $('#bake-status').innerHTML = 'Frame <b>' + info.f + '</b> of ' + info.F + ' · <b>' + fmtN(info.n) + '</b> points · ' + fmtTime(info.elapsed) + ' elapsed, about ' + fmtTime(eta) + ' left' + (info.full ? '<br>Max points reached, emission stopped.' : '') +
+      (cache.pointCap > ((cache.desc && cache.desc.maxN) || Infinity) ? '<br>Max points raised to ' + fmtN(cache.pointCap) + ' so the starting water fits.' : '');
   }
   // the fastest water and the substeps against their limits during a bake: says which limit to raise when one held the water back
   function bakeLimits(c) {

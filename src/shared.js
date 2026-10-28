@@ -983,3 +983,9 @@ function nbSeed(sim, fills, nb, oc, t, g, mode) {
   sim.nbInit = mode || 1; sim.nbCfg = nb; sim.oceanCfg = oc;
   return { seeded, full };
 }
+// how many particles nbSeed would make on a restart (with its spare slots), without a sim: lay is FlipSim.layout of the sim to come.
+// A seed that runs out of particles stops partway across the tank, and that part of the water has no surface particles and drains away
+function nbSeedCount(lay, fills, nb, oc, t, g) {
+  const s = { d: lay.d, h: lay.h, b: lay.b, N: 0, cap: Infinity, add() { this.N++; return true; } };
+  nbSeed(s, fills, nb, oc, t, g, 1); return s.N;
+}
