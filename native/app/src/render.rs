@@ -120,9 +120,11 @@ pub struct Look {
     pub objects: bool,
     /// the Detail region (centre and size as shares of the tank), shown dashed while the Bake panel's Detail is open
     pub region: Option<([f32; 3], [f32; 3])>,
+    /// the object selected in the Objects tab (drawn orange, as Blender does)
+    pub selected: Option<u64>,
 }
 impl Default for Look {
-    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None } }
+    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None, selected: None } }
 }
 
 #[repr(C)]
@@ -454,13 +456,14 @@ fn geometry(doc: &Doc, a: usize, b: usize, w: f32, look: &Look) -> (Vec<Vert>, V
         let r = euler(rot[0], rot[1], rot[2]);
         let s = Vec3::from(o.scale);
         let w: Vec<Vec3> = m.v.iter().map(|v| pos + r * (Vec3::from(*v) * s)).collect();
+        let sel = look.selected == Some(o.id);
         if o.water {
-            let c = [0.25, 0.6, 1.0, 1.0];
+            let c = if sel { [1.0, 0.63, 0.16, 1.0] } else { [0.25, 0.6, 1.0, 1.0] };
             for f in &m.f { for k in 0..f.len() { line(&mut lines, w[f[k] as usize], w[f[(k + 1) % f.len()] as usize], c); } }
             continue;
         }
         // the page's object grey, 0x9ba1a7
-        let c = [0x9b as f32 / 255.0, 0xa1 as f32 / 255.0, 0xa7 as f32 / 255.0, 1.0];
+        let c = if sel { [1.0, 0.63, 0.16, 1.0] } else { [0x9b as f32 / 255.0, 0xa1 as f32 / 255.0, 0xa7 as f32 / 255.0, 1.0] };
         for t in &m.tris() {
             let (a, b, cc) = (w[t[0] as usize], w[t[1] as usize], w[t[2] as usize]);
             let n: [f32; 3] = (b - a).cross(cc - a).normalize_or_zero().into();

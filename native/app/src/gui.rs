@@ -62,8 +62,17 @@ struct Goal { target: Option<glam::Vec3>, r: Option<f32>, theta: Option<f32>, ph
 
 struct Target { size: [u32; 2], color: wgpu::Texture, id: egui::TextureId }
 
+/// The side panel's tabs (the page's property tabs).
+#[derive(Clone, Copy, PartialEq)]
+enum Tab { Bake, Sim, Tank, Objects, View }
+
 struct App {
     doc: Doc,
+    tab: Tab,
+    /// the scene file edits are saved to (None: not saved as a scene file yet), whether there are unsaved edits, the selected object
+    scene_path: Option<PathBuf>,
+    dirty: bool,
+    sel: Option<usize>,
     r: Renderer,
     target: Option<Target>,
     cam: Orbit,
@@ -106,7 +115,7 @@ impl App {
             std::hint::black_box(sum);
         });
         App {
-            doc: Doc::default(), r: Renderer::new(&rs.device), target: None,
+            doc: Doc::default(), tab: Tab::Bake, scene_path: None, dirty: false, sel: None, r: Renderer::new(&rs.device), target: None,
             cam: Orbit { target: glam::Vec3::new(0.0, 0.7, 0.0), theta: 0.8, phi: 1.0, r: 6.2, ortho: false }, goal: None,
             t: 0.0, playing: false, looping: true, speed: 1.0, look: Look::default(),
             msg: "Open a bake cache (.splc) or a scene file (.json), or drop one on the window.".into(),
@@ -115,8 +124,41 @@ impl App {
         }
     }
 
+    /// Asks before unsaved scene edits are thrown away; true to go ahead.
+    fn may_discard(&self) -> bool {
+        !self.dirty || rfd::MessageDialog::new().set_title("SplashTank").set_level(rfd::MessageLevel::Warning)
+            .set_description("The scene has changes that are not saved. Go on without saving them?").set_buttons(rfd::MessageButtons::YesNo).show() == rfd::MessageDialogResult::Yes
+    }
+
+    fn save_scene(&mut self, ask: bool) {
+        let Some(s) = &self.doc.scene else { self.msg = "No scene to save.".into(); return; };
+        let path = match (&self.scene_path, ask) {
+            (Some(p), false) => Some(p.clone()),
+            _ => {
+                let mut d = rfd::FileDialog::new().set_title("Save the scene as").add_filter("Scene", &["json"]).set_file_name("splashtank-scene.json");
+                if let Some(dir) = self.path.as_ref().and_then(|p| p.parent()) { d = d.set_directory(dir); }
+                d.save_file().map(|p| if p.extension().is_none() { p.with_extension("json") } else { p })
+            }
+        };
+        let Some(p) = path else { return; };
+        match s.save(&p) {
+            Ok(()) => { self.msg = format!("Saved the scene as {}", p.display()); self.scene_path = Some(p); self.dirty = false; }
+            Err(e) => self.msg = format!("Could not save {}: {e}", p.display()),
+        }
+    }
+
+    /// After an edit to the scene's JSON: the parsed scene (tank, objects) is made again from it.
+    fn edited(&mut self) {
+        if let Some(s) = self.doc.scene.take() {
+            let j = s.json.clone();
+            self.doc.scene = Some(splash_format::Scene::from_json(j).unwrap_or(s));
+        }
+        self.dirty = true;
+    }
+
     fn open(&mut self, path: &Path) {
         let same = self.path.as_deref() == Some(path);
+        let is_json = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("json"));
         match crate::open_into(&mut self.doc, path) {
             Ok(m) => {
                 self.msg = m;
@@ -125,6 +167,9 @@ impl App {
                 if !same { if let Some(b) = self.doc.tank() { self.cam = Orbit::frame(&b); self.goal = None; } }
                 self.path = Some(path.to_owned());
                 self.bake.source(path);
+                self.scene_path = is_json.then(|| path.to_owned());
+                self.dirty = false;
+                if !same { self.sel = None; }
             }
             Err(e) => self.msg = e,
         }
@@ -189,7 +234,10 @@ impl App {
             self.bake.check_resume(&out);
             if ok || out.exists() {
                 let keep = self.bake.follow;
+                // the finished cache holds the scene as edited: keep where it saves and whether it is saved
+                let (sp, dirty, sel) = (self.scene_path.clone(), self.dirty, self.sel);
                 self.open(&out);
+                (self.scene_path, self.dirty, self.sel) = (sp, dirty, sel);
                 if keep { self.t = self.frames().saturating_sub(1) as f64; }
             }
         }
@@ -290,10 +338,15 @@ impl App {
 
     fn top(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("Open…").on_hover_text("Open a bake cache (.splc) or a scene file (.json) saved by the web page").clicked() {
+            if ui.button("Open…").on_hover_text("Open a bake cache (.splc) or a scene file (.json) saved by the web page").clicked() && self.may_discard() {
                 if let Some(p) = rfd::FileDialog::new().add_filter("SplashTank files", &["splc", "json"]).add_filter("Bake cache", &["splc"])
                     .add_filter("Scene", &["json"]).pick_file() { self.open(&p); }
             }
+            ui.add_enabled_ui(self.doc.scene.is_some(), |ui| {
+                if ui.button("Save scene").on_hover_text("Save the scene file (Ctrl+S). The page opens it as before.").clicked() { self.save_scene(false); }
+                if ui.button("Save scene as…").clicked() { self.save_scene(true); }
+            });
+            if self.dirty { ui.colored_label(egui::Color32::from_rgb(0xe9, 0xa4, 0x3a), "unsaved changes"); }
             ui.separator();
             ui.label(&self.msg);
         });
@@ -319,10 +372,31 @@ impl App {
     }
 
     fn side(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            for (t, name) in [(Tab::Bake, "Bake"), (Tab::Sim, "Simulation"), (Tab::Tank, "Tank"), (Tab::Objects, "Objects"), (Tab::View, "View")] {
+                ui.selectable_value(&mut self.tab, t, name);
+            }
+        });
+        ui.separator();
         egui::ScrollArea::vertical().show(ui, |ui| {
-            let shown = self.path.clone().filter(|p| self.doc.cache.is_some() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("splc")));
-            if let Some(a) = self.bake.panel(ui, &self.worker, shown.as_deref()) { self.act(a); }
-            ui.separator();
+            let tab = self.tab;
+            if tab == Tab::Bake {
+                let shown = self.path.clone().filter(|p| self.doc.cache.is_some() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("splc")));
+                let scene = self.doc.scene.as_ref().map(|s| &s.json);
+                if let Some(a) = self.bake.panel(ui, &self.worker, scene, shown.as_deref()) { self.act(a); }
+                return;
+            }
+            if matches!(tab, Tab::Sim | Tab::Tank | Tab::Objects) {
+                let Some(s) = self.doc.scene.as_mut() else { ui.label("Open a scene file (.json) or a bake (.splc) to edit its scene."); return; };
+                if self.doc.cache.is_some() { ui.label(egui::RichText::new("Changes apply to the next bake; the bake shown stays as it was.").small()); }
+                let changed = match tab {
+                    Tab::Sim => crate::edit::settings(ui, &mut s.json),
+                    Tab::Tank => crate::edit::tank(ui, &mut s.json),
+                    _ => crate::edit::objects(ui, &mut s.json, &mut self.sel),
+                };
+                if changed { self.edited(); }
+                return;
+            }
             ui.heading("Cache");
             if let Some(c) = &self.doc.cache {
                 let f = (self.t.floor() as usize).min(c.frames.len().saturating_sub(1));
@@ -413,7 +487,13 @@ impl eframe::App for App {
             }
         }
         self.poll_job();
-        self.look.region = self.bake.det_open.then_some((self.bake.det.c, self.bake.det.s));
+        self.look.region = (self.bake.det_open && self.tab == Tab::Bake).then_some((self.bake.det.c, self.bake.det.s));
+        self.look.selected = if self.tab == Tab::Objects { self.sel.and_then(|k| self.doc.scene.as_ref()?.json["objs"].get(k)?["id"].as_u64()) } else { None };
+        // Ctrl+S saves the scene; closing the window with unsaved edits asks first
+        if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) && self.doc.scene.is_some() { self.save_scene(false); }
+        if ui.ctx().input(|i| i.viewport().close_requested()) && self.dirty && !self.may_discard() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
 
         if self.playing && n > 0 {
             self.t += (dt.min(0.1) * self.fps() * self.speed) as f64;
@@ -428,7 +508,7 @@ impl eframe::App for App {
 
         egui::Panel::top("top").show(ui, |ui| self.top(ui));
         egui::Panel::bottom("timeline").show(ui, |ui| self.timeline(ui));
-        egui::Panel::right("side").default_size(300.0).show(ui, |ui| self.side(ui));
+        egui::Panel::right("side").default_size(380.0).min_size(330.0).show(ui, |ui| self.side(ui));
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             let avail = ui.available_size();
             let ppp = ui.ctx().pixels_per_point();

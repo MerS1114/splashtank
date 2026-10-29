@@ -172,8 +172,8 @@ impl BakeUi {
             max_points: (!self.auto_max).then(|| (self.max_m * 1e6) as u32), accurate: Some(self.accurate) }
     }
 
-    /// cache: the bake shown now (Bake whitewater and Detail work on it).
-    pub fn panel(&mut self, ui: &mut egui::Ui, w: &Worker, cache: Option<&Path>) -> Option<Action> {
+    /// scene: the scene as edited in the window (what gets baked); cache: the bake shown now (Bake whitewater and Detail work on it).
+    pub fn panel(&mut self, ui: &mut egui::Ui, w: &Worker, scene: Option<&serde_json::Value>, cache: Option<&Path>) -> Option<Action> {
         let mut act = None;
         let busy = w.busy();
         ui.heading("Bake");
@@ -182,7 +182,11 @@ impl BakeUi {
             return None;
         };
         let is_cache = src.extension().is_some_and(|e| e.eq_ignore_ascii_case("splc"));
-        ui.label(format!("{} {}", if is_cache { "Again from the scene in" } else { "From" }, src.file_name().unwrap_or_default().to_string_lossy()));
+        let Some(scene) = scene.cloned() else {
+            ui.label("This cache holds no scene, so it cannot be baked again.");
+            return None;
+        };
+        ui.label(format!("The scene from {}, as edited here", src.file_name().unwrap_or_default().to_string_lossy()));
         ui.add_enabled_ui(!busy, |ui| {
             egui::Grid::new("bakeset").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
                 ui.label("Spacing").on_hover_text("The live particle spacing (the page's Simulation > Spacing). The bake's spacing is this divided by Quality.");
@@ -215,14 +219,8 @@ impl BakeUi {
             if ui.button("Bake...").on_hover_text("Choose where to save the cache, then bake. The view follows the newest frame.").clicked() {
                 let def = beside(&src, if is_cache { "-again" } else { "-native" });
                 if let Some(out) = save_as("Save the bake as", &def) {
-                    let scene = if is_cache { bake_cli::from_cache(&src).map(|(s, _)| s) } else { bake_cli::read_json(&src) };
-                    match scene {
-                        Ok(scene) => {
-                            let kind = Kind::Bake { water_only: self.water_only, checkpoint_secs: self.ckpt_min * 60.0 };
-                            act = Some(Action::Start(format!("Baking {}", out.file_name().unwrap_or_default().to_string_lossy()), Task { kind, inp: None, scene, o: self.opts(), out }));
-                        }
-                        Err(e) => w.job.lock().unwrap().result = Some((e, true)),
-                    }
+                    let kind = Kind::Bake { water_only: self.water_only, checkpoint_secs: self.ckpt_min * 60.0 };
+                    act = Some(Action::Start(format!("Baking {}", out.file_name().unwrap_or_default().to_string_lossy()), Task { kind, inp: None, scene: scene.clone(), o: self.opts(), out }));
                 }
             }
             if let Some((out, say)) = self.resumable.clone().filter(|_| !busy) {
@@ -246,8 +244,8 @@ impl BakeUi {
                 if ui.button("Bake whitewater...").on_hover_text("Whitewater made from this bake's water, with its scene's whitewater settings; saved as a new cache.").clicked() {
                     if let Some(out) = save_as("Save with whitewater as", &beside(c, "-ww")) {
                         match bake_cli::from_cache(c) {
-                            Ok((scene, o)) => act = Some(Action::Start(format!("Whitewater for {}", out.file_name().unwrap_or_default().to_string_lossy()),
-                                Task { kind: Kind::Whitewater, inp: Some(c.to_owned()), scene, o, out })),
+                            Ok((_, o)) => act = Some(Action::Start(format!("Whitewater for {}", out.file_name().unwrap_or_default().to_string_lossy()),
+                                Task { kind: Kind::Whitewater, inp: Some(c.to_owned()), scene: scene.clone(), o, out })),
                             Err(e) => w.job.lock().unwrap().result = Some((e, true)),
                         }
                     }
@@ -275,8 +273,8 @@ impl BakeUi {
                     if ui.button("Bake detail...").clicked() {
                         if let Some(out) = save_as("Save with detail as", &beside(c, "-detail")) {
                             match bake_cli::from_cache(c) {
-                                Ok((scene, o)) => act = Some(Action::Start(format!("Detail for {}", out.file_name().unwrap_or_default().to_string_lossy()),
-                                    Task { kind: Kind::Detail(self.det.clone()), inp: Some(c.to_owned()), scene, o, out })),
+                                Ok((_, o)) => act = Some(Action::Start(format!("Detail for {}", out.file_name().unwrap_or_default().to_string_lossy()),
+                                    Task { kind: Kind::Detail(self.det), inp: Some(c.to_owned()), scene: scene.clone(), o, out })),
                                 Err(e) => w.job.lock().unwrap().result = Some((e, true)),
                             }
                         }

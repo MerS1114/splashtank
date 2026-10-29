@@ -5,5 +5,5 @@ edition = "2021"
 description = "SplashTank scene files (.json) and bake caches (.splc), the same layout as the web page"
 
 [dependencies]
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }  # numbers read back exactly as the page wrote them
 memmap2 = "0.9"
