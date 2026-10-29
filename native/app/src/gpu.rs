@@ -23,7 +23,8 @@ pub fn describe(adapter: &wgpu::Adapter, device: &wgpu::Device) -> String {
 }
 
 /// Draws one frame of the given files into a PNG, without a window (for checking and tests).
-pub fn picture(files: &[PathBuf], out: &Path, frame: usize, size: [u32; 2]) -> Result<(), String> {
+/// frame may be fractional: the water is then blended between the two frames around it, as while playing.
+pub fn picture(files: &[PathBuf], out: &Path, frame: f64, size: [u32; 2]) -> Result<(), String> {
     let mut doc = Doc::default();
     for f in files { eprintln!("{}", crate::open_into(&mut doc, f)?); }
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::PRIMARY, ..wgpu::InstanceDescriptor::new_without_display_handle() });
@@ -34,13 +35,12 @@ pub fn picture(files: &[PathBuf], out: &Path, frame: usize, size: [u32; 2]) -> R
     let tex = |format, usage| device.create_texture(&wgpu::TextureDescriptor { label: None, size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
         mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format, usage, view_formats: &[] });
     let color = tex(render::COLOR, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
-    let depth = tex(render::DEPTH, wgpu::TextureUsages::RENDER_ATTACHMENT);
     let mut r = Renderer::new(&device);
     let cam = doc.tank().map(|b| Orbit::frame(&b)).ok_or("Nothing to draw: open a cache or a scene.")?;
-    let frame = doc.cache.as_ref().map(|c| frame.min(c.frames.len().saturating_sub(1))).unwrap_or(0);
+    let frame = doc.cache.as_ref().map(|c| frame.clamp(0.0, c.frames.len().saturating_sub(1) as f64)).unwrap_or(0.0);
     let t0 = std::time::Instant::now();
     let mut enc = device.create_command_encoder(&Default::default());
-    r.draw(&device, &queue, &mut enc, &color.create_view(&Default::default()), &depth.create_view(&Default::default()), size, &cam, &doc, frame, &Look::default());
+    r.draw(&device, &queue, &mut enc, &color.create_view(&Default::default()), size, &cam, &doc, frame.floor() as usize, frame.ceil() as usize, frame.fract() as f32, &Look::default());
     let row = (size[0] * 4).div_ceil(256) * 256;
     let buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (row * size[1]) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
     enc.copy_texture_to_buffer(color.as_image_copy(), wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None } },

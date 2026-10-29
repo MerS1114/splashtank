@@ -24,6 +24,7 @@ pub fn run(files: Vec<PathBuf>) {
     };
     let r = eframe::run_native("SplashTank", options, Box::new(move |cc| {
         let rs = cc.wgpu_render_state.as_ref().ok_or("This program needs a GPU through wgpu.")?;
+        theme(&cc.egui_ctx);
         let mut app = App::new(rs);
         for f in &files { app.open(f); }
         Ok(Box::new(app))
@@ -31,13 +32,39 @@ pub fn run(files: Vec<PathBuf>) {
     if let Err(e) = r { eprintln!("{e}"); }
 }
 
-struct Target { size: [u32; 2], color: wgpu::Texture, depth: wgpu::TextureView, id: egui::TextureId }
+/// The page's Blender-style dark theme (the colours in src/head.html).
+fn theme(ctx: &egui::Context) {
+    let hex = |v: u32| egui::Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8);
+    let mut v = egui::Visuals::dark();
+    v.panel_fill = hex(0x2a2a2a);
+    v.window_fill = hex(0x2a2a2a);
+    v.extreme_bg_color = hex(0x1d1d1d);
+    v.faint_bg_color = hex(0x303030);
+    v.override_text_color = Some(hex(0xe0e0e0));
+    v.selection.bg_fill = hex(0x4772b3);
+    v.hyperlink_color = hex(0x5fc3f0);
+    v.warn_fg_color = hex(0xe9a43a);
+    v.widgets.noninteractive.bg_fill = hex(0x2a2a2a);
+    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, hex(0x161616));
+    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, hex(0xb3b3b3));
+    for (w, bg) in [(&mut v.widgets.inactive, 0x545454), (&mut v.widgets.hovered, 0x5e5e5e), (&mut v.widgets.active, 0x4772b3), (&mut v.widgets.open, 0x3b4b66)] {
+        w.bg_fill = hex(bg); w.weak_bg_fill = hex(bg); w.bg_stroke = egui::Stroke::new(1.0, hex(0x3a3a3a)); w.fg_stroke = egui::Stroke::new(1.0, hex(0xe0e0e0));
+    }
+    ctx.set_visuals(v);
+}
+
+/// Where the camera is moving to (the page's goCam): framing and the axis views ease there.
+#[derive(Clone, Copy)]
+struct Goal { target: Option<glam::Vec3>, r: Option<f32>, theta: Option<f32>, phi: Option<f32> }
+
+struct Target { size: [u32; 2], color: wgpu::Texture, id: egui::TextureId }
 
 struct App {
     doc: Doc,
     r: Renderer,
     target: Option<Target>,
     cam: Orbit,
+    goal: Option<Goal>,
     /// playhead in frames
     t: f64,
     playing: bool,
@@ -69,7 +96,7 @@ impl App {
         });
         App {
             doc: Doc::default(), r: Renderer::new(&rs.device), target: None,
-            cam: Orbit { target: glam::Vec3::new(0.0, 0.7, 0.0), theta: 0.75, phi: 1.15, r: 6.0 },
+            cam: Orbit { target: glam::Vec3::new(0.0, 0.7, 0.0), theta: 0.8, phi: 1.0, r: 6.2, ortho: false }, goal: None,
             t: 0.0, playing: false, looping: true, speed: 1.0, look: Look::default(),
             msg: "Open a bake cache (.splc) or a scene file (.json), or drop one on the window.".into(),
             gpu: crate::gpu::describe(&rs.adapter, &rs.device), last: Instant::now(), frame_ms: 0.0, ahead: tx,
@@ -82,10 +109,76 @@ impl App {
                 self.msg = m;
                 self.t = 0.0;
                 self.playing = false;
-                if let Some(b) = self.doc.tank() { self.cam = Orbit::frame(&b); }
+                if let Some(b) = self.doc.tank() { self.cam = Orbit::frame(&b); self.goal = None; }
             }
             Err(e) => self.msg = e,
         }
+    }
+
+    /// Home: the whole tank in view, from the angle the camera has now (frameAll)
+    fn frame_all(&mut self) {
+        if let Some(b) = self.doc.tank() { let mut o = self.cam; o.frame_keep_angles(&b); self.goal = Some(Goal { target: Some(o.target), r: Some(o.r), theta: None, phi: None }); }
+    }
+    /// looking along an axis, orthographic, as Blender's numpad views (snapView); top and bottom keep the nearest side square to the screen
+    fn snap_view(&mut self, v: &str) {
+        use std::f32::consts::PI;
+        let (th, ph) = match v { "front" => (Some(0.0), PI / 2.0), "back" => (Some(PI), PI / 2.0), "right" => (Some(PI / 2.0), PI / 2.0), "left" => (Some(-PI / 2.0), PI / 2.0),
+            "top" => (None, 0.0008), _ => (None, PI - 0.0008) };
+        let th = th.unwrap_or((self.cam.theta / (PI / 2.0)).round() * (PI / 2.0));
+        self.cam.ortho = true;
+        self.goal = Some(Goal { target: None, r: None, theta: Some(th), phi: Some(ph) });
+    }
+    /// eases the camera towards its goal (k = 1 - e^(-12 dt)); true while still moving
+    fn step_cam(&mut self, dt: f32) -> bool {
+        let Some(g) = self.goal else { return false; };
+        let k = 1.0 - (-dt.min(0.25) * 12.0).exp();
+        let ang = |a: f32, b: f32| (a - b).sin().atan2((a - b).cos());
+        let c = &mut self.cam;
+        if let Some(t) = g.target { c.target += (t - c.target) * k; }
+        if let Some(r) = g.r { c.r += (r - c.r) * k; }
+        if let Some(th) = g.theta { c.theta += ang(th, c.theta) * k; }
+        if let Some(ph) = g.phi { c.phi += (ph - c.phi) * k; }
+        let done = g.target.is_none_or(|t| (t - c.target).length() < 0.003) && g.r.is_none_or(|r| (r - c.r).abs() < 0.005)
+            && g.theta.is_none_or(|th| ang(th, c.theta).abs() < 0.003) && g.phi.is_none_or(|ph| (ph - c.phi).abs() < 0.003);
+        if done { self.goal = None; }
+        true
+    }
+
+    /// The axis widget in the viewport's corner, as the page's: drawn from the camera, click a ball to look along that axis, click the
+    /// middle to switch perspective and orthographic.
+    fn axis_widget(&mut self, ui: &egui::Ui, rect: egui::Rect) {
+        let hex = |v: u32, a: u8| egui::Color32::from_rgba_unmultiplied((v >> 16) as u8, (v >> 8) as u8, v as u8, a);
+        let area = egui::Rect::from_min_size(egui::pos2(rect.right() - 110.0, rect.top() + 8.0), egui::vec2(96.0, 96.0));
+        let (c, rr) = (area.center(), 96.0 * 0.36);
+        let v = self.cam.view();
+        let mut balls = Vec::new();
+        for (a, ax, col) in [('x', glam::Vec3::X, 0xff3352u32), ('y', glam::Vec3::Y, 0x8bdc00), ('z', glam::Vec3::Z, 0x2890ff)] {
+            let s = v.transform_vector3(ax);
+            balls.push((a, 1.0f32, egui::pos2(c.x + s.x * rr, c.y - s.y * rr), s.z, col));
+            balls.push((a, -1.0, egui::pos2(c.x - s.x * rr, c.y + s.y * rr), -s.z, col));
+        }
+        balls.sort_by(|p, q| p.3.total_cmp(&q.3));
+        let resp = ui.interact(area, ui.scope_id().with("axisgiz"), egui::Sense::click());
+        let hot = resp.hover_pos().and_then(|m| balls.iter().rev().find(|b| b.2.distance(m) < 12.0).map(|b| (b.0, b.1 > 0.0)));
+        let p = ui.painter_at(area.expand(14.0));
+        if resp.hovered() { p.circle_filled(c, rr + 12.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30)); }
+        for (a, s, pos, _, col) in &balls {
+            let is_hot = hot == Some((*a, *s > 0.0));
+            if *s > 0.0 {
+                p.line_segment([c, *pos], egui::Stroke::new(2.0, hex(*col, 255)));
+                p.circle_filled(*pos, 9.0, if is_hot { egui::Color32::WHITE } else { hex(*col, 255) });
+                p.text(*pos + egui::vec2(0.0, 0.5), egui::Align2::CENTER_CENTER, a.to_ascii_uppercase(), egui::FontId::proportional(10.0), hex(0x16191c, 255));
+            } else {
+                p.circle(*pos, 7.0, if is_hot { egui::Color32::from_rgba_unmultiplied(255, 255, 255, 230) } else { hex(*col, 0x55) }, egui::Stroke::new(1.5, hex(*col, 255)));
+            }
+        }
+        if resp.clicked() {
+            match hot {
+                Some((a, pos)) => self.snap_view(match (a, pos) { ('x', true) => "right", ('x', false) => "left", ('y', true) => "top", ('y', false) => "bottom", (_, true) => "front", _ => "back" }),
+                None => self.cam.ortho = !self.cam.ortho,
+            }
+        }
+        if resp.hovered() { ui.ctx().request_repaint(); }
     }
 
     fn frames(&self) -> usize { self.doc.cache.as_ref().map(|c| c.frames.len()).unwrap_or(0) }
@@ -97,14 +190,13 @@ impl App {
         let color = rs.device.create_texture(&wgpu::TextureDescriptor { label: Some("view"), size: ext, mip_level_count: 1, sample_count: 1,
             dimension: wgpu::TextureDimension::D2, format: render::COLOR, usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[wgpu::TextureFormat::Rgba8UnormSrgb] });
-        let depth = rs.device.create_texture(&wgpu::TextureDescriptor { label: Some("depth"), size: ext, mip_level_count: 1, sample_count: 1,
-            dimension: wgpu::TextureDimension::D2, format: render::DEPTH, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] });
-        // egui samples the picture through an sRGB view, so the colours come out as the shader wrote them (as in the page)
-        let shown = color.create_view(&wgpu::TextureViewDescriptor { format: Some(wgpu::TextureFormat::Rgba8UnormSrgb), ..Default::default() });
+        // egui shows the picture through a plain view, so the colours come out as the shader wrote them (as in the page and --picture);
+        // through an sRGB view they were decoded as sRGB and came out far too dark
+        let shown = color.create_view(&wgpu::TextureViewDescriptor { format: Some(wgpu::TextureFormat::Rgba8Unorm), ..Default::default() });
         let mut er = rs.renderer.write();
         if let Some(old) = self.target.take() { er.free_texture(&old.id); }
         let id = er.register_native_texture(&rs.device, &shown, wgpu::FilterMode::Linear);
-        self.target = Some(Target { size, color, depth: depth.create_view(&Default::default()), id });
+        self.target = Some(Target { size, color, id });
     }
 
     fn step(&mut self, k: f64) {
@@ -129,11 +221,11 @@ impl App {
         let n = self.frames();
         ui.horizontal(|ui| {
             ui.add_enabled_ui(n > 0, |ui| {
-                if ui.button("⏮").on_hover_text("First frame (Home)").clicked() { self.playing = false; self.t = 0.0; }
-                if ui.button("◀").on_hover_text("One frame back (Left)").clicked() { self.step(-1.0); }
-                if ui.button(if self.playing { "⏸" } else { "▶" }).on_hover_text("Play or pause (Space)").clicked() { self.playing = !self.playing; }
-                if ui.button("▶|").on_hover_text("One frame on (Right)").clicked() { self.step(1.0); }
-                if ui.button("⏭").on_hover_text("Last frame (End)").clicked() { self.playing = false; self.t = n.saturating_sub(1) as f64; }
+                if ui.button("|<").on_hover_text("First frame (Shift+Left)").clicked() { self.playing = false; self.t = 0.0; }
+                if ui.button("<").on_hover_text("One frame back (Left)").clicked() { self.step(-1.0); }
+                if ui.button(if self.playing { "Pause" } else { "Play" }).on_hover_text("Play or pause (Space)").clicked() { self.playing = !self.playing; }
+                if ui.button(">").on_hover_text("One frame on (Right)").clicked() { self.step(1.0); }
+                if ui.button(">|").on_hover_text("Last frame (Shift+Right)").clicked() { self.playing = false; self.t = n.saturating_sub(1) as f64; }
                 ui.checkbox(&mut self.looping, "Loop");
                 ui.add(egui::DragValue::new(&mut self.speed).range(0.05..=4.0).speed(0.01).prefix("speed ").suffix("x"));
                 let mut f = self.t.floor() as usize;
@@ -172,8 +264,12 @@ impl App {
             }
             ui.separator();
             ui.heading("Display");
-            ui.add(egui::Slider::new(&mut self.look.size, 0.2..=2.0).text("point size"));
-            ui.add(egui::Slider::new(&mut self.look.vmax, 0.5..=50.0).logarithmic(true).text("white at m/s"));
+            ui.add(egui::Slider::new(&mut self.look.size, 0.2..=2.0).text("Point size")).on_hover_text("Point size as a share of the particle spacing (the page's default 0.85).");
+            ui.add(egui::Slider::new(&mut self.look.vmax, 1.0..=12.0).step_by(0.5).text("White at, m/s")).on_hover_text("The speed that is coloured white. Slower water runs from blue to cyan.");
+            ui.add(egui::Slider::new(&mut self.look.foam, 0.0..=1.0).step_by(0.05).text("White water")).on_hover_text("How strongly churned water is drawn white.");
+            ui.add(egui::Slider::new(&mut self.look.detail, 0..=15).text("Water detail")).on_hover_text("Look-only extra points drawn around each water point.");
+            ui.add(egui::Slider::new(&mut self.look.spr_detail, 0..=15).text("Whitewater detail")).on_hover_text("Look-only extra points drawn around each whitewater point: spray streaks, mist clouds, foam patches.");
+            ui.checkbox(&mut self.look.blend, "Blend between frames").on_hover_text("While playing, the water moves smoothly from one baked frame to the next, as on the page.");
             ui.checkbox(&mut self.look.water, "Water");
             ui.checkbox(&mut self.look.deep, "Deep water");
             ui.checkbox(&mut self.look.whitewater, "Whitewater");
@@ -201,13 +297,24 @@ impl eframe::App for App {
         let dropped: Vec<PathBuf> = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
         if let Some(p) = dropped.last() { self.open(p); }
         let n = self.frames();
-        let (space, left, right, home, end) = ui.input(|i| (i.key_pressed(egui::Key::Space), i.key_pressed(egui::Key::ArrowLeft),
-            i.key_pressed(egui::Key::ArrowRight), i.key_pressed(egui::Key::Home), i.key_pressed(egui::Key::End)));
-        if space && n > 0 { self.playing = !self.playing; }
-        if left { self.step(-1.0); }
-        if right { self.step(1.0); }
-        if home { self.playing = false; self.t = 0.0; }
-        if end && n > 0 { self.playing = false; self.t = (n - 1) as f64; }
+        // the page's keys: Space plays, Left/Right step a frame, Shift+Left/Right go to the ends, Home (or F) frames the tank, 1/3/7 look
+        // along an axis (with Ctrl from the other side), 5 switches perspective and orthographic
+        let typing = ui.ctx().egui_wants_keyboard_input();
+        let (space, left, right, home, shift, ctrl) = ui.input(|i| (i.key_pressed(egui::Key::Space), i.key_pressed(egui::Key::ArrowLeft),
+            i.key_pressed(egui::Key::ArrowRight), i.key_pressed(egui::Key::Home), i.modifiers.shift, i.modifiers.command));
+        let (k1, k3, k5, k7, kf) = ui.input(|i| (i.key_pressed(egui::Key::Num1), i.key_pressed(egui::Key::Num3), i.key_pressed(egui::Key::Num5),
+            i.key_pressed(egui::Key::Num7), i.key_pressed(egui::Key::F)));
+        if !typing {
+            if space && n > 0 { self.playing = !self.playing; }
+            if left { if shift { self.playing = false; self.t = 0.0; } else { self.step(-1.0); } }
+            if right { if shift { if n > 0 { self.playing = false; self.t = (n - 1) as f64; } } else { self.step(1.0); } }
+            if home || kf { self.frame_all(); }
+            if k1 { self.snap_view(if ctrl { "back" } else { "front" }); }
+            if k3 { self.snap_view(if ctrl { "left" } else { "right" }); }
+            if k7 { self.snap_view(if ctrl { "bottom" } else { "top" }); }
+            if k5 { self.cam.ortho = !self.cam.ortho; }
+        }
+        if self.step_cam(dt) { ui.ctx().request_repaint(); }
 
         if self.playing && n > 0 {
             self.t += (dt.min(0.1) * self.fps() * self.speed) as f64;
@@ -228,7 +335,9 @@ impl eframe::App for App {
             let ppp = ui.ctx().pixels_per_point();
             let size = [((avail.x * ppp) as u32).max(16), ((avail.y * ppp) as u32).max(16)];
             self.ensure_target(&rs, size);
-            let f = self.t.floor() as usize;
+            let f = (self.t.floor() as usize).min(n.saturating_sub(1));
+            // the water blends from this frame towards the next while playing (paused, the frame is shown as it is)
+            let (fb, w) = if n > 1 && self.t.fract() > 0.0 { (if f + 1 < n { f + 1 } else if self.looping { 0 } else { f }, self.t.fract() as f32) } else { (f, 0.0) };
             // while paused, put the following frames on the GPU too, one per redraw, as long as they fit the budget (like the page's idleFill)
             if !self.playing && n > 1 && self.r.kept_bytes < self.r.budget * 9 / 10 {
                 if let Some(k) = (1..n).map(|k| (f + k) % n).find(|&k| !self.r.is_kept(k)) {
@@ -238,17 +347,22 @@ impl eframe::App for App {
             }
             let t = self.target.as_ref().unwrap();
             let mut enc = rs.device.create_command_encoder(&Default::default());
-            self.r.draw(&rs.device, &rs.queue, &mut enc, &t.color.create_view(&Default::default()), &t.depth, size, &self.cam, &self.doc, f, &self.look);
+            self.r.draw(&rs.device, &rs.queue, &mut enc, &t.color.create_view(&Default::default()), size, &self.cam, &self.doc, f, fb, w, &self.look);
             rs.queue.submit([enc.finish()]);
             let resp = ui.add(egui::Image::new(egui::load::SizedTexture::new(t.id, avail)).sense(egui::Sense::click_and_drag()));
+            // the page's mouse in a bake's view: any button orbits, with Shift it pans, with Ctrl it zooms; the wheel zooms
             let d = resp.drag_delta();
-            if resp.dragged_by(egui::PointerButton::Primary) { self.cam.orbit(d.x, d.y); }
-            if resp.dragged_by(egui::PointerButton::Secondary) || resp.dragged_by(egui::PointerButton::Middle) { self.cam.pan(d.x, d.y, avail.y); }
+            if resp.dragged() && d != egui::Vec2::ZERO {
+                self.goal = None;
+                let (sh, ct) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+                if sh { self.cam.pan(d.x, d.y); } else if ct { self.cam.zoom(d.y * 10.0); } else { self.cam.orbit(d.x, d.y); }
+            }
             if resp.hovered() {
                 let s = ui.input(|i| i.smooth_scroll_delta.y);
-                if s != 0.0 { self.cam.zoom(s / 50.0); }
+                if s != 0.0 { self.goal = None; self.cam.zoom(-s * 2.0); }
             }
-            if resp.double_clicked() { if let Some(b) = self.doc.tank() { self.cam = Orbit::frame(&b); } }
+            if resp.double_clicked() { self.frame_all(); }
+            self.axis_widget(ui, resp.rect);
         });
     }
 }

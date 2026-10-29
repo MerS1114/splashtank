@@ -2,7 +2,7 @@
 //!
 //!   splashtank [file.splc | scene.json ...]                    the window
 //!   splashtank --info file.splc                                what a cache holds, frame by frame
-//!   splashtank --picture out.png file [--frame n] [--size WxH] draws one frame without a window
+//!   splashtank --picture out.png file [--frame n] [--size WxH] draws one frame without a window (n.5: blended halfway)
 //!   splashtank --bake in.json|in.splc out.splc [--spacing 0.04] [--seconds s] [--detail 1|1.5|2] [--max-points n] [--accurate]
 //!       bakes without a window, streaming frames to out.splc. From a page cache: its scene and settings, baked again natively.
 //!       --water-only leaves whitewater, air and drips out (the page's Bake water).
@@ -83,7 +83,7 @@ fn main() {
     if let Some(out) = flag("--picture") {
         let skip: Vec<&String> = ["--picture", "--frame", "--size"].iter().filter_map(|k| args.iter().position(|a| a == k).map(|i| &args[i + 1])).collect();
         let files: Vec<PathBuf> = args.iter().filter(|a| !a.starts_with("--") && !skip.contains(a)).map(PathBuf::from).collect();
-        let frame = flag("--frame").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let frame = flag("--frame").and_then(|v| v.parse().ok()).unwrap_or(0.0);
         let size = flag("--size").and_then(|v| { let (w, h) = v.split_once('x')?; Some([w.parse().ok()?, h.parse().ok()?]) }).unwrap_or([1280, 720]);
         if let Err(e) = gpu::picture(&files, Path::new(&out), frame, size) { eprintln!("{e}"); std::process::exit(1); }
         return;

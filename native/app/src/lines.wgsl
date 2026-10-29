@@ -1,10 +1,15 @@
-// Tank box, ocean level and objects: plain vertices with a colour; triangles are lit by their normal, lines (normal 0) are not.
+// Tank box, floor grid, whitewater area, ocean level and objects: plain vertices with a colour (lines see-through by their alpha);
+// triangles are lit by their normal as the page's Lambert objects, lines (normal 0) are not.
 
 struct Cam {
   view: mat4x4<f32>,
   proj: mat4x4<f32>,
   org: vec4<f32>,
-  look: vec4<f32>,
+  vp: vec4<f32>,
+  a: vec4<f32>,
+  b: vec4<f32>,
+  c: vec4<f32>,
+  d: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> cam: Cam;
 
@@ -32,6 +37,7 @@ fn vs(v: VIn) -> VOut {
 fn fs(i: VOut) -> @location(0) vec4<f32> {
   if (dot(i.n, i.n) < 0.01) { return i.c; }
   let n = normalize(i.n);
-  let sh = 0.35 + 0.65 * abs(dot(n, normalize(vec3<f32>(0.4, 0.8, 0.45))));
-  return vec4<f32>(i.c.rgb * sh, i.c.a);
+  // the page's objects: Lambert, ambient 0.7 and a sun of 0.75 from (2, 5, 3), both sides lit
+  let sh = 0.7 + 0.75 * abs(dot(n, normalize(vec3<f32>(2.0, 5.0, 3.0))));
+  return vec4<f32>(min(i.c.rgb * sh, vec3<f32>(1.0)), i.c.a);
 }
