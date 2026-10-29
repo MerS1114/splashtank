@@ -1,6 +1,7 @@
 //! `--bake`: a headless bake from a scene file, or again from a page cache's scene and settings, streamed to a cache file.
 //! `--detail-pass`: a finer sim over a region of a finished bake, guided by it (the page's Detail), written to a new cache.
 //! `--bake-whitewater`: whitewater made afterwards from a finished bake's water (the page's Bake whitewater), written to a new cache.
+//! `--resume out.splc`: carries on a bake that stopped (a crash, a power cut, closing it) from its last checkpoint.
 
 use serde_json::Value;
 use splash_sim::bake;
@@ -10,9 +11,11 @@ use std::path::Path;
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let flag = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
+    let resume = flag("--resume");
     let ww = args.iter().any(|a| a == "--bake-whitewater");
     let det = args.iter().any(|a| a == "--detail-pass");
     let cmd = if ww { "--bake-whitewater" } else if det { "--detail-pass" } else { "--bake" };
+    if let Some(out) = &resume { return resume_bake(out); }
     let i = args.iter().position(|a| a == cmd).unwrap();
     let (inp, out) = (args.get(i + 1).ok_or(format!("{cmd} needs an input file and an output file"))?, args.get(i + 2).ok_or(format!("{cmd} needs an output file"))?);
     if (ww || det) && !inp.to_ascii_lowercase().ends_with(".splc") { return Err(format!("{cmd} works on a finished bake (.splc).")); }
@@ -25,7 +28,6 @@ pub fn run(args: &[String]) -> Result<(), String> {
         o.spacing = c.info.d * det;
         o.detail = Some(det);
         o.seconds = Some((c.frames.len().saturating_sub(1)) as f32 / c.info.fps);
-        if let Some(n) = m.pointer("/desc/maxN").and_then(Value::as_u64) { o.max_points = Some(n as u32); }
         if let Some(a) = m.pointer("/desc/accurate").and_then(Value::as_bool) { o.accurate = Some(a); }
         match flag("--scene") {
             // Bake whitewater with the scene as it is now (whitewater settings, colliders), as the page does
@@ -42,7 +44,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     if args.iter().any(|a| a == "--accurate") { o.accurate = Some(true); }
     let mut desc = desc_from_scene(&scene, &o)?;
     // the page's Bake water: the water without whitewater (Bake whitewater makes it afterwards)
-    if args.iter().any(|a| a == "--water-only") { desc.spr = None; desc.spray_cap = 0; desc.air = None; desc.drip = None; }
+    let water_only = args.iter().any(|a| a == "--water-only");
+    if water_only { desc.spr = None; desc.spray_cap = 0; desc.air = None; desc.drip = None; }
     let gpu = Gpu::new()?;
     eprintln!("{}; shaders ready in {:.0} ms", gpu.describe(), gpu.compile_ms);
     if det {
@@ -75,14 +78,47 @@ pub fn run(args: &[String]) -> Result<(), String> {
         eprintln!("wrote {out}");
         return Ok(());
     }
-    eprintln!("Spacing {} (live {} / detail {}), {} frames at {} a second, max {} points, {} to {} substeps a frame, {} iterations{}",
-        desc.d, o.spacing, desc.detail, desc.frames, desc.fps, desc.max_n, desc.substeps, desc.max_sub, desc.iters, if desc.accurate { ", Accurate" } else { "" });
+    let secs = match flag("--checkpoint-every") { Some(v) => v.parse().map_err(|_| "bad --checkpoint-every")?, None => 300.0 };
+    let started = serde_json::json!({ "scene": scene, "waterOnly": water_only, "opts": { "spacing": o.spacing, "seconds": o.seconds, "detail": o.detail, "maxPoints": o.max_points, "accurate": o.accurate } });
+    bake_now(&gpu, &desc, &o, Path::new(out), &bake::RunOpts { checkpoint_secs: secs, resume: false, started_with: started })
+}
+
+/// Runs a bake with its progress on the terminal; says at the end when the disk held it back.
+fn bake_now(gpu: &Gpu, desc: &splash_sim::scene::Desc, o: &BakeOpts, out: &Path, ro: &bake::RunOpts) -> Result<(), String> {
+    eprintln!("Spacing {} (live {} / detail {}), {} frames at {} a second, {} to {} substeps a frame, {} iterations{}",
+        desc.d, o.spacing, desc.detail, desc.frames, desc.fps, desc.substeps, desc.max_sub, desc.iters, if desc.accurate { ", Accurate" } else { "" });
     if !desc.left_out.is_empty() { eprintln!("Not in the native solver yet, left out: {}", desc.left_out.join(", ")); }
-    bake::run(&gpu, &desc, Path::new(out), |p| {
+    if ro.checkpoint_secs > 0.0 { eprintln!("A checkpoint every {:.0} s, so a stopped bake can carry on: splashtank --resume {}", ro.checkpoint_secs, out.display()); }
+    let (mut wait, mut el) = (0.0f32, 0.0f32);
+    bake::run(gpu, desc, out, ro, |p| {
         let eta = if p.f > 0 { p.elapsed / p.f as f32 * (p.frames - p.f) as f32 } else { 0.0 };
         eprintln!("frame {}/{}: {} points, {} substeps, {:.0} ms, {:.0} s so far, about {:.0} s left", p.f, p.frames, p.n, p.sub, p.frame_ms, p.elapsed, eta);
+        wait = p.wait; el = p.elapsed;
         true
     })?;
-    eprintln!("wrote {out}");
+    eprintln!("wrote {}", out.display());
+    if wait > 0.1 * el && wait > 5.0 {
+        eprintln!("The bake waited {wait:.0} s of {el:.0} s for the disk to take its frames: that drive writes too slowly for this bake. Bake to a faster drive.");
+    }
     Ok(())
+}
+
+/// --resume out.splc: the scene and settings the bake was started with come from its checkpoint.
+fn resume_bake(out: &str) -> Result<(), String> {
+    let out = Path::new(out);
+    let (v, _) = bake::read_checkpoint(&bake::checkpoint_path(out))?;
+    let s = &v["startedWith"];
+    let op = &s["opts"];
+    let o = BakeOpts {
+        spacing: op["spacing"].as_f64().ok_or("The checkpoint has no settings.")? as f32,
+        seconds: op["seconds"].as_f64().map(|x| x as f32), detail: op["detail"].as_f64().map(|x| x as f32),
+        max_points: op["maxPoints"].as_u64().map(|x| x as u32), accurate: op["accurate"].as_bool(),
+    };
+    let mut desc = desc_from_scene(&s["scene"], &o)?;
+    if s["waterOnly"].as_bool().unwrap_or(false) { desc.spr = None; desc.spray_cap = 0; desc.air = None; desc.drip = None; }
+    let gpu = Gpu::new()?;
+    eprintln!("{}; shaders ready in {:.0} ms", gpu.describe(), gpu.compile_ms);
+    eprintln!("Carrying on {} after frame {} of {}", out.display(), v["frame"], desc.frames);
+    let secs = v["checkpointEvery"].as_f64().unwrap_or(300.0) as f32;
+    bake_now(&gpu, &desc, &o, out, &bake::RunOpts { checkpoint_secs: secs, resume: true, started_with: s.clone() })
 }

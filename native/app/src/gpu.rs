@@ -60,3 +60,42 @@ pub fn picture(files: &[PathBuf], out: &Path, frame: f64, size: [u32; 2]) -> Res
     eprintln!("wrote {}", out.display());
     Ok(())
 }
+
+/// Plays a cache through without a window, as the window does while playing (each frame blended halfway towards the next), with a
+/// budget of video memory for the frames kept, and times every frame from start to finish on the GPU: how playback holds up when a
+/// bake is bigger than the budget and frames have to come from the disk.
+pub fn playback_test(file: &Path, budget_mb: u64, size: [u32; 2], loops: u32) -> Result<(), String> {
+    let mut doc = Doc::default();
+    eprintln!("{}", crate::open_into(&mut doc, file)?);
+    let n = doc.cache.as_ref().map(|c| c.frames.len()).ok_or("That is not a cache.")?;
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::PRIMARY, ..wgpu::InstanceDescriptor::new_without_display_handle() });
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() }))
+        .map_err(|e| format!("No GPU adapter: {e}"))?;
+    let (device, queue) = pollster::block_on(adapter.request_device(&device_descriptor(&adapter))).map_err(|e| format!("No GPU device: {e}"))?;
+    let color = device.create_texture(&wgpu::TextureDescriptor { label: None, size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+        mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: render::COLOR, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] });
+    let view = color.create_view(&Default::default());
+    let mut r = Renderer::new(&device);
+    r.budget = budget_mb << 20;
+    let cam = doc.tank().map(|b| Orbit::frame(&b)).ok_or("Nothing to draw.")?;
+    let file_mb = doc.cache.as_ref().map(|c| c.bytes().len() >> 20).unwrap_or(0);
+    for lp in 0..loops {
+        let mut ms = Vec::new();
+        let up0 = r.uploads;
+        let t0 = std::time::Instant::now();
+        for f in 0..n {
+            let t = std::time::Instant::now();
+            let mut enc = device.create_command_encoder(&Default::default());
+            r.draw(&device, &queue, &mut enc, &view, size, &cam, &doc, f, (f + 1) % n, 0.5, &Look::default());
+            queue.submit([enc.finish()]);
+            device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| e.to_string())?;
+            ms.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        let all = t0.elapsed().as_secs_f64();
+        let mut s = ms.clone();
+        s.sort_by(|a, b| a.total_cmp(b));
+        eprintln!("loop {}: {} frames in {:.1} s ({:.1} a second); a frame {:.0} ms median, {:.0} slowest; {} uploads; {} MB kept of a {} MB budget, file {} MB",
+            lp + 1, n, all, n as f64 / all, s[s.len() / 2], s[s.len() - 1], r.uploads - up0, r.kept_bytes >> 20, budget_mb, file_mb);
+    }
+    Ok(())
+}

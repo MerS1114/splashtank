@@ -35,6 +35,31 @@ fn vnoise(x: f32, y: f32, z: f32) -> f32 {
 impl Runner {
     pub fn new(seed: u64) -> Runner { Runner { prev: HashMap::new(), em: HashMap::new(), rng: Rng::new(seed) } }
 
+    /// What carries over between steps (each collider's last pose, each source's stream, the random numbers), for a checkpoint.
+    pub fn save_state(&self) -> serde_json::Value {
+        serde_json::json!({
+            "rng": self.rng.0,
+            "prev": self.prev.iter().map(|(id, p)| serde_json::json!([id, p.pos, p.r, p.sz])).collect::<Vec<_>>(),
+            "em": self.em.iter().map(|(id, e)| serde_json::json!([id, e.phase, e.acc, e.key, e.pts, e.t, e.dist])).collect::<Vec<_>>(),
+        })
+    }
+    pub fn restore_state(&mut self, v: &serde_json::Value) {
+        let fl = |x: &serde_json::Value| x.as_f64().unwrap_or(0.0) as f32;
+        let arr = |x: &serde_json::Value| -> Vec<f32> { x.as_array().map(|a| a.iter().map(fl).collect()).unwrap_or_default() };
+        self.rng = Rng(v["rng"].as_u64().unwrap_or(0x5eed));
+        self.prev.clear();
+        for p in v["prev"].as_array().into_iter().flatten() {
+            let (pos, r, sz) = (arr(&p[1]), arr(&p[2]), arr(&p[3]));
+            if pos.len() == 3 && r.len() == 9 && sz.len() == 3 {
+                self.prev.insert(p[0].as_u64().unwrap_or(0), Prev { pos: [pos[0], pos[1], pos[2]], r: r.try_into().unwrap(), sz: [sz[0], sz[1], sz[2]] });
+            }
+        }
+        self.em.clear();
+        for e in v["em"].as_array().into_iter().flatten() {
+            self.em.insert(e[0].as_u64().unwrap_or(0), Em { phase: fl(&e[1]), acc: fl(&e[2]), key: e[3].as_str().unwrap_or("").to_string(), pts: arr(&e[4]), t: fl(&e[5]), dist: fl(&e[6]) });
+        }
+    }
+
     /// One step: collider records from the objects' states, emitters, then the solver step.
     pub fn step(&mut self, gpu: &Gpu, sim: &mut FlipSim, dt: f32, states: &[Obj], par: &StepPar, col_max: f32, scale: f32) {
         let lim2 = if col_max > 0.0 { col_max * col_max } else { 400.0 };

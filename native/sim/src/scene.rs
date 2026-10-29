@@ -67,7 +67,9 @@ pub struct Event { pub t: f32, pub x: f64, pub y: f64, pub z: f64, pub r: f64 }
 /// What the page's buildDesc makes: everything a bake needs. Only what the native solver uses so far is here.
 #[derive(Clone)]
 pub struct Desc {
-    pub d: f32, pub max_n: u32, pub fps: f32, pub substeps: u32, pub max_sub: u32, pub frames: u32,
+    pub d: f32, pub max_n: u32, pub fps: f32,
+    /// Max points was given (otherwise a narrow band bake picks its own from the starting water and the card)
+    pub max_n_set: bool, pub substeps: u32, pub max_sub: u32, pub frames: u32,
     pub g: f32, pub iters: u32, pub flip: f32, pub apic_flip: f32, pub comp: f32, pub sep: f32, pub apic: bool, pub accurate: bool,
     pub cell_ratio: f32, pub sort: bool, pub p2g_win: bool, pub ballistic: bool, pub settle: bool, pub mg: bool,
     pub detail: f32, pub col_max: f32, pub vmax_w: f32, pub scale: f32, pub tear: f32,
@@ -254,7 +256,7 @@ pub fn desc_from_scene(scene: &Value, o: &BakeOpts) -> Result<Desc, String> {
     let iters = num(&sv, "iters", 30.0) as u32;
     let apic = sv.get("xfer").and_then(Value::as_str).unwrap_or("apic") == "apic";
     let mut dsc = Desc {
-        d, max_n, fps, substeps, max_sub, frames: (dur * fps).round() as u32,
+        d, max_n, max_n_set: o.max_points.is_some(), fps, substeps, max_sub, frames: (dur * fps).round() as u32,
         g, iters, flip: num(&sv, "flip", 0.95) as f32, apic_flip: num(&sv, "apicFlip", 0.8) as f32, comp: if sep > 0.0 { 0.0 } else { 6.0 }, sep, apic, accurate,
         cell_ratio, sort: true, p2g_win: false, ballistic: true, settle: false, mg: true,
         detail, col_max: num(&sv, "colMax", 100.0) as f32 * k, vmax_w: num(&sv, "vmaxW", 50.0) as f32 * k, scale,

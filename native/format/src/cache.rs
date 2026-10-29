@@ -10,7 +10,7 @@
 
 use serde_json::Value;
 use std::fs::File;
-use std::io::{self, BufWriter, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::Path;
 
@@ -356,6 +356,30 @@ impl CacheWriter {
     }
 
     pub fn frames(&self) -> u32 { self.frames }
+
+    /// Writes out everything appended so far and returns where the file ends (a checkpoint records it).
+    pub fn flush_point(&mut self) -> io::Result<u64> {
+        self.w.flush()?;
+        self.w.get_mut().sync_data()?;
+        self.w.get_mut().stream_position()
+    }
+
+    /// Opens a cache being written (frame count still unknown) to carry on after `frames` frames that end at byte `end`: anything
+    /// after them (frames written after the checkpoint) is cut off.
+    pub fn reopen(path: &Path, frames: u32, end: u64) -> io::Result<CacheWriter> {
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        let mut head = [0u8; 12];
+        file.read_exact(&mut head)?;
+        if &head[..4] != b"SPLC" { return Err(io::Error::new(io::ErrorKind::InvalidData, "not a SPLC cache")); }
+        let room = u32::from_le_bytes(head[8..12].try_into().unwrap()) as usize;
+        if file.metadata()?.len() < end { return Err(io::Error::new(io::ErrorKind::InvalidData, "the cache is shorter than the checkpoint says")); }
+        file.set_len(end)?;
+        // the frame count goes back to "until the end of the file" until the bake finishes again
+        file.seek(SeekFrom::Start(12 + room as u64))?;
+        file.write_all(&u32::MAX.to_le_bytes())?;
+        file.seek(SeekFrom::Start(end))?;
+        Ok(CacheWriter { w: BufWriter::with_capacity(8 << 20, file), room, frames, path: path.to_owned() })
+    }
 
     pub fn append(&mut self, f: &FrameOut) -> io::Result<()> {
         let w = &mut self.w;

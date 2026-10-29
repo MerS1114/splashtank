@@ -209,7 +209,7 @@ impl FlipSim {
         buf.insert(25, mk(16));
         buf.insert(15, mk(16)); buf.insert(37, mk(16));
         buf.insert(38, dev.create_buffer(&wgpu::BufferDescriptor { label: Some("packU"), size: 128, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
-        buf.insert(14, dev.create_buffer(&wgpu::BufferDescriptor { label: Some("args"), size: 192, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+        buf.insert(14, dev.create_buffer(&wgpu::BufferDescriptor { label: Some("args"), size: 192, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }));
         buf.insert(11, mk(64));
         let stats_ring = StatRing { bufs: (0..3).map(|_| (dev.create_buffer(&wgpu::BufferDescriptor { label: Some("stat"), size: 64,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::new(AtomicU8::new(FREE)))).collect() };
@@ -245,6 +245,98 @@ impl FlipSim {
     }
 
     pub fn d(&self) -> f32 { self.l.d }
+    /// Video memory this sim's buffers take now (every binding plus the staging buffers for readbacks).
+    pub fn mem_bytes(&self) -> u64 {
+        self.buf.values().map(|b| b.size()).sum::<u64>() + [&self.stage, &self.sstage, &self.dstage, &self.sctl_stage].iter().filter_map(|s| s.as_ref().map(|b| b.size())).sum::<u64>() + 3 * 64
+    }
+
+    // ---- checkpoints (resuming a bake after a crash) ----
+
+    /// Bytes of binding k a checkpoint keeps: particle buffers only as far as the particles go, everything else whole.
+    fn kept_bytes(&self, k: u32, size: u64) -> u64 {
+        let n = self.n as u64;
+        let per = match k { 1 | 2 | 23 | 24 => 16, 26 | 27 => 4, 42 => 48, _ => return size };
+        size.min(n.max(1) * per)
+    }
+
+    /// Writes every buffer that carries state from one step to the next to w (the parameter block, colliders and their distance grids
+    /// are written again every step, the display and packing buffers hold nothing between steps) and returns what is needed to read
+    /// them back, with the sim's own counters.
+    pub fn save_state(&self, gpu: &Gpu, w: &mut impl std::io::Write) -> std::io::Result<serde_json::Value> {
+        const CHUNK: u64 = 256 << 20;
+        let stage = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("checkpoint"), size: CHUNK,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let mut keys: Vec<u32> = self.buf.keys().copied().filter(|k| ![0, 10, 11, 15, 37, 38].contains(k)).collect();
+        keys.sort();
+        let mut list = Vec::new();
+        for k in keys {
+            let b = &self.buf[&k];
+            let keep = self.kept_bytes(k, b.size());
+            let mut off = 0;
+            while off < keep {
+                let len = CHUNK.min(keep - off);
+                let mut enc = gpu.device.create_command_encoder(&Default::default());
+                enc.copy_buffer_to_buffer(b, off, &stage, 0, len);
+                gpu.queue.submit([enc.finish()]);
+                stage.slice(..len).map_async(wgpu::MapMode::Read, |_| {});
+                let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+                w.write_all(&stage.slice(..len).get_mapped_range().unwrap())?;
+                stage.unmap();
+                off += len;
+            }
+            list.push(serde_json::json!([k, b.size(), keep]));
+        }
+        Ok(serde_json::json!({
+            "buffers": list, "n": self.n, "cap": self.cap, "maxN": self.max_n, "scap": self.scap, "lcap": self.lcap, "tm": self.tm, "seed": self.seed,
+            "sortTick": self.sort_tick, "sortMoved": self.sort_moved, "sortedEver": self.sorted_ever, "lastDt": self.last_dt, "mgSize": self.mg_size,
+            "ovfTotal": self.ovf_total, "grew": self.grew, "velG": self.vel_g_on, "nbInit": self.nb_init, "nbBand": self.nb_band,
+            "ocean": self.ocean.map(|o| serde_json::json!([o.height, o.length, o.dir, o.spread, o.seed, o.level, o.layer])), "oceanW": self.ocean_w,
+            "sprayCap": self.spray_cap, "sprDispMax": self.spr_disp_max, "deepOn": self.deep_on,
+            "air": self.air_dims.map(|a| serde_json::json!([a.n, a.cells, a.h])), "ndrip": self.ndrip, "dripSig": self.drip_sig,
+        }))
+    }
+
+    /// Puts back what save_state wrote (r reads the bytes in the same order). The sim must have been made with the same grid and
+    /// Max points. Colliders, their distance grids and solid cells are made again on the next step.
+    pub fn restore_state(&mut self, gpu: &Gpu, v: &serde_json::Value, r: &mut impl std::io::Read) -> Result<(), String> {
+        let e = |m: &str| format!("The checkpoint is damaged ({m}).");
+        if v["maxN"].as_u64() != Some(self.max_n as u64) { return Err("The checkpoint was made with a different Max points.".into()); }
+        let mut chunk = vec![0u8; 64 << 20];
+        for item in v["buffers"].as_array().ok_or(e("buffers"))? {
+            let (k, size, keep) = (item[0].as_u64().ok_or(e("binding"))? as u32, item[1].as_u64().ok_or(e("size"))?, item[2].as_u64().ok_or(e("size"))?);
+            // the indirect arguments must stay usable for indirect dispatches
+            let b = if k == 14 { gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("args"), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }) } else { Self::mk(gpu, size) };
+            let mut off = 0;
+            while off < keep {
+                let len = (chunk.len() as u64).min(keep - off) as usize;
+                r.read_exact(&mut chunk[..len]).map_err(|x| format!("Reading the checkpoint failed: {x}"))?;
+                gpu.queue.write_buffer(&b, off, &chunk[..len]);
+                off += len as u64;
+            }
+            // flush the queued uploads now and then, so they do not pile up in memory
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            self.buf.insert(k, b);
+        }
+        let u = |k: &str| v[k].as_u64().unwrap_or(0);
+        let f = |k: &str| v[k].as_f64().unwrap_or(0.0) as f32;
+        let bl = |k: &str| v[k].as_bool().unwrap_or(false);
+        self.n = u("n") as u32; self.cap = u("cap") as u32; self.scap = u("scap") as u32; self.lcap = u("lcap") as u32;
+        self.tm = f("tm"); self.seed = u("seed") as u32; self.sort_tick = u("sortTick") as u32; self.sort_moved = f("sortMoved");
+        self.sorted_ever = bl("sortedEver"); self.last_dt = f("lastDt"); self.mg_size = u("mgSize"); self.ovf_total = u("ovfTotal"); self.grew = u("grew") as u32;
+        self.vel_g_on = bl("velG"); self.nb_init = u("nbInit") as u32; self.nb_band = v["nbBand"].as_f64().map(|b| b as f32);
+        self.ocean = v["ocean"].as_array().map(|a| Ocean { height: a[0].as_f64().unwrap_or(0.0), length: a[1].as_f64().unwrap_or(1.0), dir: a[2].as_f64().unwrap_or(0.0),
+            spread: a[3].as_f64().unwrap_or(0.0), seed: a[4].as_i64().unwrap_or(1) as i32, level: a[5].as_f64().unwrap_or(0.0), layer: a[6].as_f64().unwrap_or(0.0) });
+        self.ocean_w = v["oceanW"].as_array().map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect()).unwrap_or_default();
+        self.spray_cap = u("sprayCap") as u32; self.spr_disp_max = u("sprDispMax") as u32; self.deep_on = bl("deepOn");
+        self.air_dims = v["air"].as_array().map(|a| AirDims { n: [0, 1, 2].map(|i| a[0][i].as_u64().unwrap_or(1) as u32), cells: a[1].as_u64().unwrap_or(1) as u32, h: a[2].as_f64().unwrap_or(1.0) as f32 });
+        self.ndrip = u("ndrip") as u32;
+        self.drip_sig = v["dripSig"].as_array().map(|a| a.iter().map(|x| x.as_u64().unwrap_or(0) as u32).collect()).unwrap_or_else(|| vec![u32::MAX]);
+        self.nb_fills.clear(); self.nb_vols.clear();
+        self.stats = None; self.cf_prev = None; self.solid_dirty = true;
+        self.run_pos.clear(); self.run_vel.clear();
+        self.groups_dirty = true;
+        Ok(())
+    }
     pub fn h(&self) -> f32 { self.l.h }
 
     fn mk(gpu: &Gpu, size: u64) -> wgpu::Buffer {
@@ -963,7 +1055,7 @@ impl FlipSim {
 }
 
 /// A small fast random number generator (splitmix64) for jitter and emitters; the page uses Math.random, so runs differ anyway.
-pub struct Rng(u64);
+pub struct Rng(pub u64);
 impl Rng {
     pub fn new(seed: u64) -> Rng { Rng(seed) }
     pub fn f(&mut self) -> f32 {

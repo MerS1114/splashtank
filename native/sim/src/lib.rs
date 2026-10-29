@@ -57,7 +57,7 @@ mod tests {
         let desc = crate::scene::desc_from_scene(&scene, &crate::scene::BakeOpts { spacing: 0.02, ..Default::default() }).unwrap();
         let gpu = crate::gpu::Gpu::new().unwrap();
         let out = std::env::temp_dir().join("splash-sim-short.splc");
-        crate::bake::run(&gpu, &desc, &out, |_| true).unwrap();
+        crate::bake::run(&gpu, &desc, &out, &Default::default(), |_| true).unwrap();
         let c = splash_format::Cache::open(&out).unwrap();
         assert_eq!(c.frames.len(), 13);
         let diag = c.info.meta["diag"].as_array().unwrap();
@@ -84,7 +84,7 @@ mod tests {
         let gpu = crate::gpu::Gpu::new().unwrap();
         let dir = std::env::temp_dir();
         let (out, ww, det) = (dir.join("splash-sim-ocean.splc"), dir.join("splash-sim-ocean-ww.splc"), dir.join("splash-sim-ocean-det.splc"));
-        crate::bake::run(&gpu, &desc, &out, |_| true).unwrap();
+        crate::bake::run(&gpu, &desc, &out, &Default::default(), |_| true).unwrap();
         let c = splash_format::Cache::open(&out).unwrap();
         assert_eq!(c.frames.len(), 13);
         let diag = c.info.meta["diag"].as_array().unwrap();
@@ -102,5 +102,36 @@ mod tests {
         assert_eq!(cd.frames.len(), 13);
         let n0 = cd.info.meta["detail"]["n0"].as_u64().unwrap() as u32;
         assert!(cd.frames[12].water.n > n0 + 10000, "fine water after the bake's");
+    }
+
+    /// A bake stopped partway (its checkpoint kept) carries on with --resume to the same water as one that ran straight through.
+    #[test]
+    fn resume_matches() {
+        let scene = serde_json::json!({ "app": "SplashTank", "version": 2, "box": { "min": { "x": -0.6, "y": 0, "z": -0.6 }, "size": { "w": 1.2, "h": 1.2, "d": 1.2 } },
+            "solver": { "iters": 30, "cap": 2000000, "nbOn": true, "nbBand": 3, "sprOn": true, "sprCap": 200000, "airOn": true },
+            "ocean": { "on": true, "height": 0.05, "length": 0.6, "dir": 20, "spread": 25, "level": 0.4, "layer": 0.15, "seed": 3 },
+            "bake": { "dur": 0.5, "fps": 24 }, "fills": [], "objs": [], "events": [{ "t": 0.02, "x": 0.0, "y": 0.8, "z": 0.0, "r": 0.12 }] });
+        let desc = crate::scene::desc_from_scene(&scene, &crate::scene::BakeOpts { spacing: 0.015, ..Default::default() }).unwrap();
+        let gpu = crate::gpu::Gpu::new().unwrap();
+        let dir = std::env::temp_dir();
+        let (a, b) = (dir.join("splash-sim-straight.splc"), dir.join("splash-sim-resumed.splc"));
+        crate::bake::run(&gpu, &desc, &a, &Default::default(), |_| true).unwrap();
+        let ro = crate::bake::RunOpts { checkpoint_secs: 0.001, resume: false, started_with: serde_json::Value::Null };
+        crate::bake::run(&gpu, &desc, &b, &ro, |p| p.f < 6).unwrap();
+        assert!(crate::bake::checkpoint_path(&b).exists(), "a stopped bake keeps its checkpoint");
+        crate::bake::run(&gpu, &desc, &b, &crate::bake::RunOpts { resume: true, ..ro }, |_| true).unwrap();
+        assert!(!crate::bake::checkpoint_path(&b).exists(), "a finished bake removes it");
+        let (ca, cb) = (splash_format::Cache::open(&a).unwrap(), splash_format::Cache::open(&b).unwrap());
+        assert_eq!(cb.frames.len(), 13);
+        let (da, db) = (ca.info.meta["diag"].as_array().unwrap().clone(), cb.info.meta["diag"].as_array().unwrap().clone());
+        assert_eq!(db.len(), 13);
+        for (x, y) in da.iter().zip(&db) {
+            assert_eq!(x["f"], y["f"]);
+            assert_eq!(y["nonFinite"], 0);
+            let (na, nb) = (x["alive"].as_f64().unwrap(), y["alive"].as_f64().unwrap());
+            assert!((na - nb).abs() < 0.01 * na, "frame {}: {na} against {nb} particles", x["f"]);
+            let gap: f64 = (0..3).map(|k| (x["center"][k].as_f64().unwrap() - y["center"][k].as_f64().unwrap()).powi(2)).sum::<f64>().sqrt();
+            assert!(gap < 0.01, "frame {}: water centre {gap} apart", x["f"]);
+        }
     }
 }

@@ -222,25 +222,103 @@ fn poses(states: &[Obj]) -> Vec<f32> {
 /// deep water points.
 pub struct Raw { pub spray: Option<(usize, Vec<f32>, Vec<f32>)>, pub deep: Option<Vec<f32>> }
 
-pub struct Progress { pub f: u32, pub frames: u32, pub n: u32, pub elapsed: f32, pub sub: u32, pub frame_ms: f32 }
+/// A frame done. wait: seconds the bake has waited in all for the packer and the disk to take its frames.
+pub struct Progress { pub f: u32, pub frames: u32, pub n: u32, pub elapsed: f32, pub sub: u32, pub frame_ms: f32, pub wait: f32 }
+
+/// How a bake runs besides its scene: checkpoints for resuming after a crash.
+#[derive(Clone, Default)]
+pub struct RunOpts {
+    /// write a checkpoint about this often, in seconds of baking (0: never)
+    pub checkpoint_secs: f32,
+    /// carry on from the checkpoint next to out instead of starting again
+    pub resume: bool,
+    /// what the bake was started with, kept in the checkpoint so resuming needs nothing else
+    pub started_with: Value,
+}
+
+/// Where a bake's checkpoint lives: next to its cache.
+pub fn checkpoint_path(out: &Path) -> std::path::PathBuf { out.with_extension("splc.ckpt") }
+
+/// A checkpoint file: the buffers' bytes, then the JSON that says what they are and the bake's own state, then its length and "SPCK".
+pub fn read_checkpoint(path: &Path) -> Result<(Value, std::io::BufReader<std::fs::File>), String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let e = |x: std::io::Error| format!("Could not read the checkpoint {}: {x}", path.display());
+    let mut f = std::fs::File::open(path).map_err(e)?;
+    let len = f.metadata().map_err(e)?.len();
+    if len < 12 { return Err(format!("{} is not a checkpoint.", path.display())); }
+    f.seek(SeekFrom::Start(len - 12)).map_err(e)?;
+    let mut tail = [0u8; 12];
+    f.read_exact(&mut tail).map_err(e)?;
+    if &tail[8..] != b"SPCK" { return Err(format!("{} is not a checkpoint (or was cut short while being written).", path.display())); }
+    let jl = u64::from_le_bytes(tail[..8].try_into().unwrap());
+    f.seek(SeekFrom::Start(len - 12 - jl)).map_err(e)?;
+    let mut js = vec![0u8; jl as usize];
+    f.read_exact(&mut js).map_err(e)?;
+    let v: Value = serde_json::from_slice(&js).map_err(|x| format!("The checkpoint is damaged: {x}"))?;
+    f.seek(SeekFrom::Start(0)).map_err(e)?;
+    Ok((v, std::io::BufReader::with_capacity(8 << 20, f)))
+}
+
+/// The free video memory in MB, from the NVIDIA driver's nvidia-smi (this program is built for Mer's NVIDIA card); None if it cannot say.
+pub fn free_vram_mb() -> Option<u64> {
+    let o = std::process::Command::new("nvidia-smi").args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"]).output().ok()?;
+    String::from_utf8_lossy(&o.stdout).lines().next()?.trim().parse().ok()
+}
+
+/// About how much video memory a bake with Max points max_n takes: per particle its position, velocity, number, APIC rows and the
+/// readback copy; the block pool when its water sits packed (gridCost's estimate); whitewater with its readback copy; a margin.
+pub fn estimate_bytes(max_n: u64, apic: bool, ratio: f32, spray_cap: u64) -> u64 {
+    let per = 16 + 16 + 4 + 16 + if apic { 48 } else { 0 };
+    let blocks = (max_n as f64 / (ratio as f64).powi(3) / 512.0 * 2.5).ceil() as u64;
+    max_n * per + blocks * (512 * 72 + 12) + spray_cap * (16 * 4 + 4) + (300 << 20)
+}
+
+/// What the bake loop needs from the frame writer: frames to write, or a request to write out everything so far and say where the file
+/// ends (for a checkpoint).
+enum Job { Frame(Vec<f32>, usize, Vec<f32>, Value, Raw), Mark(mpsc::Sender<(u64, u32, Vec<Value>)>) }
+enum Out { Frame(Packed, Value), Mark(mpsc::Sender<(u64, u32, Vec<Value>)>) }
 
 /// Bakes desc into a cache file at out. progress is told about every frame; returning false stops the bake (the frames so far stay
-/// in the file, which opens like a finished bake).
-pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, mut progress: impl FnMut(&Progress) -> bool) -> Result<(), String> {
+/// in the file, which opens like a finished bake). With ro.checkpoint_secs, a checkpoint is written next to the cache that often; with
+/// ro.resume, the bake carries on from it.
+pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, ro: &RunOpts, mut progress: impl FnMut(&Progress) -> bool) -> Result<(), String> {
     let lay = layout(desc.d, desc.cell_ratio, desc.size);
     let lim = (gpu.device.limits().max_storage_buffer_binding_size as u64 / if desc.apic { 48 } else { 16 }) as u32;
+    let ck_path = checkpoint_path(out);
+    let resume = if ro.resume { Some(read_checkpoint(&ck_path)?) } else { None };
     let mut max_n = desc.max_n.min(lim);
-    // narrow band: the starting band must fit, or the seed stops partway across the tank and the water there drains away. Max points is
-    // raised to the starting water plus room for impacts to refill the band from (up to what one GPU buffer holds)
+    // narrow band: the starting band must fit, or the seed stops partway across the tank and the water there drains away
     let nb_band = if desc.nb.is_some() || desc.ocean.is_some() { Some(desc.nb.unwrap_or(3.0)) } else { None };
     let ocean_w = desc.ocean.map(|oc| nb::waves(&oc, desc.g as f64, oc.level - lay.b.y0 as f64)).unwrap_or_default();
     let oc = desc.ocean.as_ref().map(|c| (c, &ocean_w[..]));
     let mut need = 0u64;
-    if let Some(band) = nb_band {
+    let free = free_vram_mb();
+    if let Some((v, _)) = &resume {
+        max_n = v["maxN"].as_u64().unwrap_or(max_n as u64) as u32;
+        need = v["need"].as_u64().unwrap_or(0);
+    } else if let Some(band) = nb_band {
         let s = nb::seed(&lay, &desc.fills, band, oc, 0.0, &mut |_, _| true);
         need = s.seeded + nb::spares(s.seeded);
         if need > lim as u64 { return Err(format!("The starting water needs {:.1}M points, more than one GPU buffer holds here ({:.1}M). Use less detail, a coarser spacing or a thinner narrow band.", need as f64 / 1e6, lim as f64 / 1e6)); }
-        if need as f64 * 1.15 > max_n as f64 { max_n = lim.min((need as f64 * 1.3).ceil() as u32); }
+        // Max points for the band to refill from: the page raises it to 1.3 times the starting water, but the band asks for about twice
+        // that after an impact (on Mer's ocean at 0.012, 10.5 to 12M against 6.2M at the start), and when it runs out the refill goes
+        // where the GPU happens to list cells first. So, unless Max points was given, 2.5 times the start, as far as the card's free
+        // memory and one buffer allow.
+        if !desc.max_n_set {
+            let mut want = (need as f64 * 2.5).ceil() as u64;
+            if let Some(mb) = free {
+                let per = (estimate_bytes(1 << 20, desc.apic, desc.cell_ratio, 0) - estimate_bytes(0, desc.apic, desc.cell_ratio, 0)) as f64 / (1 << 20) as f64;
+                let room = (mb as f64 * 1048576.0 * 0.85 - estimate_bytes(0, desc.apic, desc.cell_ratio, desc.spray_cap as u64) as f64).max(0.0);
+                want = want.min((room / per) as u64).max((need as f64 * 1.3).ceil() as u64);
+            }
+            max_n = (max_n as u64).max(want).min(lim as u64) as u32;
+            eprintln!("Max points {:.1}M: the starting water needs {:.1}M, and the narrow band refills from the rest", max_n as f64 / 1e6, need as f64 / 1e6);
+        } else if need as f64 * 1.15 > max_n as f64 { max_n = lim.min((need as f64 * 1.3).ceil() as u32); }
+    }
+    // the card must hold it: say so before baking rather than fail partway
+    let est = estimate_bytes(max_n as u64, desc.apic, desc.cell_ratio, desc.spray_cap as u64);
+    if let Some(mb) = free {
+        if est > mb << 20 { return Err(format!("This bake needs about {:.1} GB of video memory and {:.1} GB is free. Lower Max points or Max whitewater, or use a coarser spacing.", est as f64 / 1e9, mb as f64 / 1024.0)); }
     }
     let mut sim = FlipSim::new(gpu, lay, desc.open, max_n);
     sim.opt.apic = desc.apic; sim.opt.sort = desc.sort; sim.opt.p2g_win = desc.p2g_win; sim.opt.ballistic = desc.ballistic; sim.opt.settle = desc.settle;
@@ -253,26 +331,6 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, mut progress: impl FnMut(&Progres
     if desc.nb_look { sim.set_deep_look(gpu, true); }
     let mut runner = Runner::new(0x5eed);
     let mut rng = Rng::new(0xf111);
-    if let Some(band) = nb_band {
-        let j = (0.01 * lay.d as f64 / 0.12) as f32;
-        let s = {
-            let sim = &mut sim;
-            let rng = &mut rng;
-            nb::seed(&lay, &desc.fills, band, oc, 0.0, &mut |p, v| sim.add(gpu, [p[0] + (rng.f() - 0.5) * j, p[1] + (rng.f() - 0.5) * j, p[2] + (rng.f() - 0.5) * j], v))
-        };
-        // spare slots, parked off the map, for the solver to refill the band with
-        let spare = ((sim.cap - sim.n) as u64).min(nb::spares(s.seeded));
-        for _ in 0..spare { sim.add(gpu, [0.0, -1e6, 0.0], [0.0; 3]); }
-        sim.nb_fills = s.prims; sim.nb_vols = s.vols; sim.nb_init = 1; sim.nb_band = Some(band); sim.ocean = desc.ocean; sim.ocean_w = ocean_w.clone();
-    } else {
-        for f in &desc.fills {
-            match f {
-                Fill::Box { x0, x1, y0, y1, z0, z1 } => sim.fill_box(gpu, &mut rng, [*x0, *x1, *y0, *y1, *z0, *z1]),
-                Fill::Sphere { x, y, z, r, vy } => sim.fill_sphere(gpu, &mut rng, [*x, *y, *z], *r, [0.0, *vy as f32, 0.0]),
-                Fill::Vol { .. } => fill_volume(gpu, &mut sim, &mut rng, f),
-            }
-        }
-    }
     let (fps, frames) = (desc.fps, desc.frames);
     let dtf = 1.0 / fps;
     let cfl = if acc { 0.6 } else { 1.5 };
@@ -292,17 +350,32 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, mut progress: impl FnMut(&Progres
     let mut meta = json!({ "d": desc.d, "fps": fps, "ids": desc.objs.iter().map(|o| o.id).collect::<Vec<_>>(), "b": lay.b.to_json(),
         "org": { "x": desc.org[0], "y": desc.org[1], "z": desc.org[2] }, "maxN": max_n, "seconds": 0, "engine": "flip", "scene": desc.scene, "desc": desc.light,
         "diag": [], "stableIds": true, "scale": desc.scale, "spdMs": true, "q": q.map(|q| q.to_vec()), "sb": sb });
-    let writer = CacheWriter::create(out, &meta, 64 * 1024 + frames as usize * 1200).map_err(|e| format!("Could not write {}: {e}", out.display()))?;
+
+    let mut f = 1;
+    let mut elapsed0 = 0.0f64;
+    let mut diags0 = Vec::new();
+    let writer = match &resume {
+        None => CacheWriter::create(out, &meta, 64 * 1024 + frames as usize * 1200).map_err(|e| format!("Could not write {}: {e}", out.display()))?,
+        Some((v, _)) => {
+            let fw = v["framesWritten"].as_u64().ok_or("The checkpoint is damaged (frames).")? as u32;
+            diags0 = v["diags"].as_array().cloned().unwrap_or_default();
+            f = v["frame"].as_u64().unwrap_or(0) as u32 + 1;
+            elapsed0 = v["elapsed"].as_f64().unwrap_or(0.0);
+            CacheWriter::reopen(out, fw, v["fileEnd"].as_u64().ok_or("The checkpoint is damaged (file end).")?)
+                .map_err(|e| format!("Could not carry on writing {}: {e}", out.display()))?
+        }
+    };
     // Two threads behind the bake: a packer (measurements, compact positions, buried water) and a writer that appends each frame to the
     // file. The GPU runs the next frame's steps meanwhile. At most two frames wait at each, so a slow disk holds the bake back instead of
-    // filling memory.
+    // filling memory (the time the bake waits for them is measured).
     let (b, d, vs) = (lay.b, desc.d, desc.scale);
     let vmax_w = desc.vmax_w;
     let foam_life = desc.spr.map_or(3.0, |s| s.foam_life);
-    let (tx, rx) = mpsc::sync_channel::<(Vec<f32>, usize, Vec<f32>, Value, Raw)>(2);
-    let (ptx, prx) = mpsc::sync_channel::<(Packed, Value)>(2);
+    let (tx, rx) = mpsc::sync_channel::<Job>(2);
+    let (ptx, prx) = mpsc::sync_channel::<Out>(2);
     let pt = std::thread::spawn(move || {
-        for (buf, n, objs, dg, raw) in rx {
+        for job in rx {
+            let Job::Frame(buf, n, objs, dg, raw) = job else { if let Job::Mark(s) = job { if ptx.send(Out::Mark(s)).is_err() { break; } } continue; };
             let tp = Instant::now();
             let mut m = diag(&buf, n, &b, vmax_w);
             let ww = raw.spray.map(|(ns, p, v)| { let (k, pos, pk, alive) = ww::pack_spray_frame(&p, &v, ns, &ab, 200_000, foam_life); m["sprayPoints"] = json!(alive); (k, pos, pk) });
@@ -311,31 +384,73 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, mut progress: impl FnMut(&Progres
             m["buried"] = json!(p.buried);
             if let (Some(o), Value::Object(t)) = (m.as_object_mut(), dg) { for (k, v) in t { o.insert(k, v); } }
             if let Some(t) = m.get_mut("timing") { t["pack"] = json!(tp.elapsed().as_secs_f32() * 1000.0); }
-            if ptx.send((p, m)).is_err() { break; }
+            if ptx.send(Out::Frame(p, m)).is_err() { break; }
         }
     });
     let wt = std::thread::spawn(move || -> Result<(CacheWriter, Vec<Value>), String> {
         let mut w = writer;
-        let mut diags = Vec::new();
-        for (p, dg) in prx {
-            w.append(&FrameOut { q: p.q, own_box: p.own_box, ww_baked: false, objs: &p.objs, n: p.n, pos: &p.pos, spd: &p.spd, fm: p.fm.as_deref(),
-                ww: p.ww.as_ref().map(|(n, pos, pk)| (*n, &pos[..], &pk[..])), deep: p.deep.as_ref().map(|(n, pos, s)| (*n, &pos[..], &s[..])) })
-                .map_err(|e| format!("Writing the cache failed: {e}"))?;
-            diags.push(dg);
+        let mut diags = diags0;
+        for o in prx {
+            match o {
+                Out::Frame(p, dg) => {
+                    w.append(&FrameOut { q: p.q, own_box: p.own_box, ww_baked: false, objs: &p.objs, n: p.n, pos: &p.pos, spd: &p.spd, fm: p.fm.as_deref(),
+                        ww: p.ww.as_ref().map(|(n, pos, pk)| (*n, &pos[..], &pk[..])), deep: p.deep.as_ref().map(|(n, pos, s)| (*n, &pos[..], &s[..])) })
+                        .map_err(|e| format!("Writing the cache failed: {e}"))?;
+                    diags.push(dg);
+                }
+                Out::Mark(s) => { let end = w.flush_point().map_err(|e| format!("Writing the cache failed: {e}"))?; let _ = s.send((end, w.frames(), diags.clone())); }
+            }
         }
         Ok((w, diags))
     });
 
     let t0 = Instant::now();
-    if sim.n > 0 { sim.prime(gpu, desc.g); }
+    let since = |t0: &Instant| elapsed0 + t0.elapsed().as_secs_f64();
     let mut buf = Vec::new();
-    let mut n = sim.readback(gpu, &mut buf);
-    let _ = tx.send((std::mem::take(&mut buf), n as usize, poses(&sample_all(0.0)), json!({ "f": 0, "n": n, "sub": 0, "blockPool": sim.scap, "pointCap": max_n, "startNeed": need }),
-        Raw { spray: None, deep: None }));
+    let mut n;
+    let mut wait = 0.0f64;
+    let mut stopped = false;
+    match resume {
+        None => {
+            if let Some(band) = nb_band {
+                let j = (0.01 * lay.d as f64 / 0.12) as f32;
+                let s = {
+                    let sim = &mut sim;
+                    let rng = &mut rng;
+                    nb::seed(&lay, &desc.fills, band, oc, 0.0, &mut |p, v| sim.add(gpu, [p[0] + (rng.f() - 0.5) * j, p[1] + (rng.f() - 0.5) * j, p[2] + (rng.f() - 0.5) * j], v))
+                };
+                // spare slots, parked off the map, for the solver to refill the band with
+                let spare = ((sim.cap - sim.n) as u64).min(nb::spares(s.seeded));
+                for _ in 0..spare { sim.add(gpu, [0.0, -1e6, 0.0], [0.0; 3]); }
+                sim.nb_fills = s.prims; sim.nb_vols = s.vols; sim.nb_init = 1; sim.nb_band = Some(band); sim.ocean = desc.ocean; sim.ocean_w = ocean_w.clone();
+            } else {
+                for fl in &desc.fills {
+                    match fl {
+                        Fill::Box { x0, x1, y0, y1, z0, z1 } => sim.fill_box(gpu, &mut rng, [*x0, *x1, *y0, *y1, *z0, *z1]),
+                        Fill::Sphere { x, y, z, r, vy } => sim.fill_sphere(gpu, &mut rng, [*x, *y, *z], *r, [0.0, *vy as f32, 0.0]),
+                        Fill::Vol { .. } => fill_volume(gpu, &mut sim, &mut rng, fl),
+                    }
+                }
+            }
+            if sim.n > 0 { sim.prime(gpu, desc.g); }
+            n = sim.readback(gpu, &mut buf);
+            let _ = tx.send(Job::Frame(std::mem::take(&mut buf), n as usize, poses(&sample_all(0.0)),
+                json!({ "f": 0, "n": n, "sub": 0, "blockPool": sim.scap, "pointCap": max_n, "startNeed": need, "gpuMB": sim.mem_bytes() >> 20 }), Raw { spray: None, deep: None }));
+            stopped = !progress(&Progress { f: 0, frames, n, elapsed: 0.0, sub: 0, frame_ms: 0.0, wait: 0.0 });
+        }
+        Some((v, mut r)) => {
+            sim.restore_state(gpu, &v["sim"], &mut r)?;
+            runner.restore_state(&v["runner"]);
+            rng = Rng(v["rng"].as_u64().unwrap_or(0xf111));
+            vmax = v["vmax"].as_f64().unwrap_or(2.0) as f32;
+            iters = v["iters"].as_u64().unwrap_or(desc.iters as u64) as u32;
+            ei = v["ei"].as_u64().unwrap_or(0) as usize;
+        }
+    }
     let par_of = |iters: u32, t: f32| StepPar { g: desc.g, iters, flip: desc.flip, apic_flip: desc.apic_flip, comp: desc.comp, vmax: desc.vmax_w, vs: desc.scale, tear: desc.tear, time: t,
         wind: desc.wind, drag: desc.drag, gust: desc.gust, foam_sens: desc.foam_sens, foam_tau: desc.foam_tau, spr: desc.spr, air: desc.air, drip: desc.drip };
-    let mut stopped = !progress(&Progress { f: 0, frames, n, elapsed: 0.0, sub: 0, frame_ms: 0.0 });
-    let mut f = 1;
+    // checkpoints are spaced so writing them takes at most a tenth of the bake (a slow drive takes minutes for a big one)
+    let (mut last_ck, mut ck_gap) = (Instant::now(), ro.checkpoint_secs);
     while f <= frames && !stopped {
         let tf0 = Instant::now();
         let ovf0 = sim.ovf_total;
@@ -362,30 +477,66 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, mut progress: impl FnMut(&Progres
         for o in &states { if o.emitter && o.on { mv = mv.max(o.speed); } }
         vmax = mv.max(1.0);
         let mut dg = json!({ "f": f, "n": n, "t": f as f32 / fps, "sub": sub, "objectSpeed": obj_v, "fastestParticle": st.vmax, "fluidCells": st.fluid, "blocksUsed": st.sc,
-            "blockPool": sim.scap, "blocksNoRoom": sim.ovf_total - ovf0, "iters": iters });
+            "blockPool": sim.scap, "blocksNoRoom": sim.ovf_total - ovf0, "iters": iters, "gpuMB": sim.mem_bytes() >> 20 });
         if acc {
             // the pressure left unsolved after the frame's last substep steers the next frame's iterations
             let r = sim.pres_residual(gpu);
             dg["unsolved"] = json!(r);
             if r > ACC_TOL { iters = (desc.iters * 8).min((iters as f32 * 1.5).ceil() as u32); } else if r < ACC_TOL / 4.0 { iters = desc.iters.max((iters as f32 * 0.85).floor() as u32); }
         }
-        let frame_ms = tf0.elapsed().as_secs_f32() * 1000.0;
-        // where the frame's time went (ms): sending the steps, the GPU finishing them, reading the particles back; packing runs alongside
+        // where the frame's time went (ms): sending the steps, the GPU finishing them, reading the particles back; packing runs alongside.
+        // waitDisk: how long this frame waited for the packer and the disk to take it (a slow drive holds the whole bake back)
+        let tw = Instant::now();
         dg["timing"] = json!({ "send": t_sub * 1000.0, "gpu": (t_gpu - t_sub) * 1000.0, "read": (t_read - t_gpu) * 1000.0 });
-        dg["ms"] = json!(frame_ms); dg["elapsed"] = json!(t0.elapsed().as_secs_f32());
-        if tx.send((std::mem::take(&mut buf), n as usize, poses(&states), dg, raw)).is_err() { break; }
-        stopped = !progress(&Progress { f, frames, n, elapsed: t0.elapsed().as_secs_f32(), sub, frame_ms });
+        dg["ms"] = json!(tf0.elapsed().as_secs_f32() * 1000.0); dg["elapsed"] = json!(since(&t0));
+        if tx.send(Job::Frame(std::mem::take(&mut buf), n as usize, poses(&states), dg, raw)).is_err() { break; }
+        let w1 = tw.elapsed().as_secs_f64();
+        wait += w1;
+        // a checkpoint: once the frame is in the file, the GPU state and the bake's own state next to it
+        if ro.checkpoint_secs > 0.0 && f < frames && last_ck.elapsed().as_secs_f32() >= ck_gap {
+            let tc = Instant::now();
+            let (ms, mr) = mpsc::channel();
+            if tx.send(Job::Mark(ms)).is_err() { break; }
+            let (end, fw, diags) = mr.recv().map_err(|_| "The cache writer stopped.".to_string())?;
+            let st = json!({ "version": 1, "startedWith": ro.started_with, "checkpointEvery": ro.checkpoint_secs, "frame": f, "framesWritten": fw, "fileEnd": end, "diags": diags, "maxN": max_n, "need": need,
+                "elapsed": since(&t0), "rng": rng.0, "vmax": vmax, "iters": iters, "ei": ei, "runner": runner.save_state() });
+            write_checkpoint(gpu, &sim, st, &ck_path)?;
+            let took = tc.elapsed().as_secs_f32();
+            ck_gap = ro.checkpoint_secs.max(10.0 * took);
+            eprintln!("checkpoint after frame {f} in {took:.1} s ({}); the next in {ck_gap:.0} s", ck_path.display());
+            last_ck = Instant::now();
+        }
+        stopped = !progress(&Progress { f, frames, n, elapsed: since(&t0) as f32, sub, frame_ms: tf0.elapsed().as_secs_f32() * 1000.0, wait: wait as f32 });
         f += 1;
     }
     drop(tx);
     let _ = pt.join();
     let (w, diags) = wt.join().map_err(|_| "The cache writer stopped.".to_string())??;
-    meta["seconds"] = json!(t0.elapsed().as_secs_f64());
+    meta["seconds"] = json!(since(&t0));
     meta["diag"] = Value::Array(diags);
     meta["maxN"] = json!(max_n);
     if stopped { meta["cancelled"] = json!(true); }
     w.finish(&meta).map_err(|e| format!("Finishing the cache failed: {e}"))?;
+    // a finished bake needs no checkpoint (a stopped one keeps it, to carry on later)
+    if !stopped { let _ = std::fs::remove_file(&ck_path); }
     Ok(())
+}
+
+/// Writes the sim's buffers and then st with the sim's own state, into a new file that replaces the old checkpoint only when complete.
+fn write_checkpoint(gpu: &Gpu, sim: &FlipSim, mut st: Value, path: &Path) -> Result<(), String> {
+    use std::io::Write;
+    let tmp = path.with_extension("ckpt.tmp");
+    let e = |x: std::io::Error| format!("Could not write the checkpoint {}: {x}", tmp.display());
+    let mut w = std::io::BufWriter::with_capacity(8 << 20, std::fs::File::create(&tmp).map_err(e)?);
+    st["sim"] = sim.save_state(gpu, &mut w).map_err(e)?;
+    let js = serde_json::to_vec(&st).map_err(|x| x.to_string())?;
+    w.write_all(&js).map_err(e)?;
+    w.write_all(&(js.len() as u64).to_le_bytes()).map_err(e)?;
+    w.write_all(b"SPCK").map_err(e)?;
+    let file = w.into_inner().map_err(|x| e(x.into_error()))?;
+    file.sync_all().map_err(e)?;
+    drop(file);
+    std::fs::rename(&tmp, path).map_err(|x| format!("Could not replace the checkpoint {}: {x}", path.display()))
 }
 
 /// Whitewater made afterwards from a finished water bake (Bake whitewater, runWhitewaterPass): the water is not simulated again. For each
@@ -488,7 +639,7 @@ pub fn whitewater_pass(gpu: &Gpu, c: &splash_format::Cache, desc: &Desc, out: &P
         }
         let ww = sim.read_spray(gpu).map(|(n, p, v)| { let (k, pos, pk, _) = ww::pack_spray_frame(&p, &v, n, &ab, 200_000, spr.foam_life); (k, pos, pk) });
         write(&mut w, f, ww)?;
-        if !progress(&Progress { f: f as u32, frames: nf as u32 - 1, n: sim.n, elapsed: t0.elapsed().as_secs_f32(), sub, frame_ms: tf0.elapsed().as_secs_f32() * 1000.0 }) { stopped = true; break; }
+        if !progress(&Progress { f: f as u32, frames: nf as u32 - 1, n: sim.n, elapsed: t0.elapsed().as_secs_f32(), sub, frame_ms: tf0.elapsed().as_secs_f32() * 1000.0, wait: 0.0 }) { stopped = true; break; }
     }
     if stopped { meta["cancelled"] = json!(true); }
     w.finish(&meta).map_err(|e| format!("Finishing the cache failed: {e}"))?;

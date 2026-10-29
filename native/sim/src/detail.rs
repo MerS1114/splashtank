@@ -291,7 +291,7 @@ pub fn run(gpu: &Gpu, c: &Cache, desc: &Desc, o: &DetailOpts, out: &Path, mut pr
         ps[..n * 4].copy_from_slice(&dst[..n * 4]);
         max_out = max_out.max(write(&mut w, f, merge(f, &dst, n))?);
         fine_most = fine_most.max(n);
-        if !progress(&Progress { f: f as u32, frames: nf as u32 - 1, n: n as u32, elapsed: t0.elapsed().as_secs_f32(), sub, frame_ms: tf0.elapsed().as_secs_f32() * 1000.0 }) { stopped = true; break; }
+        if !progress(&Progress { f: f as u32, frames: nf as u32 - 1, n: n as u32, elapsed: t0.elapsed().as_secs_f32(), sub, frame_ms: tf0.elapsed().as_secs_f32() * 1000.0, wait: 0.0 }) { stopped = true; break; }
     }
     meta["maxN"] = json!(max_out);
     meta["detail"] = json!({ "box": r0.to_json(), "k": k, "d": df, "pull": o.pull, "maxN": fine_most, "n0": na });
