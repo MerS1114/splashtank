@@ -22,6 +22,8 @@ pub enum Kind {
     Whitewater,
     /// a finer sim over a region of the finished bake at inp
     Detail(DetailOpts),
+    /// the live sim: a bake of the scene whose frames go to the window (the header, then one message a frame) instead of a file
+    Live(std::sync::mpsc::Sender<Vec<u8>>),
 }
 
 #[derive(Clone)]
@@ -85,7 +87,11 @@ pub fn execute(t: &Task, gpu: &mut Option<Gpu>, report: &mut dyn FnMut(Note) -> 
             let desc = desc_of(&t.scene, &t.o, *water_only)?;
             let o = &t.o;
             let started = serde_json::json!({ "scene": t.scene, "waterOnly": water_only, "opts": { "spacing": o.spacing, "seconds": o.seconds, "detail": o.detail, "maxPoints": o.max_points, "accurate": o.accurate } });
-            bake_now(gpu, &desc, o, &t.out, bake::RunOpts { checkpoint_secs: *checkpoint_secs, resume: false, started_with: started, log: None }, report)?;
+            bake_now(gpu, &desc, o, &t.out, bake::RunOpts { checkpoint_secs: *checkpoint_secs, resume: false, started_with: started, ..Default::default() }, report)?;
+        }
+        Kind::Live(tx) => {
+            let desc = desc_of(&t.scene, &t.o, false)?;
+            bake::run(gpu, &desc, &t.out, &bake::RunOpts { sink: Some(tx.clone()), ..Default::default() }, |p| report(Note::Frame(p)))?;
         }
         Kind::Resume => {
             let (v, _) = bake::read_checkpoint(&bake::checkpoint_path(&t.out))?;
@@ -99,7 +105,7 @@ pub fn execute(t: &Task, gpu: &mut Option<Gpu>, report: &mut dyn FnMut(Note) -> 
             let desc = desc_of(&s["scene"], &o, s["waterOnly"].as_bool().unwrap_or(false))?;
             report(Note::Line(format!("Carrying on {} after frame {} of {}", t.out.display(), v["frame"], desc.frames)));
             let secs = v["checkpointEvery"].as_f64().unwrap_or(300.0) as f32;
-            bake_now(gpu, &desc, &o, &t.out, bake::RunOpts { checkpoint_secs: secs, resume: true, started_with: s.clone(), log: None }, report)?;
+            bake_now(gpu, &desc, &o, &t.out, bake::RunOpts { checkpoint_secs: secs, resume: true, started_with: s.clone(), ..Default::default() }, report)?;
         }
     }
     Ok(())

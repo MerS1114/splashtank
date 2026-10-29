@@ -236,6 +236,8 @@ pub struct RunOpts {
     pub started_with: Value,
     /// where the bake's remarks go (Max points chosen, checkpoints written); the terminal when None
     pub log: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
+    /// the live sim: frames go here (the header first, then one message a frame) instead of a file at out
+    pub sink: Option<mpsc::Sender<Vec<u8>>>,
 }
 impl RunOpts {
     fn say(&self, s: &str) { match &self.log { Some(l) => l(s), None => eprintln!("{s}") } }
@@ -359,9 +361,10 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, ro: &RunOpts, mut progress: impl 
     let mut f = 1;
     let mut elapsed0 = 0.0f64;
     let mut diags0 = Vec::new();
-    let writer = match &resume {
-        None => CacheWriter::create(out, &meta, 64 * 1024 + frames as usize * 1200).map_err(|e| format!("Could not write {}: {e}", out.display()))?,
-        Some((v, _)) => {
+    let writer = match (&resume, &ro.sink) {
+        (None, Some(tx)) => CacheWriter::to_channel(&meta, tx.clone()).map_err(|e| format!("The live view stopped taking frames: {e}"))?,
+        (None, None) => CacheWriter::create(out, &meta, 64 * 1024 + frames as usize * 1200).map_err(|e| format!("Could not write {}: {e}", out.display()))?,
+        (Some((v, _)), _) => {
             let fw = v["framesWritten"].as_u64().ok_or("The checkpoint is damaged (frames).")? as u32;
             diags0 = v["diags"].as_array().cloned().unwrap_or_default();
             f = v["frame"].as_u64().unwrap_or(0) as u32 + 1;

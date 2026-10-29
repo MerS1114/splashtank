@@ -30,19 +30,25 @@ pub struct Job {
     pub released: bool,
 }
 
-pub struct Worker { tx: mpsc::Sender<Task>, pub job: Arc<Mutex<Job>>, cancel: Arc<AtomicBool> }
+/// serial: the number of the newest task; an older one still running stops at its next frame and no longer reports (so starting a new
+/// task right after Stop never revives the old one)
+pub struct Worker { tx: mpsc::Sender<(u64, Task)>, pub job: Arc<Mutex<Job>>, cancel: Arc<AtomicBool>, serial: Arc<std::sync::atomic::AtomicU64> }
 
 impl Worker {
     pub fn new(ctx: egui::Context) -> Worker {
-        let (tx, rx) = mpsc::channel::<Task>();
+        let (tx, rx) = mpsc::channel::<(u64, Task)>();
         let job = Arc::new(Mutex::new(Job::default()));
         let cancel = Arc::new(AtomicBool::new(false));
-        let (j, c) = (job.clone(), cancel.clone());
+        let serial = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (j, c, sr) = (job.clone(), cancel.clone(), serial.clone());
         std::thread::spawn(move || {
             let mut gpu = None;
-            while let Ok(t) = rx.recv() {
+            while let Ok((me, t)) = rx.recv() {
                 let t0 = Instant::now();
+                let stale = || sr.load(Ordering::Relaxed) != me;
+                if stale() { continue; }
                 let r = bake_cli::execute(&t, &mut gpu, &mut |n| {
+                    if stale() { return false; }
                     let last = {
                         let mut s = j.lock().unwrap();
                         match n {
@@ -63,6 +69,7 @@ impl Worker {
                     }
                     !c.load(Ordering::Relaxed)
                 });
+                if stale() { continue; }
                 let mut s = j.lock().unwrap();
                 let secs = t0.elapsed().as_secs_f32();
                 s.result = Some(match r {
@@ -75,13 +82,14 @@ impl Worker {
                 ctx.request_repaint();
             }
         });
-        Worker { tx, job, cancel }
+        Worker { tx, job, cancel, serial }
     }
 
     pub fn start(&self, title: String, t: Task) {
         *self.job.lock().unwrap() = Job { busy: true, title, out: Some(t.out.clone()), ..Default::default() };
         self.cancel.store(false, Ordering::Relaxed);
-        let _ = self.tx.send(t);
+        let me = self.serial.fetch_add(1, Ordering::Relaxed) + 1;
+        let _ = self.tx.send((me, t));
     }
     pub fn stop(&self) { self.cancel.store(true, Ordering::Relaxed); }
     pub fn busy(&self) -> bool { self.job.lock().unwrap().busy }
@@ -161,6 +169,8 @@ impl BakeUi {
         self.settings_of(v);
     }
     pub fn set_seconds(&mut self, s: f32) { self.seconds = s; }
+    /// the live spacing (the live sim runs at it, as the page's live view)
+    pub fn spacing(&self) -> f32 { self.spacing }
     fn settings_of(&mut self, v: &serde_json::Value) {
         let bk = &v["bake"];
         self.seconds = bk["dur"].as_f64().unwrap_or(5.0) as f32;

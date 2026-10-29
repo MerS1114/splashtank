@@ -122,9 +122,11 @@ pub struct Look {
     pub objects: bool,
     /// the Detail region (centre and size as shares of the tank), shown dashed while the Bake panel's Detail is open
     pub region: Option<([f32; 3], [f32; 3])>,
+    /// objects where the scene has them now, not where the cache's frame recorded them (the live sim while editing)
+    pub scene_objs: bool,
 }
 impl Default for Look {
-    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None } }
+    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None, scene_objs: false } }
 }
 
 #[repr(C)]
@@ -425,6 +427,18 @@ fn geometry(doc: &Doc, a: usize, b: usize, w: f32, look: &Look) -> (Vec<Vert>, V
             let r = Box3 { x0: l(b.x0, b.x1, x0), x1: l(b.x0, b.x1, x1), y0: l(b.y0, b.y1, y0), y1: l(b.y0, b.y1, y1), z0: l(b.z0, b.z1, z0), z1: l(b.z0, b.z1, z1) };
             edges(&mut lines, &r, [0.36, 0.62, 1.0, 0.9], (r.x1 - r.x0).max(r.z1 - r.z0) * 0.03);
         }
+        // the starting water boxes (fills: shares of the tank's width and depth, heights above its floor; resolveFills), before any water
+        // is simulated
+        if let (Some(s), None) = (&doc.scene, &doc.cache) {
+            for fl in s.json["fills"].as_array().into_iter().flatten().filter(|f| f["t"] == "box") {
+                let g = |k: &str, d: f64| fl[k].as_f64().unwrap_or(d) as f32;
+                let (w, d) = (b.x1 - b.x0, b.z1 - b.z0);
+                let y1 = g("y1", 0.0).min(b.y1 - b.y0);
+                if y1 - g("y0", 0.0) <= 0.01 { continue; }
+                let fb = Box3 { x0: b.x0 + g("fx0", 0.0) * w, x1: b.x0 + g("fx1", 1.0) * w, y0: b.y0 + g("y0", 0.0), y1: b.y0 + y1, z0: b.z0 + g("fz0", 0.0) * d, z1: b.z0 + g("fz1", 1.0) * d };
+                edges(&mut lines, &fb, [0.25, 0.6, 1.0, 1.0], 0.0);
+            }
+        }
         if let Some(lv) = doc.scene.as_ref().and_then(|s| s.ocean_level).filter(|_| doc.cache.is_none()) {
             // the ocean's still level as a grid
             let y = b.y0 + lv;
@@ -441,7 +455,7 @@ fn geometry(doc: &Doc, a: usize, b: usize, w: f32, look: &Look) -> (Vec<Vert>, V
     let Some(scene) = &doc.scene else { return (tris, lines); };
     if !look.objects { return (tris, lines); }
     // sources (no shape): the page's green handle, a ring the size of the stream and an arrow where it points
-    if doc.cache.is_none() {
+    if doc.cache.is_none() || look.scene_objs {
         for o in scene.json["objs"].as_array().into_iter().flatten().filter(|o| crate::tf::is_emitter(o) && o["hidden"] != true) {
             let id = o["id"].as_u64().unwrap_or(0);
             let c = if doc.selected.contains(&id) { [1.0, 0.63, 0.16, 1.0] } else { [0x35 as f32 / 255.0, 0xd0 as f32 / 255.0, 0x7f as f32 / 255.0, 1.0] };
@@ -462,7 +476,7 @@ fn geometry(doc: &Doc, a: usize, b: usize, w: f32, look: &Look) -> (Vec<Vert>, V
             for s in [u, -u, v, -v] { line(&mut lines, tip, tip - dir * 0.13 + s * 0.06, c); }
         }
     }
-    let cache = doc.cache.as_ref().filter(|c| a < c.frames.len() && b < c.frames.len());
+    let cache = doc.cache.as_ref().filter(|c| !look.scene_objs && a < c.frames.len() && b < c.frames.len());
     let poses = cache.map(|c| { let (pa, pb) = (c.poses(a), c.poses(b)); pa.iter().zip(&pb).map(|(x, y)| x + (y - x) * w).collect::<Vec<f32>>() });
     for o in &scene.objs {
         let Some(m) = &o.mesh else { continue; };

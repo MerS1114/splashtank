@@ -116,6 +116,12 @@ struct App {
     splay: bool,
     /// Blender's record button: changing an object keys what changed
     auto_key: bool,
+    /// the live sim: on, its own worker (its own GPU device), the frames coming in, and whether the scene changed since it started
+    live: bool,
+    live_w: Worker,
+    live_rx: Option<mpsc::Receiver<Vec<u8>>>,
+    live_pending: Vec<Vec<u8>>,
+    live_stale: bool,
     /// the click that finished a move is only that (it does not also select)
     swallow: bool,
     r: Renderer,
@@ -162,12 +168,13 @@ impl App {
         App {
             doc: Doc::default(), tab: Tab::Bake, scene_path: None, dirty: false, sel: None, r: Renderer::new(&rs.device), target: None,
             sel_set: Vec::new(), tool: Tool::Select, tf: None, tf_text: String::new(), scene_view: false, undo: Vec::new(), redo: Vec::new(), stable: None, burst: false,
-            changed_now: false, hover: None, add_at: None, box_from: None, new_menu: false, st: 0.0, splay: false, auto_key: false, swallow: false,
+            changed_now: false, hover: None, add_at: None, box_from: None, new_menu: false, st: 0.0, splay: false, auto_key: false,
+            live: false, live_w: Worker::new(ctx.clone()), live_rx: None, live_pending: Vec::new(), live_stale: false, swallow: false,
             cam: Orbit { target: glam::Vec3::new(0.0, 0.7, 0.0), theta: 0.8, phi: 1.0, r: 6.2, ortho: false }, goal: None,
             t: 0.0, playing: false, looping: true, speed: 1.0, look: Look::default(),
             msg: "Open a bake cache (.splc) or a scene file (.json), or drop one on the window.".into(),
             gpu: crate::gpu::describe(&rs.adapter, &rs.device), last: Instant::now(), frame_ms: 0.0, ahead: tx,
-            path: None, bake: BakeUi::default(), worker: Worker::new(ctx), seen: 0, was_busy: false, autobake: None,
+            path: None, bake: BakeUi::default(), worker: Worker::new(ctx.clone()), seen: 0, was_busy: false, autobake: None,
         }
     }
 
@@ -196,6 +203,7 @@ impl App {
 
     /// After an edit to the scene's JSON: the parsed scene (tank, objects) is made again from it.
     fn edited(&mut self) {
+        self.live_stale = true;
         // the first change of a burst saves the scene before it for undo
         if !self.burst { if let Some(s) = self.stable.take() { self.undo.push(s); if self.undo.len() > 100 { self.undo.remove(0); } } self.redo.clear(); self.burst = true; }
         self.changed_now = true;
@@ -208,6 +216,7 @@ impl App {
 
     /// New scene: an empty tank, or one of the page's starting scenes (scenes.json, made by native/tools/export-scenes.js from the page).
     fn new_scene(&mut self, name: &str) {
+        self.live_off();
         let all = scenes();
         let mut j = if name == "Empty tank" {
             // the page's default tank and settings (Wave tank is built from them) with nothing in it
@@ -256,6 +265,7 @@ impl App {
                 self.scene_view = false;
                 self.undo.clear(); self.redo.clear(); self.burst = false;
                 self.stable = self.doc.scene.as_ref().map(|s| s.json.clone());
+                if self.live { self.live = false; self.live_w.stop(); self.live_rx = None; }
                 self.splay = false;
                 self.auto_key = self.doc.scene.as_ref().and_then(|s| s.json.pointer("/timeline/auto")?.as_bool()).unwrap_or(false);
                 if is_json { self.set_time(0.0); }
@@ -291,6 +301,8 @@ impl App {
         match a {
             Action::Stop => self.worker.stop(),
             Action::Start(title, t) => {
+                // a bake shows its own frames: the live sim stops
+                self.live_off();
                 if t.inp.as_deref() == Some(t.out.as_path()) { self.worker.job.lock().unwrap().result = Some(("Save to another file than the bake it works on.".into(), true)); return; }
                 self.close_if(&t.out);
                 let slow = t.out.to_string_lossy().to_ascii_uppercase().starts_with("C:");
@@ -335,7 +347,47 @@ impl App {
 
     /// Home: the whole tank in view, from the angle the camera has now (frameAll)
     /// The objects of the scene being edited, while the scene (not a bake) is shown.
-    fn editing(&self) -> bool { self.doc.scene.is_some() && (self.doc.cache.is_none() || self.scene_view) }
+    fn editing(&self) -> bool { self.doc.scene.is_some() && (self.doc.cache.is_none() || self.scene_view || self.live) }
+
+    /// Starts (or starts again) the live sim: the scene as it is now, at the Bake tab's spacing (Preview), its frames kept in memory.
+    fn live_start(&mut self) {
+        let Some(j) = self.doc.scene.as_ref().map(|s| s.json.clone()) else { return; };
+        let (tx, rx) = mpsc::channel();
+        self.doc.cache = None;
+        self.doc.gen += 1;
+        self.live_rx = Some(rx);
+        self.live_pending.clear();
+        self.live_stale = false;
+        let o = splash_sim::scene::BakeOpts { spacing: self.bake.spacing(), seconds: Some(self.scene_dur() as f32), detail: Some(1.0), max_points: None, accurate: Some(false) };
+        self.live_w.start("Live".into(), crate::bake_cli::Task { kind: crate::bake_cli::Kind::Live(tx), inp: None, scene: j, o, out: std::env::temp_dir().join("splashtank-live.splc") });
+    }
+    fn live_off(&mut self) {
+        if !self.live { return; }
+        self.live = false;
+        self.live_w.stop();
+        self.live_rx = None;
+        self.live_pending.clear();
+        self.doc.cache = None;
+        self.doc.gen += 1;
+    }
+    /// Takes the live sim's new frames into the cache shown.
+    fn live_poll(&mut self) {
+        // the live worker never waits for the window to let go of a file (it writes none)
+        { let mut j = self.live_w.job.lock().unwrap(); if j.finishing { j.released = true; } }
+        let Some(rx) = &self.live_rx else { return; };
+        self.live_pending.extend(rx.try_iter());
+        let mut done = 0;
+        for b in &self.live_pending {
+            match &mut self.doc.cache {
+                None => match Cache::from_header(b.clone()) { Ok(c) => self.doc.cache = Some(Arc::new(c)), Err(_) => {} },
+                Some(c) => match Arc::get_mut(c) { Some(c) => { let _ = c.push(b); } None => break },
+            }
+            done += 1;
+        }
+        self.live_pending.drain(..done);
+        // memory: like the page's live cache, at most about 2 GB of frames
+        if self.doc.cache.as_ref().is_some_and(|c| c.bytes().len() > 2usize << 30) { self.live_w.stop(); self.msg = "The live sim stopped at 2 GB of frames.".into(); }
+    }
     fn objs_mut(&mut self) -> Option<&mut Vec<Value>> { self.doc.scene.as_mut()?.json.get_mut("objs")?.as_array_mut() }
     fn objs(&self) -> &[Value] { self.doc.scene.as_ref().and_then(|s| s.json["objs"].as_array()).map(|v| v.as_slice()).unwrap_or(&[]) }
 
@@ -349,7 +401,7 @@ impl App {
     }
 
     fn start_tf(&mut self, kind: Kind, m: egui::Pos2, axis: Option<usize>, from_drag: bool) {
-        if self.doc.cache.is_some() { self.scene_view = true; }
+        if self.doc.cache.is_some() && !self.live { self.scene_view = true; }
         if self.sel_set.is_empty() { self.msg = "Click an object first.".into(); return; }
         let t = Tf::start(kind, self.objs(), self.sel_set.clone(), m, axis, from_drag);
         if t.is_some() { self.edited(); }
@@ -413,6 +465,14 @@ impl App {
         let dur = self.scene_dur();
         let frames = (dur * tf::FPS_TL).round() as usize;
         ui.horizontal(|ui| {
+            let lv = ui.selectable_label(self.live, "Live water").on_hover_text("Simulate the water while you work, at the Bake tab's spacing (Preview quality), on its own copy of the solver. The frames stay in memory, so the timeline plays them back; changing the scene starts it again.");
+            if lv.clicked() { if self.live { self.live_off(); } else { self.live = true; self.scene_view = false; self.live_start(); self.splay = true; } }
+            if self.live {
+                let (busy, n) = (self.live_w.busy(), self.frames());
+                let txt = if busy { format!("simulating {n}/{} frames", frames + 1) } else if let Some((e, true)) = self.live_w.job.lock().unwrap().result.clone() { e } else { format!("{n} frames") };
+                ui.label(egui::RichText::new(txt).small());
+            }
+            ui.separator();
             if ui.button("|<").on_hover_text("Start (Shift+Left)").clicked() { self.splay = false; self.set_time(0.0); }
             if ui.button("<").on_hover_text("One frame back (Left)").clicked() { self.splay = false; self.set_time(self.st - 1.0 / tf::FPS_TL); }
             if ui.button(if self.splay { "Pause" } else { "Play" }).on_hover_text("Play the scene's keys (Space)").clicked() { self.splay = !self.splay; }
@@ -480,7 +540,7 @@ impl App {
         if let Some(v) = self.objs_mut() { v.push(o); }
         let i = self.objs().len() - 1;
         self.select(Some(i), false);
-        if self.doc.cache.is_some() { self.scene_view = true; }
+        if self.doc.cache.is_some() && !self.live { self.scene_view = true; }
         self.edited();
     }
     fn delete_selected(&mut self) {
@@ -651,7 +711,7 @@ impl App {
         let r = egui::Rect::from_min_size(rect.min + egui::vec2(10.0, 8.0), egui::vec2(560.0, 28.0));
         ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
             ui.horizontal(|ui| {
-                if self.doc.cache.is_some() && self.doc.scene.is_some() {
+                if self.doc.cache.is_some() && self.doc.scene.is_some() && !self.live {
                     if ui.selectable_label(!self.scene_view, "Bake").on_hover_text("Show the bake").clicked() { self.scene_view = false; self.end_tf(false); }
                     if ui.selectable_label(self.scene_view, "Scene").on_hover_text("Show the scene to edit its objects (the bake stays open)").clicked() { self.scene_view = true; }
                     ui.separator();
@@ -752,7 +812,7 @@ impl App {
             }
             if matches!(tab, Tab::Sim | Tab::Tank | Tab::Objects) {
                 let Some(s) = self.doc.scene.as_mut() else { ui.label("Open a scene file (.json) or a bake (.splc) to edit its scene."); return; };
-                if self.doc.cache.is_some() { ui.label(egui::RichText::new("Changes apply to the next bake; the bake shown stays as it was.").small()); }
+                if self.doc.cache.is_some() && !self.live { ui.label(egui::RichText::new("Changes apply to the next bake; the bake shown stays as it was.").small()); }
                 let changed = match tab {
                     Tab::Sim => crate::edit::settings(ui, &mut s.json),
                     Tab::Tank => crate::edit::tank(ui, &mut s.json),
@@ -887,6 +947,21 @@ impl eframe::App for App {
         } else if !self.editing() { self.splay = false; }
         // a change that has ended (nothing changed this frame, no move going on): the scene now at rest is what undo goes back to
         if self.burst && !self.changed_now && self.tf.is_none() { self.stable = self.doc.scene.as_ref().map(|s| s.json.clone()); self.burst = false; }
+        // the live sim starts again once a change has ended (not on every step of a drag)
+        if self.live && self.live_stale && !self.burst && self.tf.is_none() { self.live_start(); }
+        if self.live {
+            self.live_poll();
+            let n = self.frames();
+            let busy = self.live_w.busy();
+            if n > 0 {
+                // while it computes, playing follows the newest frame (the page's live view); afterwards it plays the frames round and round
+                let newest = (n - 1) as f64 / self.fps() as f64;
+                if busy && self.st > newest { self.st = newest; }
+                self.t = (self.st * self.fps() as f64).floor().min((n - 1) as f64);
+            }
+            if busy { ui.ctx().request_repaint(); }
+        }
+        self.look.scene_objs = self.live;
         self.changed_now = false;
         // Ctrl+S saves the scene; closing the window with unsaved edits asks first
         if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) && self.doc.scene.is_some() { self.save_scene(false); }
@@ -926,7 +1001,7 @@ impl eframe::App for App {
             let t = self.target.as_ref().unwrap();
             let mut enc = rs.device.create_command_encoder(&Default::default());
             // the scene view leaves the bake out of the picture (it stays open)
-            let hidden = if self.scene_view { self.doc.cache.take() } else { None };
+            let hidden = if self.scene_view && !self.live { self.doc.cache.take() } else { None };
             self.r.draw(&rs.device, &rs.queue, &mut enc, &t.color.create_view(&Default::default()), size, &self.cam, &self.doc, f, fb, w, &self.look);
             if hidden.is_some() { self.doc.cache = hidden; }
             rs.queue.submit([enc.finish()]);

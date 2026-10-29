@@ -99,8 +99,11 @@ pub struct CacheInfo {
     pub stable_ids: bool,
 }
 
+/// Where a cache's bytes are: a memory-mapped file, or memory (the live sim, which grows frame by frame).
+enum Store { Map(memmap2::Mmap), Mem(Vec<u8>) }
+
 pub struct Cache {
-    map: memmap2::Mmap,
+    map: Store,
     pub info: CacheInfo,
     pub frames: Vec<FrameIndex>,
     /// the file ended inside a frame (a bake cut short); the frames before it are all there
@@ -139,11 +142,28 @@ impl Cache {
         // SAFETY: the file is only read; another program truncating it while it is open would be the user's doing.
         let map = unsafe { memmap2::Mmap::map(&file)? };
         let (info, frames, truncated) = index(&map)?;
-        Ok(Cache { map, info, frames, truncated })
+        Ok(Cache { map: Store::Map(map), info, frames, truncated })
     }
 
-    pub fn bytes(&self) -> &[u8] { &self.map }
-    pub fn slice(&self, r: &Range<usize>) -> &[u8] { &self.map[r.clone()] }
+    /// A cache in memory from a cache's header (what CacheWriter::to_channel sends first); frames are added with push.
+    pub fn from_header(head: Vec<u8>) -> io::Result<Cache> {
+        let (info, frames, _) = index(&head)?;
+        Ok(Cache { map: Store::Mem(head), info, frames, truncated: false })
+    }
+    /// Adds one frame's bytes (as CacheWriter::to_channel sends them) to a cache in memory.
+    pub fn push(&mut self, frame: &[u8]) -> io::Result<()> {
+        let Store::Mem(v) = &mut self.map else { return Err(bad("Only a cache in memory takes frames.")); };
+        let start = v.len();
+        v.extend_from_slice(frame);
+        let mut r = Rd { b: v, o: start };
+        match frame_v2(&mut r, self.info.ids.len(), self.info.q) {
+            Some(fr) => { self.frames.push(fr); Ok(()) }
+            None => { v.truncate(start); Err(bad("A frame the cache could not read.")) }
+        }
+    }
+
+    pub fn bytes(&self) -> &[u8] { match &self.map { Store::Map(m) => m, Store::Mem(v) => v } }
+    pub fn slice(&self, r: &Range<usize>) -> &[u8] { &self.bytes()[r.clone()] }
 
     pub fn objs(&self, f: usize) -> Vec<f32> {
         self.slice(&self.frames[f].objs).chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()
@@ -335,33 +355,56 @@ pub struct FrameOut<'a> {
 /// final header can be written in place; the frame count is u32::MAX until `finish`, which the page's reader and this one
 /// read as "until the end of the file", so a bake cut short still opens.
 pub struct CacheWriter {
-    w: BufWriter<File>,
+    w: Sink,
+    /// the frame being put together (written to the file or sent whole)
+    buf: Vec<u8>,
     room: usize,
     frames: u32,
     path: std::path::PathBuf,
 }
 
+/// A file, or a channel to whoever shows the frames as they come (the live sim): the header first, then one message a frame.
+enum Sink { File(BufWriter<File>), Chan(std::sync::mpsc::Sender<Vec<u8>>) }
+
+fn header(meta: &Value, reserve: usize) -> io::Result<(Vec<u8>, usize)> {
+    let mj = serde_json::to_vec(meta)?;
+    let room = (mj.len() + reserve + 3) / 4 * 4;
+    let mut h = Vec::with_capacity(16 + room);
+    h.extend_from_slice(b"SPLC");
+    h.extend_from_slice(&2u32.to_le_bytes());
+    h.extend_from_slice(&(room as u32).to_le_bytes());
+    h.extend_from_slice(&mj);
+    h.resize(12 + room, b' ');
+    h.extend_from_slice(&u32::MAX.to_le_bytes());
+    Ok((h, room))
+}
+
 impl CacheWriter {
     pub fn create(path: &Path, meta: &Value, reserve: usize) -> io::Result<CacheWriter> {
-        let mj = serde_json::to_vec(meta)?;
-        let room = (mj.len() + reserve + 3) / 4 * 4;
+        let (h, room) = header(meta, reserve)?;
         let mut w = BufWriter::with_capacity(8 << 20, File::create(path)?);
-        w.write_all(b"SPLC")?;
-        w.write_all(&2u32.to_le_bytes())?;
-        w.write_all(&(room as u32).to_le_bytes())?;
-        w.write_all(&mj)?;
-        w.write_all(&vec![b' '; room - mj.len()])?;
-        w.write_all(&u32::MAX.to_le_bytes())?;
-        Ok(CacheWriter { w, room, frames: 0, path: path.to_owned() })
+        w.write_all(&h)?;
+        Ok(CacheWriter { w: Sink::File(w), buf: Vec::new(), room, frames: 0, path: path.to_owned() })
+    }
+    /// Sends the cache to tx instead of a file: the header now, then each frame (Cache::from_header and push read them).
+    pub fn to_channel(meta: &Value, tx: std::sync::mpsc::Sender<Vec<u8>>) -> io::Result<CacheWriter> {
+        let (h, room) = header(meta, 0)?;
+        tx.send(h).map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "nobody takes the frames"))?;
+        Ok(CacheWriter { w: Sink::Chan(tx), buf: Vec::new(), room, frames: 0, path: Default::default() })
+    }
+    fn file(&mut self) -> io::Result<&mut BufWriter<File>> {
+        match &mut self.w { Sink::File(f) => Ok(f), Sink::Chan(_) => Err(io::Error::new(io::ErrorKind::Unsupported, "this cache goes to a channel")) }
     }
 
     pub fn frames(&self) -> u32 { self.frames }
 
     /// Writes out everything appended so far and returns where the file ends (a checkpoint records it).
     pub fn flush_point(&mut self) -> io::Result<u64> {
-        self.w.flush()?;
-        self.w.get_mut().sync_data()?;
-        self.w.get_mut().stream_position()
+        if matches!(self.w, Sink::Chan(_)) { return Ok(0); }
+        let w = self.file()?;
+        w.flush()?;
+        w.get_mut().sync_data()?;
+        w.get_mut().stream_position()
     }
 
     /// Opens a cache being written (frame count still unknown) to carry on after `frames` frames that end at byte `end`: anything
@@ -378,11 +421,23 @@ impl CacheWriter {
         file.seek(SeekFrom::Start(12 + room as u64))?;
         file.write_all(&u32::MAX.to_le_bytes())?;
         file.seek(SeekFrom::Start(end))?;
-        Ok(CacheWriter { w: BufWriter::with_capacity(8 << 20, file), room, frames, path: path.to_owned() })
+        Ok(CacheWriter { w: Sink::File(BufWriter::with_capacity(8 << 20, file)), buf: Vec::new(), room, frames, path: path.to_owned() })
     }
 
     pub fn append(&mut self, f: &FrameOut) -> io::Result<()> {
-        let w = &mut self.w;
+        let mut w = std::mem::take(&mut self.buf);
+        w.clear();
+        self.frame_bytes(&mut w, f)?;
+        match &mut self.w {
+            Sink::File(file) => file.write_all(&w)?,
+            Sink::Chan(tx) => { tx.send(w.clone()).map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "nobody takes the frames"))?; }
+        }
+        self.buf = w;
+        self.frames += 1;
+        Ok(())
+    }
+
+    fn frame_bytes(&self, w: &mut Vec<u8>, f: &FrameOut) -> io::Result<()> {
         let zero = [0u8; 4];
         let n = f.n as usize;
         let ww = f.ww.filter(|s| s.0 > 0);
@@ -422,16 +477,16 @@ impl CacheWriter {
                 w.write_all(&nd.to_le_bytes())?; w.write_all(pos)?; w.write_all(spd)?; w.write_all(&zero[..pad4(nd as usize * 7)])?;
             }
         }
-        self.frames += 1;
         Ok(())
     }
 
     /// Writes the final header (JSON with the bake's measurements) and the frame count. If the JSON outgrew its room, the file
     /// is rewritten once with a bigger header.
-    pub fn finish(mut self, meta: &Value) -> io::Result<()> {
-        self.w.flush()?;
+    pub fn finish(self, meta: &Value) -> io::Result<()> {
+        let Sink::File(mut fw) = self.w else { return Ok(()); };
+        fw.flush()?;
         let mj = serde_json::to_vec(meta)?;
-        let mut file = self.w.into_inner().map_err(|e| e.into_error())?;
+        let mut file = fw.into_inner().map_err(|e| e.into_error())?;
         if mj.len() <= self.room {
             file.seek(SeekFrom::Start(12))?;
             file.write_all(&mj)?;

@@ -104,6 +104,26 @@ mod tests {
         assert!(cd.frames[12].water.n > n0 + 10000, "fine water after the bake's");
     }
 
+    /// A bake sent to a channel (the live sim) arrives as a cache in memory with every frame.
+    #[test]
+    fn bake_to_channel() {
+        let scene = serde_json::json!({ "app": "SplashTank", "version": 2, "box": { "min": { "x": -0.6, "y": 0, "z": -0.4 }, "size": { "w": 1.2, "h": 0.8, "d": 0.8 } },
+            "solver": { "iters": 30, "cap": 500000, "nbOn": false, "sprOn": false, "airOn": false }, "bake": { "dur": 0.5, "fps": 24 },
+            "fills": [{ "t": "box", "fx0": 0, "fx1": 0.4, "y0": 0, "y1": 0.5, "fz0": 0, "fz1": 1 }], "objs": [] });
+        let desc = crate::scene::desc_from_scene(&scene, &crate::scene::BakeOpts { spacing: 0.03, ..Default::default() }).unwrap();
+        let gpu = crate::gpu::Gpu::new().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ro = crate::bake::RunOpts { sink: Some(tx), ..Default::default() };
+        crate::bake::run(&gpu, &desc, &std::env::temp_dir().join("never-written.splc"), &ro, |_| true).unwrap();
+        drop(ro);
+        let mut it = rx.into_iter();
+        let mut c = splash_format::Cache::from_header(it.next().unwrap()).unwrap();
+        for f in it { c.push(&f).unwrap(); }
+        assert_eq!(c.frames.len(), 13);
+        assert!(c.frames[12].water.n > 1000);
+        assert!(!std::env::temp_dir().join("never-written.splc").exists());
+    }
+
     /// A bake stopped partway (its checkpoint kept) carries on with --resume to the same water as one that ran straight through.
     #[test]
     fn resume_matches() {
