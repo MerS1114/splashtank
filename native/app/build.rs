@@ -11,4 +11,9 @@ fn main() {
         println!("cargo:rerun-if-changed={dir}/index");
     }
     println!("cargo:rerun-if-changed=src");
+    // the program's icon (Explorer, the taskbar, desktop shortcuts)
+    println!("cargo:rerun-if-changed=assets/icon.ico");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        if let Err(e) = winresource::WindowsResource::new().set_icon("assets/icon.ico").compile() { println!("cargo:warning=no icon: {e}"); }
+    }
 }

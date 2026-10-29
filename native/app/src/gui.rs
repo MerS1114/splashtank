@@ -15,7 +15,7 @@ use std::time::Instant;
 pub fn run(files: Vec<PathBuf>) {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
-        viewport: egui::ViewportBuilder::default().with_title(title()).with_inner_size([1400.0, 860.0]).with_drag_and_drop(true),
+        viewport: egui::ViewportBuilder::default().with_title(title()).with_icon(icon()).with_inner_size([1400.0, 860.0]).with_drag_and_drop(true),
         wgpu_options: WgpuConfiguration {
             wgpu_setup: WgpuSetup::CreateNew(WgpuSetupCreateNew {
                 device_descriptor: Arc::new(crate::gpu::device_descriptor),
@@ -35,6 +35,15 @@ pub fn run(files: Vec<PathBuf>) {
         Ok(Box::new(app))
     }));
     if let Err(e) = r { eprintln!("{e}"); }
+}
+
+/// The window's icon (assets/icon256.png, the same drop as the program's icon).
+fn icon() -> Arc<egui::IconData> {
+    let dec = png::Decoder::new(std::io::Cursor::new(include_bytes!("../assets/icon256.png")));
+    let mut r = dec.read_info().expect("icon");
+    let mut buf = vec![0; r.output_buffer_size().unwrap_or(256 * 256 * 4)];
+    let info = r.next_frame(&mut buf).expect("icon");
+    Arc::new(egui::IconData { rgba: buf[..info.buffer_size()].to_vec(), width: info.width, height: info.height })
 }
 
 /// The window title: which copy this is (channel.txt next to the program, written by native/tools/install.ps1: testing or published)
