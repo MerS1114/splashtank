@@ -625,6 +625,24 @@ pub fn apply_keys(o: &mut Value, t: f64, smooth: bool) -> bool {
     true
 }
 
+/// Recorded motion (rec: start frame at 60 a second, then x y z yaw a frame), for an object without keys: its pose at time t, between the
+/// recorded frames (sampleObjState); false when it has none.
+pub fn apply_rec(o: &mut Value, t: f64) -> bool {
+    if !keys(o).is_empty() { return false; }
+    let Some(a) = o["rec"]["arr"].as_array() else { return false; };
+    let n = a.len() / 4;
+    if n < 1 { return false; }
+    let start = o["rec"]["start"].as_f64().unwrap_or(0.0);
+    let k = (t * 60.0 - start).clamp(0.0, (n - 1) as f64);
+    let (i0, w) = (k.floor() as usize, k.fract());
+    let i1 = (i0 + 1).min(n - 1);
+    let g = |i: usize, c: usize| a[i * 4 + c].as_f64().unwrap_or(0.0);
+    let v: Vec<f64> = (0..4).map(|c| g(i0, c) + (g(i1, c) - g(i0, c)) * w).collect();
+    for (k, pk, x) in [("x", "px", v[0]), ("y", "py", v[1]), ("z", "pz", v[2])] { o[k] = json!(x); o[pk] = json!(x); }
+    o["yaw"] = json!(v[3]);
+    true
+}
+
 /// Keys the groups (all the object's when None) at time t, on the frame grid; a key already on that frame gets them added or updated.
 pub fn add_key(o: &mut Value, t: f64, groups: Option<&[&str]>, dur: f64) {
     let own = obj_groups(o);

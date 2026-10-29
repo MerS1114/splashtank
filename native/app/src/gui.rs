@@ -149,6 +149,9 @@ struct App {
     splay: bool,
     /// Blender's record button: changing an object keys what changed
     auto_key: bool,
+    /// recording motion (the page's Record object motion): on, and per object id the frame it started (60 a second) and x y z yaw a frame
+    rec_on: bool,
+    rec_buf: std::collections::HashMap<u64, (i64, Vec<f64>)>,
     /// Bake playback: 0 Full, 1 Smooth (drops the look-only extras while playback falls behind), 2 Fast
     pb: u8,
     /// a key time picked on the timeline (Delete removes the keys there), and a key mark being dragged (from, to)
@@ -225,7 +228,7 @@ impl App {
         App {
             doc: Doc::default(), tab: Tab::Bake, scene_path: None, dirty: false, sel: None, r: Renderer::new(&rs.device), target: None,
             sel_set: Vec::new(), tool: Tool::Select, tf: None, tf_text: String::new(), scene_view: false, undo: Vec::new(), redo: Vec::new(), stable: None, burst: false,
-            changed_now: false, hover: None, add_at: None, box_from: None, new_menu: false, find: String::new(), obj_act: None, edit: None, etf: None, orient_local: false, snap_on: false, snap_to: 0, handles: true, face_drag: None, st: 0.0, splay: false, auto_key: false, pb: 1, sel_key: None, key_drag: None, key_del_now: false,
+            changed_now: false, hover: None, add_at: None, box_from: None, new_menu: false, find: String::new(), obj_act: None, edit: None, etf: None, orient_local: false, snap_on: false, snap_to: 0, handles: true, face_drag: None, st: 0.0, splay: false, auto_key: false, rec_on: false, rec_buf: std::collections::HashMap::new(), pb: 1, sel_key: None, key_drag: None, key_del_now: false,
             live: false, live_w: Worker::new(ctx.clone()), live_rx: None, live_pending: Vec::new(), live_stale: false, swallow: false,
             cam: Orbit { target: glam::Vec3::new(0.0, 0.7, 0.0), theta: 0.8, phi: 1.0, r: 6.2, ortho: false }, goal: None,
             t: 0.0, playing: false, looping: true, speed: 1.0, look: Look::default(),
@@ -557,10 +560,10 @@ impl App {
         self.apply_keys();
     }
     fn apply_keys(&mut self) {
-        let (st, smooth) = (self.st, self.smooth());
+        let (st, smooth, replay) = (self.st, self.smooth(), self.rec_buf.is_empty() && !self.rec_on);
         let Some(objs) = self.objs_mut() else { return; };
         let mut any = false;
-        for o in objs.iter_mut() { any |= tf::apply_keys(o, st, smooth); }
+        for o in objs.iter_mut() { any |= tf::apply_keys(o, st, smooth); if replay { any |= tf::apply_rec(o, st); } }
         if !any { return; }
         if let Some(s) = self.doc.scene.take() { let j = s.json.clone(); self.doc.scene = Some(splash_format::Scene::from_json(j).unwrap_or(s)); }
         if !self.burst { self.stable = self.doc.scene.as_ref().map(|s| s.json.clone()); }
@@ -646,6 +649,9 @@ impl App {
             if ui.button(if self.splay { "Pause" } else { "Play" }).on_hover_text("Play the scene's keys (Space)").clicked() { self.splay = !self.splay; }
             if ui.button(">").on_hover_text("One frame on (Right)").clicked() { self.splay = false; self.set_time(self.st + 1.0 / tf::FPS_TL); }
             if ui.button(">|").on_hover_text("End (Shift+Right)").clicked() { self.splay = false; self.set_time(dur); }
+            let rr = ui.selectable_label(self.rec_on, egui::RichText::new("Record").color(if self.rec_on { egui::Color32::from_rgb(0xff, 0x55, 0x55) } else { egui::Color32::from_gray(0xd0) }))
+                .on_hover_text("Record object motion (the page's Motion for baking): while the scene plays, every object's place is recorded 60 times a second as you move them (G, the gizmo); baking replays it. Objects with keys follow their keys instead.");
+            if rr.clicked() { if self.rec_on { self.rec_stop(); } else { self.rec_on = true; self.st = 0.0; self.splay = true; self.msg = "Recording: move objects while the scene plays; click Record again to stop".into(); } }
             let rec = ui.selectable_label(self.auto_key, "Auto key")
                 .on_hover_text("Auto keying (Blender's record button): moving, turning or scaling an object keys it on the frame shown.");
             // kept in the scene file, as the page does (a setting of the editor, so not a change to save)
@@ -704,6 +710,24 @@ impl App {
             }
             ui.label(format!("{:.2} s", self.st));
         });
+    }
+
+    /// Recording ends: what was recorded becomes each object's rec (replayed by bakes and when the time moves).
+    fn rec_stop(&mut self) {
+        self.rec_on = false;
+        let buf = std::mem::take(&mut self.rec_buf);
+        if buf.is_empty() { return; }
+        let mut secs = 0.0f64;
+        if let Some(objs) = self.objs_mut() {
+            for o in objs.iter_mut() {
+                let Some((start, arr)) = o["id"].as_u64().and_then(|id| buf.get(&id)) else { continue; };
+                if arr.len() < 8 { continue; }
+                secs = secs.max((*start as f64 + (arr.len() / 4) as f64) / 60.0);
+                o["rec"] = serde_json::json!({ "start": start, "arr": arr });
+            }
+        }
+        self.msg = format!("Recorded {secs:.1} s of motion; baking replays it");
+        self.edited();
     }
 
     fn undo_redo(&mut self, redo: bool) {
@@ -1195,7 +1219,18 @@ impl App {
                     }
                 };
                 if changed { self.edited(); }
-                match self.obj_act.take() { Some("dup") => self.duplicate(egui::pos2(0.0, 0.0)), Some("del") => self.delete_selected(), _ => {} }
+                match self.obj_act.take() {
+                    Some("dup") => self.duplicate(egui::pos2(0.0, 0.0)),
+                    Some("del") => self.delete_selected(),
+                    Some("clearrec") => {
+                        if let Some(s) = self.doc.scene.as_mut() {
+                            for o in s.json["objs"].as_array_mut().into_iter().flatten() { o["rec"] = Value::Null; }
+                            s.json["events"] = serde_json::json!([]);
+                        }
+                        self.edited();
+                    }
+                    _ => {}
+                }
                 return;
             }
             ui.heading("Performance");
@@ -1375,6 +1410,17 @@ impl eframe::App for App {
         self.look.region = (self.bake.det_open && self.tab == Tab::Bake).then_some((self.bake.det.c, self.bake.det.s));
         self.doc.selected = if self.editing() { self.sel_set.iter().filter_map(|&k| self.objs().get(k)?["id"].as_u64()).collect() } else { Vec::new() };
         if self.playing { self.scene_view = false; }
+        // recording: every object's place this frame (the page's recordStep, at 60 a second, gaps filled with the last place)
+        if self.rec_on && self.splay {
+            let fr = (self.st * 60.0).round() as i64;
+            let poses: Vec<(u64, [f64; 4])> = self.objs().iter().filter_map(|o| Some((o["id"].as_u64()?, [o["x"].as_f64()?, o["y"].as_f64()?, o["z"].as_f64()?, o["yaw"].as_f64().unwrap_or(0.0)]))).collect();
+            for (id, p) in poses {
+                let e = self.rec_buf.entry(id).or_insert((fr, Vec::new()));
+                let have = e.0 + (e.1.len() / 4) as i64;
+                if e.1.len() >= 4 { let last: Vec<f64> = e.1[e.1.len() - 4..].to_vec(); for _ in have..fr { e.1.extend_from_slice(&last); } }
+                if have <= fr { e.1.extend_from_slice(&p); }
+            }
+        } else if self.rec_on && !self.splay && !self.rec_buf.is_empty() { self.rec_stop(); }
         if self.splay && self.editing() && self.tf.is_none() {
             // the scene plays its keys, round and round
             let d = self.scene_dur();

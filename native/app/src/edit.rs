@@ -266,6 +266,14 @@ pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>, t: f64
             });
         }
     });
+    // recorded motion (the page's Motion for baking)
+    let recd: Vec<f64> = list.iter().filter_map(|o| { let a = o["rec"]["arr"].as_array()?; (a.len() >= 4).then(|| (o["rec"]["start"].as_f64().unwrap_or(0.0) + (a.len() / 4) as f64) / 60.0) }).collect();
+    if !recd.is_empty() {
+        ui.horizontal(|ui| {
+            ui.label(format!("Recorded {:.1} s of motion on {} object{}", recd.iter().cloned().fold(0.0, f64::max), recd.len(), if recd.len() == 1 { "" } else { "s" }));
+            if ui.small_button("Clear motion").on_hover_text("Forget the recorded motion (and the dropped water balls, as the page does)").clicked() { *act = Some("clearrec"); }
+        });
+    }
     let Some(o) = sel.and_then(|k| list.get_mut(k)) else { return false; };
     ui.separator();
     ui.horizontal(|ui| {
