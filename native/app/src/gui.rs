@@ -13,7 +13,7 @@ use std::time::Instant;
 pub fn run(files: Vec<PathBuf>) {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
-        viewport: egui::ViewportBuilder::default().with_title("SplashTank").with_inner_size([1400.0, 860.0]).with_drag_and_drop(true),
+        viewport: egui::ViewportBuilder::default().with_title(title()).with_inner_size([1400.0, 860.0]).with_drag_and_drop(true),
         wgpu_options: WgpuConfiguration {
             wgpu_setup: WgpuSetup::CreateNew(WgpuSetupCreateNew {
                 device_descriptor: Arc::new(crate::gpu::device_descriptor),
@@ -33,6 +33,18 @@ pub fn run(files: Vec<PathBuf>) {
         Ok(Box::new(app))
     }));
     if let Err(e) = r { eprintln!("{e}"); }
+}
+
+/// The window title: which copy this is (channel.txt next to the program, written by native/tools/install.ps1: testing or published)
+/// and the commit it was built from.
+fn title() -> String {
+    let channel = std::env::current_exe().ok().and_then(|p| std::fs::read_to_string(p.with_file_name("channel.txt")).ok()).map(|s| s.trim().to_string());
+    let commit = env!("SPLASH_COMMIT");
+    match channel.as_deref() {
+        Some("testing") => format!("SplashTank Testing ({commit})"),
+        Some("published") => format!("SplashTank ({commit})"),
+        _ => format!("SplashTank (build {commit})"),
+    }
 }
 
 /// The page's Blender-style dark theme (the colours in src/head.html).
