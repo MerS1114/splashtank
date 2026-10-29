@@ -111,6 +111,11 @@ struct App {
     box_from: Option<egui::Pos2>,
     /// the New scene menu is open
     new_menu: bool,
+    /// the scene's time (seconds) on its timeline, and whether the scene plays (its keyed objects move)
+    st: f64,
+    splay: bool,
+    /// Blender's record button: changing an object keys what changed
+    auto_key: bool,
     /// the click that finished a move is only that (it does not also select)
     swallow: bool,
     r: Renderer,
@@ -157,7 +162,7 @@ impl App {
         App {
             doc: Doc::default(), tab: Tab::Bake, scene_path: None, dirty: false, sel: None, r: Renderer::new(&rs.device), target: None,
             sel_set: Vec::new(), tool: Tool::Select, tf: None, tf_text: String::new(), scene_view: false, undo: Vec::new(), redo: Vec::new(), stable: None, burst: false,
-            changed_now: false, hover: None, add_at: None, box_from: None, new_menu: false, swallow: false,
+            changed_now: false, hover: None, add_at: None, box_from: None, new_menu: false, st: 0.0, splay: false, auto_key: false, swallow: false,
             cam: Orbit { target: glam::Vec3::new(0.0, 0.7, 0.0), theta: 0.8, phi: 1.0, r: 6.2, ortho: false }, goal: None,
             t: 0.0, playing: false, looping: true, speed: 1.0, look: Look::default(),
             msg: "Open a bake cache (.splc) or a scene file (.json), or drop one on the window.".into(),
@@ -228,6 +233,9 @@ impl App {
         self.bake.source_scene(name, &j);
         if let Some(b) = self.doc.tank() { self.cam = Orbit::frame(&b); self.goal = None; }
         self.tab = Tab::Objects;
+        self.splay = false;
+        self.auto_key = false;
+        self.set_time(0.0);
         self.msg = format!("New scene: {name}. Add objects with Shift+A or Add, fill the tank in the Tank tab, and save it with Save scene.");
     }
 
@@ -248,6 +256,9 @@ impl App {
                 self.scene_view = false;
                 self.undo.clear(); self.redo.clear(); self.burst = false;
                 self.stable = self.doc.scene.as_ref().map(|s| s.json.clone());
+                self.splay = false;
+                self.auto_key = self.doc.scene.as_ref().and_then(|s| s.json.pointer("/timeline/auto")?.as_bool()).unwrap_or(false);
+                if is_json { self.set_time(0.0); }
             }
             Err(e) => self.msg = e,
         }
@@ -346,11 +357,104 @@ impl App {
     }
     fn end_tf(&mut self, keep: bool) {
         let Some(t) = self.tf.take() else { return; };
+        if keep && self.auto_key {
+            let (st, dur) = (self.st, self.scene_dur());
+            if let Some(objs) = self.objs_mut() { for &i in &t.list { if let Some(o) = objs.get_mut(i) { let g = tf::tf_groups(o, t.kind); tf::add_key(o, st, Some(g), dur); } } }
+            self.edited();
+        }
         if !keep {
             if let Some(o) = self.objs_mut() { t.cancel(o); }
             self.edited();
         }
         self.tf_text.clear();
+    }
+
+    /// The scene's length (the page's timeline length, which is also the bake's).
+    fn scene_dur(&self) -> f64 { self.doc.scene.as_ref().and_then(|s| s.json.pointer("/timeline/dur").or(s.json.pointer("/bake/dur"))?.as_f64()).unwrap_or(5.0).max(0.5) }
+    fn smooth(&self) -> bool { self.doc.scene.as_ref().and_then(|s| s.json.pointer("/timeline/smooth")?.as_bool()).unwrap_or(true) }
+    /// Moves the scene's time; keyed objects take their pose there (the page's applyKeysAt). Not a change to the scene: nothing to save
+    /// or undo (the page also keeps the pose shown in the objects' places).
+    fn set_time(&mut self, t: f64) {
+        self.st = ((t * tf::FPS_TL).round() / tf::FPS_TL).clamp(0.0, self.scene_dur());
+        self.apply_keys();
+    }
+    fn apply_keys(&mut self) {
+        let (st, smooth) = (self.st, self.smooth());
+        let Some(objs) = self.objs_mut() else { return; };
+        let mut any = false;
+        for o in objs.iter_mut() { any |= tf::apply_keys(o, st, smooth); }
+        if !any { return; }
+        if let Some(s) = self.doc.scene.take() { let j = s.json.clone(); self.doc.scene = Some(splash_format::Scene::from_json(j).unwrap_or(s)); }
+        if !self.burst { self.stable = self.doc.scene.as_ref().map(|s| s.json.clone()); }
+    }
+    /// I: keys every group of the selected objects at the time shown; Alt+I takes their key on that frame off.
+    fn key_selected(&mut self, remove: bool) {
+        if self.sel_set.is_empty() { self.msg = "Click an object first.".into(); return; }
+        let (st, dur, sel) = (self.st, self.scene_dur(), self.sel_set.clone());
+        let mut n = 0;
+        if let Some(objs) = self.objs_mut() {
+            for i in sel { if let Some(o) = objs.get_mut(i) { if remove { if tf::clear_key(o, st, None) { n += 1; } } else { tf::add_key(o, st, None, dur); n += 1; } } }
+        }
+        self.msg = match (remove, n) { (true, 0) => "No key on this frame.".into(), (true, _) => format!("Key taken off at {st:.2} s"), _ => format!("Keyed at {st:.2} s") };
+        if n > 0 { self.edited(); self.apply_keys(); }
+    }
+    /// The key times of the selected objects (of all objects when none is selected), for the timeline's marks and Up/Down.
+    fn key_times(&self) -> Vec<f64> {
+        let objs = self.objs();
+        let list: Vec<&Value> = if self.sel_set.is_empty() { objs.iter().collect() } else { self.sel_set.iter().filter_map(|&i| objs.get(i)).collect() };
+        let mut t: Vec<f64> = list.iter().flat_map(|o| tf::keys(o).iter().filter_map(|k| k["t"].as_f64())).collect();
+        t.sort_by(f64::total_cmp);
+        t.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        t
+    }
+
+    /// The scene's timeline (the page's): play, frames, key marks, length, Smooth or Linear between keys, Auto key, Key and Unkey.
+    fn scene_timeline(&mut self, ui: &mut egui::Ui) {
+        let dur = self.scene_dur();
+        let frames = (dur * tf::FPS_TL).round() as usize;
+        ui.horizontal(|ui| {
+            if ui.button("|<").on_hover_text("Start (Shift+Left)").clicked() { self.splay = false; self.set_time(0.0); }
+            if ui.button("<").on_hover_text("One frame back (Left)").clicked() { self.splay = false; self.set_time(self.st - 1.0 / tf::FPS_TL); }
+            if ui.button(if self.splay { "Pause" } else { "Play" }).on_hover_text("Play the scene's keys (Space)").clicked() { self.splay = !self.splay; }
+            if ui.button(">").on_hover_text("One frame on (Right)").clicked() { self.splay = false; self.set_time(self.st + 1.0 / tf::FPS_TL); }
+            if ui.button(">|").on_hover_text("End (Shift+Right)").clicked() { self.splay = false; self.set_time(dur); }
+            let rec = ui.selectable_label(self.auto_key, "Auto key")
+                .on_hover_text("Auto keying (Blender's record button): moving, turning or scaling an object keys it on the frame shown.");
+            // kept in the scene file, as the page does (a setting of the editor, so not a change to save)
+            if rec.clicked() { self.auto_key = !self.auto_key; if let Some(s) = self.doc.scene.as_mut() { s.json["timeline"]["auto"] = Value::Bool(self.auto_key); } }
+            if ui.button("Key").on_hover_text("Key the selected objects on this frame (I)").clicked() { self.key_selected(false); }
+            if ui.button("Unkey").on_hover_text("Take the selected objects' key on this frame off (Alt+I)").clicked() { self.key_selected(true); }
+            let mut smooth = self.smooth();
+            if ui.selectable_label(smooth, "Smooth").on_hover_text("Ease in and out between keys").clicked() { smooth = true; }
+            if ui.selectable_label(!smooth, "Linear").on_hover_text("Straight between keys, at even speed").clicked() { smooth = false; }
+            if smooth != self.smooth() { if let Some(s) = self.doc.scene.as_mut() { s.json["timeline"]["smooth"] = Value::Bool(smooth); } self.edited(); self.apply_keys(); }
+            let mut d = dur;
+            if ui.add(egui::DragValue::new(&mut d).range(1.0..=60.0).speed(0.05).max_decimals(1).prefix("length ").suffix(" s")).on_hover_text("How long the scene (and its bake) is").changed() {
+                let d = (d * 2.0).round() / 2.0;
+                if let Some(s) = self.doc.scene.as_mut() { s.json["timeline"]["dur"] = serde_json::json!(d); s.json["bake"]["dur"] = serde_json::json!(d); }
+                self.bake.set_seconds(d as f32);
+                self.edited();
+                if self.st > d { self.set_time(d); }
+            }
+            let mut f = (self.st * tf::FPS_TL).round() as usize;
+            let sw = (ui.available_width() - 150.0).max(100.0);
+            ui.spacing_mut().slider_width = sw;
+            let r = ui.add(egui::Slider::new(&mut f, 0..=frames).text("frame"));
+            if r.changed() { self.splay = false; self.set_time(f as f64 / tf::FPS_TL); }
+            // key marks along the slider (the selected objects' keys, or every key when nothing is selected)
+            // where egui puts the handle: along the rail (slider_width wide) inset by the handle's radius
+            let rr = r.rect;
+            let hr = rr.height() / 2.5;
+            let (x0, y) = (rr.left() + hr, rr.center().y);
+            for t in self.key_times() {
+                let x = x0 + (t / dur) as f32 * (sw - 2.0 * hr);
+                let p = egui::pos2(x, y);
+                let s = 5.0;
+                ui.painter().add(egui::Shape::convex_polygon(vec![p + egui::vec2(0.0, -s), p + egui::vec2(s, 0.0), p + egui::vec2(0.0, s), p + egui::vec2(-s, 0.0)],
+                    egui::Color32::from_rgb(0xe9, 0xc8, 0x4a), egui::Stroke::new(1.0, egui::Color32::from_gray(0x20))));
+            }
+            ui.label(format!("{:.2} s", self.st));
+        });
     }
 
     fn undo_redo(&mut self, redo: bool) {
@@ -365,6 +469,7 @@ impl App {
         self.sel_set.retain(|&i| i < n);
         self.sel = self.sel.filter(|&i| i < n);
         self.dirty = true;
+        self.apply_keys();
         self.msg = if redo { "Redone" } else { "Undone" }.into();
     }
 
@@ -611,6 +716,7 @@ impl App {
     }
 
     fn timeline(&mut self, ui: &mut egui::Ui) {
+        if self.editing() { self.scene_timeline(ui); return; }
         let n = self.frames();
         ui.horizontal(|ui| {
             ui.add_enabled_ui(n > 0, |ui| {
@@ -652,7 +758,7 @@ impl App {
                     Tab::Tank => crate::edit::tank(ui, &mut s.json),
                     _ => {
                         let before = self.sel;
-                        let ch = crate::edit::objects(ui, &mut s.json, &mut self.sel);
+                        let ch = crate::edit::objects(ui, &mut s.json, &mut self.sel, self.st);
                         if self.sel != before { self.sel_set = self.sel.into_iter().collect(); }
                         ch
                     }
@@ -729,10 +835,24 @@ impl eframe::App for App {
         let (k1, k3, k5, k7, kf) = ui.input(|i| (i.key_pressed(egui::Key::Num1), i.key_pressed(egui::Key::Num3), i.key_pressed(egui::Key::Num5),
             i.key_pressed(egui::Key::Num7), i.key_pressed(egui::Key::F)));
         if !typing {
+            if self.editing() {
+                // the scene's time: Space plays its keys, Left/Right a frame, Shift to the ends, Up/Down to the next or last key; I keys, Alt+I unkeys
+                let (up, down, ki, alt) = ui.input(|i| (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::I), i.modifiers.alt));
+                if self.tf.is_none() {
+                    if space { self.splay = !self.splay; }
+                    let f = 1.0 / tf::FPS_TL;
+                    if left { self.splay = false; self.set_time(if shift { 0.0 } else { self.st - f }); }
+                    if right { self.splay = false; let d = self.scene_dur(); self.set_time(if shift { d } else { self.st + f }); }
+                    if up { if let Some(t) = self.key_times().into_iter().find(|&t| t > self.st + 1e-6) { self.splay = false; self.set_time(t); } }
+                    if down { if let Some(t) = self.key_times().into_iter().rev().find(|&t| t < self.st - 1e-6) { self.splay = false; self.set_time(t); } }
+                    if ki && !ctrl { self.key_selected(alt); }
+                }
+            } else {
             if space && n > 0 { self.bake.follow = false; self.playing = !self.playing; }
             if (left || right) && shift { self.bake.follow = false; }
             if left { if shift { self.playing = false; self.t = 0.0; } else { self.step(-1.0); } }
             if right { if shift { if n > 0 { self.playing = false; self.t = (n - 1) as f64; } } else { self.step(1.0); } }
+            }
             if home { self.frame_all(); }
             if kf { if self.editing() { self.focus_selected(); } else { self.frame_all(); } }
             // while moving, number keys type an amount instead
@@ -757,6 +877,14 @@ impl eframe::App for App {
         self.look.region = (self.bake.det_open && self.tab == Tab::Bake).then_some((self.bake.det.c, self.bake.det.s));
         self.doc.selected = if self.editing() { self.sel_set.iter().filter_map(|&k| self.objs().get(k)?["id"].as_u64()).collect() } else { Vec::new() };
         if self.playing { self.scene_view = false; }
+        if self.splay && self.editing() && self.tf.is_none() {
+            // the scene plays its keys, round and round
+            let d = self.scene_dur();
+            let t = self.st + dt.min(0.1) as f64;
+            self.st = if t > d { 0.0 } else { t };
+            self.apply_keys();
+            ui.ctx().request_repaint();
+        } else if !self.editing() { self.splay = false; }
         // a change that has ended (nothing changed this frame, no move going on): the scene now at rest is what undo goes back to
         if self.burst && !self.changed_now && self.tf.is_none() { self.stable = self.doc.scene.as_ref().map(|s| s.json.clone()); self.burst = false; }
         self.changed_now = false;

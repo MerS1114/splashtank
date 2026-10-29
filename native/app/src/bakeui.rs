@@ -160,6 +160,7 @@ impl BakeUi {
         self.resumable = None;
         self.settings_of(v);
     }
+    pub fn set_seconds(&mut self, s: f32) { self.seconds = s; }
     fn settings_of(&mut self, v: &serde_json::Value) {
         let bk = &v["bake"];
         self.seconds = bk["dur"].as_f64().unwrap_or(5.0) as f32;

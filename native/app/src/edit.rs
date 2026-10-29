@@ -161,12 +161,19 @@ pub fn tank(ui: &mut egui::Ui, j: &mut Value) -> bool {
     changed
 }
 
+/// A field's name coloured as Blender does: yellow where its group has a key on the frame shown, green where it is animated.
+fn klabel(ui: &mut egui::Ui, text: &str, (now, anim): (bool, bool), tip: &str) {
+    let c = if now { egui::Color32::from_rgb(0xe9, 0xc8, 0x4a) } else if anim { egui::Color32::from_rgb(0x6c, 0xc0, 0x4a) } else { egui::Color32::from_gray(0xa0) };
+    let r = ui.label(egui::RichText::new(text).color(c));
+    if !tip.is_empty() { r.on_hover_text(tip); }
+}
+
 /// Three number fields in a row (scale: shown = stored x scale, e.g. radians shown in degrees).
 #[allow(clippy::too_many_arguments)]
-fn vec3(ui: &mut egui::Ui, o: &mut Value, name: &str, keys: [&str; 3], d: f64, scale: f64, speed: f64, tip: &str) -> bool {
+fn vec3(ui: &mut egui::Ui, o: &mut Value, name: &str, keys: [&str; 3], d: f64, scale: f64, speed: f64, tip: &str, ks: (bool, bool)) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
-        label(ui, name, false, tip);
+        klabel(ui, name, ks, tip);
         for k in keys {
             let mut v = o[k].as_f64().unwrap_or(d) * scale;
             if ui.add(egui::DragValue::new(&mut v).speed(speed).max_decimals(3)).changed() { o[k] = json!(v / scale); changed = true; }
@@ -176,7 +183,7 @@ fn vec3(ui: &mut egui::Ui, o: &mut Value, name: &str, keys: [&str; 3], d: f64, s
 }
 
 /// The Objects tab: the outliner and the selected object's settings (the page's object panel).
-pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>) -> bool {
+pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>, t: f64) -> bool {
     let mut changed = false;
     let Some(list) = j.get_mut("objs").and_then(Value::as_array_mut) else { return false; };
     if list.is_empty() { ui.label("No objects."); return false; }
@@ -194,24 +201,27 @@ pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>) -> boo
     let mut name = o["name"].as_str().unwrap_or("").to_owned();
     ui.horizontal(|ui| { ui.label("Name"); if ui.text_edit_singleline(&mut name).changed() { o["name"] = json!(name); changed = true; } });
     if o["keys"].as_array().is_some_and(|a| !a.is_empty()) {
-        ui.colored_label(egui::Color32::from_rgb(0xe9, 0xa4, 0x3a), "This object has keys: while the scene plays, keyed values come from them, not from the fields here.");
+        ui.colored_label(egui::Color32::from_rgb(0xe9, 0xa4, 0x3a), "Keyed: the fields show the pose at the time on the timeline (yellow: a key on this frame, green: animated). Change a field and press I (or turn on Auto key) to key it; moving the time puts it back to its keys.");
     }
     let num = |o: &Value, k: &str, d: f64| o[k].as_f64().unwrap_or(d);
-    if vec3(ui, o, "Location", ["x", "y", "z"], 0.0, 1.0, 0.01, "Where the object is, in scene units.") {
+    let ks = |g: &str| crate::tf::key_state(o, g, t);
+    let (kl, kr, kc) = (ks("loc"), ks("rot"), ks("scale"));
+    let (ka, kd, kv, ko) = (ks("aim"), ks("radius"), ks("speed"), ks("on"));
+    if vec3(ui, o, "Location", ["x", "y", "z"], 0.0, 1.0, 0.01, "Where the object is, in scene units.", kl) {
         // the pose the page draws a stopped scene at goes with it
         for (k, p) in [("x", "px"), ("y", "py"), ("z", "pz")] { o[p] = o[k].clone(); }
         changed = true;
     }
     if !emitter {
-        changed |= vec3(ui, o, "Rotation", ["rx", "yaw", "rz"], 0.0, 180.0 / std::f64::consts::PI, 0.5, "Turned about X, Y and Z, in degrees.");
-        changed |= vec3(ui, o, "Scale", ["sx", "sy", "sz"], 1.0, 1.0, 0.01, "A factor on the shape along its own axes.");
+        changed |= vec3(ui, o, "Rotation", ["rx", "yaw", "rz"], 0.0, 180.0 / std::f64::consts::PI, 0.5, "Turned about X, Y and Z, in degrees.", kr);
+        changed |= vec3(ui, o, "Scale", ["sx", "sy", "sz"], 1.0, 1.0, 0.01, "A factor on the shape along its own axes.", kc);
         let mut water = o["water"].as_bool().unwrap_or(false);
         if ui.checkbox(&mut water, "Water volume").on_hover_text("The shape is filled with water instead of colliding.").changed() { o["water"] = json!(water); changed = true; }
         let mut spin = num(o, "spin", 0.0);
         ui.horizontal(|ui| { ui.label("Spin"); if ui.add(egui::Slider::new(&mut spin, -6.0..=6.0).step_by(0.1).suffix("/s")).changed() { o["spin"] = json!(spin); changed = true; } });
     } else {
         let mut on = o["on"].as_bool().unwrap_or(true);
-        if ui.checkbox(&mut on, "Emitting").changed() { o["on"] = json!(on); changed = true; }
+        ui.horizontal(|ui| { if ui.checkbox(&mut on, "").changed() { o["on"] = json!(on); changed = true; } klabel(ui, "Emitting", ko, ""); });
         let mut mode = o["mode"].as_str().unwrap_or("smooth").to_owned();
         ui.horizontal(|ui| {
             ui.label("Emission");
@@ -223,7 +233,7 @@ pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>) -> boo
                 ("el", "Pitch", -90.0, 90.0, 1.0, -30.0, "°"), ("turb", "Turbulence", 0.0, 1.5, 0.05, 0.0, ""), ("spread", "Spread", 0.0, 1.0, 0.02, 0.0, " m/s"), ("density", "Density", 0.2, 1.5, 0.05, 1.0, "")] {
                 if k == "density" && !random { continue; }
                 let mut v = num(o, k, d);
-                ui.label(name);
+                klabel(ui, name, match k { "speed" => kv, "radius" => kd, "az" | "el" => ka, _ => (false, false) }, "");
                 if ui.add(egui::Slider::new(&mut v, lo..=hi).step_by(step).suffix(suffix)).changed() { o[k] = json!(v); changed = true; }
                 ui.end_row();
             }

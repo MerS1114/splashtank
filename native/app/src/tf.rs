@@ -464,3 +464,130 @@ mod tests {
         assert!((d.x - 1.0).abs() < 1e-3 && d.y.abs() < 1e-5 && d.z.abs() < 1e-5, "{d}");
     }
 }
+
+// ---------- keys (KEY_GROUPS, keyPose, addKey, clearKeyAt in src/shared.js and 07-timeline.js) ----------
+
+/// The channel groups an object can key, as Blender's Location, Rotation and Scale; a source has Aim, Radius, Speed and Emitting.
+pub const GROUPS: [(&str, &[&str]); 7] = [("loc", &["x", "y", "z"]), ("rot", &["rx", "yaw", "rz"]), ("scale", &["sx", "sy", "sz"]), ("aim", &["az", "el"]),
+    ("radius", &["radius"]), ("speed", &["speed"]), ("on", &["on"])];
+pub const FPS_TL: f64 = 24.0;
+pub fn obj_groups(o: &Value) -> &'static [&'static str] { if is_emitter(o) { &["loc", "aim", "radius", "speed", "on"] } else { &["loc", "rot", "scale"] } }
+/// The groups a move keys with auto keying on: Move keys Location, Rotate keys Rotation (a source's Aim), Scale keys Scale (a source's Radius).
+pub fn tf_groups(o: &Value, k: Kind) -> &'static [&'static str] {
+    match (k, is_emitter(o)) { (Kind::G, _) => &["loc"], (Kind::R, true) => &["aim"], (Kind::R, false) => &["rot"], (Kind::S, true) => &["radius"], (Kind::S, false) => &["scale"] }
+}
+fn chans(g: &str) -> &'static [&'static str] { GROUPS.iter().find(|x| x.0 == g).map(|x| x.1).unwrap_or(&[]) }
+fn key_has(k: &Value, g: &str) -> bool { chans(g).first().is_some_and(|c| !k[*c].is_null()) }
+pub fn keys(o: &Value) -> &[Value] { o["keys"].as_array().map(|v| v.as_slice()).unwrap_or(&[]) }
+
+/// The pose at time t from the keys (sorted by t): the channels of every group some key holds. smooth: Catmull-Rom between keys, else
+/// straight lines (Speed is always straight; Emitting switches at the key).
+pub fn key_pose(ks: &[Value], t: f64, smooth: bool) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    let num = |k: &Value, c: &str| k[c].as_f64().unwrap_or(0.0);
+    for (g, ch) in GROUPS {
+        let ks: Vec<&Value> = ks.iter().filter(|k| key_has(k, g)).collect();
+        let n = ks.len();
+        if n == 0 { continue; }
+        if g == "on" { let mut v = ks[0]["on"].clone(); for k in &ks { if num(k, "t") <= t { v = k["on"].clone(); } } out.insert("on".into(), v); continue; }
+        let put = |out: &mut serde_json::Map<String, Value>, k: &Value| for c in ch { out.insert((*c).into(), k[*c].clone()); };
+        if t <= num(ks[0], "t") || n == 1 { put(&mut out, ks[0]); continue; }
+        if t >= num(ks[n - 1], "t") { put(&mut out, ks[n - 1]); continue; }
+        let mut i = 0;
+        while i < n - 2 && t >= num(ks[i + 1], "t") { i += 1; }
+        let (a, b) = (ks[i], ks[i + 1]);
+        let u = (t - num(a, "t")) / (num(b, "t") - num(a, "t")).max(1e-6);
+        let (p0, p3) = (if i > 0 { ks[i - 1] } else { a }, ks.get(i + 2).copied().unwrap_or(b));
+        let (u2, u3) = (u * u, u * u * u);
+        for c in ch {
+            let (aa, bb, pp0, pp3) = (num(a, c), num(b, c), num(p0, c), num(p3, c));
+            let mut v = if !smooth || g == "speed" { aa + (bb - aa) * u } else {
+                0.5 * ((2.0 * aa) + (-pp0 + bb) * u + (2.0 * pp0 - 5.0 * aa + 4.0 * bb - pp3) * u2 + (-pp0 + 3.0 * aa - 3.0 * bb + pp3) * u3)
+            };
+            if g == "scale" { v = v.max(0.02); }
+            out.insert((*c).into(), json!(v));
+        }
+    }
+    out
+}
+
+/// Puts a keyed object where its keys say it is at time t (the page's applyKeysAt); false when it has no keys.
+pub fn apply_keys(o: &mut Value, t: f64, smooth: bool) -> bool {
+    if keys(o).is_empty() { return false; }
+    let mut p = key_pose(keys(o), t, smooth);
+    let own = obj_groups(o);
+    p.retain(|c, _| GROUPS.iter().any(|(g, ch)| own.contains(g) && ch.contains(&c.as_str())));
+    if let Some(r) = p.get_mut("radius") { *r = json!(r.as_f64().unwrap_or(0.15).clamp(0.03, 0.5)); }
+    for (c, v) in p {
+        if let Some(pk) = match c.as_str() { "x" => Some("px"), "y" => Some("py"), "z" => Some("pz"), _ => None } { o[pk] = v.clone(); }
+        o[c.as_str()] = v;
+    }
+    true
+}
+
+/// Keys the groups (all the object's when None) at time t, on the frame grid; a key already on that frame gets them added or updated.
+pub fn add_key(o: &mut Value, t: f64, groups: Option<&[&str]>, dur: f64) {
+    let own = obj_groups(o);
+    let gs: Vec<&str> = groups.unwrap_or(own).iter().copied().filter(|g| own.contains(g)).collect();
+    if gs.is_empty() { return; }
+    let t = ((t * FPS_TL).round() / FPS_TL).clamp(0.0, dur);
+    let defaults = |c: &str| match c { "sx" | "sy" | "sz" => json!(1.0), "az" => json!(0.0), "el" => json!(-30.0), "radius" => json!(0.15), "speed" => json!(4.0), "on" => json!(true), _ => json!(0.0) };
+    let mut k = serde_json::Map::new();
+    for g in &gs { for c in chans(g) { k.insert((*c).into(), if o[*c].is_null() { defaults(c) } else { o[*c].clone() }); } }
+    if !o["keys"].is_array() { o["keys"] = json!([]); }
+    let ks = o["keys"].as_array_mut().unwrap();
+    match ks.iter_mut().find(|q| (q["t"].as_f64().unwrap_or(-1.0) - t).abs() < 0.5 / FPS_TL) {
+        Some(ex) => for (c, v) in k { ex[c.as_str()] = v; },
+        None => { k.insert("t".into(), json!(t)); ks.push(Value::Object(k)); }
+    }
+    ks.sort_by(|a, b| a["t"].as_f64().unwrap_or(0.0).total_cmp(&b["t"].as_f64().unwrap_or(0.0)));
+}
+
+/// Alt+I: takes the groups (all when None) off the key on the frame at t; a key left with nothing is removed. False when no key there.
+pub fn clear_key(o: &mut Value, t: f64, groups: Option<&[&str]>) -> bool {
+    let Some(ks) = o["keys"].as_array_mut() else { return false; };
+    let Some(i) = ks.iter().position(|q| (q["t"].as_f64().unwrap_or(-1.0) - t).abs() < 0.5 / FPS_TL) else { return false; };
+    for (g, ch) in GROUPS { if groups.is_none_or(|gs| gs.contains(&g)) { for c in ch { if let Some(m) = ks[i].as_object_mut() { m.remove(*c); } } } }
+    if !GROUPS.iter().any(|(g, _)| key_has(&ks[i], g)) { ks.remove(i); }
+    true
+}
+
+/// Whether a group is keyed on the frame at t ("now", yellow in Blender) or animated at all (green).
+pub fn key_state(o: &Value, g: &str, t: f64) -> (bool, bool) {
+    let ks = keys(o);
+    (ks.iter().any(|k| key_has(k, g) && (k["t"].as_f64().unwrap_or(-1.0) - t).abs() < 0.5 / FPS_TL), ks.iter().any(|k| key_has(k, g)))
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    /// Keys made, read back between them (straight and smooth), changed and taken off as the page does.
+    #[test]
+    fn keys_round_trip() {
+        let mut o = json!({ "shape": "cube", "x": 0.0, "y": 1.0, "z": 0.0, "rx": 0, "yaw": 0, "rz": 0, "sx": 1, "sy": 1, "sz": 1, "keys": [] });
+        add_key(&mut o, 0.0, None, 5.0);
+        o["y"] = json!(3.0);
+        add_key(&mut o, 2.0, Some(&["loc"]), 5.0);
+        assert_eq!(keys(&o).len(), 2);
+        let p = key_pose(keys(&o), 1.0, false);
+        assert!((p["y"].as_f64().unwrap() - 2.0).abs() < 1e-9);
+        assert!(p.contains_key("sx") && p.contains_key("rx"));
+        // smooth with two keys: Catmull-Rom with the ends repeated, the middle still halfway
+        assert!((key_pose(keys(&o), 1.0, true)["y"].as_f64().unwrap() - 2.0).abs() < 1e-9);
+        o["y"] = json!(9.0);
+        assert!(apply_keys(&mut o, 2.0, true));
+        assert_eq!(o["y"], json!(3.0));
+        assert_eq!(o["py"], json!(3.0));
+        assert_eq!(key_state(&o, "loc", 2.0), (true, true));
+        assert_eq!(key_state(&o, "rot", 2.0), (false, true));
+        // a time between frames lands on the frame grid
+        add_key(&mut o, 2.01, Some(&["scale"]), 5.0);
+        assert_eq!(keys(&o).len(), 2);
+        assert!(clear_key(&mut o, 2.0, Some(&["loc"])));
+        assert_eq!(keys(&o).len(), 2, "the key at 2 s still holds Scale");
+        assert!(clear_key(&mut o, 2.0, None));
+        assert_eq!(keys(&o).len(), 1);
+        assert!(!clear_key(&mut o, 3.0, None));
+    }
+}
