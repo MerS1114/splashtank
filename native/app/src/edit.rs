@@ -29,6 +29,13 @@ fn label(ui: &mut egui::Ui, text: &str, changed: bool, tip: &str) {
     if !tip.is_empty() { r.on_hover_text(tip); }
 }
 
+/// Right-click on a setting: back to the page's default (the page's context menu).
+fn reset_menu(resp: &egui::Response, j: &mut Value, path: &[&str], def: &Value) -> bool {
+    let mut ch = false;
+    resp.context_menu(|ui| { if ui.button("Reset to default").clicked() { set(j, path, def.clone()); ch = true; ui.close(); } });
+    ch
+}
+
 fn row(ui: &mut egui::Ui, j: &mut Value, r: &Value) -> bool {
     let path = path_of(r);
     let tip = r["tip"].as_str().unwrap_or("");
@@ -37,9 +44,10 @@ fn row(ui: &mut egui::Ui, j: &mut Value, r: &Value) -> bool {
         let def = r["def"].as_bool().unwrap_or(false);
         let mut on = get(j, &path).and_then(Value::as_bool).unwrap_or(def);
         label(ui, name, on != def, tip);
-        let ch = ui.checkbox(&mut on, "").changed();
+        let resp = ui.checkbox(&mut on, "");
+        let ch = resp.changed();
         if ch { set(j, &path, json!(on)); }
-        return ch;
+        return ch | reset_menu(&resp, j, &path, &r["def"]);
     }
     let f = |k: &str| r[k].as_f64();
     let (min, max, def) = (f("min").unwrap_or(0.0), f("max").unwrap_or(1.0), f("def").unwrap_or(0.0));
@@ -71,7 +79,7 @@ fn row(ui: &mut egui::Ui, j: &mut Value, r: &Value) -> bool {
         // whole numbers stay whole in the file (the page writes 30, not 30.0)
         set(j, &path, if nv.fract() == 0.0 && nv.abs() < 1e15 { json!(nv as i64) } else { json!(nv) });
     }
-    ch
+    ch | reset_menu(&resp, j, &path, &r["def"])
 }
 
 fn group(ui: &mut egui::Ui, j: &mut Value, gi: usize) -> bool {
@@ -119,11 +127,28 @@ fn looks(ui: &mut egui::Ui, j: &mut Value) -> bool {
 }
 
 /// The Simulation tab: every setting a scene file keeps, grouped as on the page.
-pub fn settings(ui: &mut egui::Ui, j: &mut Value) -> bool {
+/// find: the search box's text (F3 on the page): only the settings whose name or tooltip has it, in one list.
+pub fn settings(ui: &mut egui::Ui, j: &mut Value, find: &mut String) -> bool {
     let sp = spec();
     let mut changed = false;
-    for (gi, g) in sp["groups"].as_array().unwrap().iter().enumerate() {
-        if g["parent"].is_null() { changed |= group(ui, j, gi); }
+    ui.horizontal(|ui| {
+        ui.label("Search");
+        ui.add(egui::TextEdit::singleline(find).hint_text("a setting's name").desired_width(200.0));
+        if !find.is_empty() && ui.small_button("x").clicked() { find.clear(); }
+    });
+    ui.label(egui::RichText::new("Right-click a setting to reset it to the default.").small().color(egui::Color32::from_gray(0x90)));
+    let q = find.trim().to_lowercase();
+    if !q.is_empty() {
+        egui::Grid::new("simfind").num_columns(2).spacing([8.0, 3.0]).show(ui, |ui| {
+            for r in sp["rows"].as_array().unwrap() {
+                let hit = r["label"].as_str().unwrap_or("").to_lowercase().contains(&q) || r["tip"].as_str().unwrap_or("").to_lowercase().contains(&q);
+                if hit { changed |= row(ui, j, r); ui.end_row(); }
+            }
+        });
+    } else {
+        for (gi, g) in sp["groups"].as_array().unwrap().iter().enumerate() {
+            if g["parent"].is_null() { changed |= group(ui, j, gi); }
+        }
     }
     // the ocean needs the narrow band (the page turns it on with the ocean)
     if changed && get(j, &["ocean", "on"]).and_then(Value::as_bool) == Some(true) { set(j, &["solver", "nbOn"], json!(true)); }
@@ -219,7 +244,8 @@ fn vec3(ui: &mut egui::Ui, o: &mut Value, name: &str, keys: [&str; 3], d: f64, s
 }
 
 /// The Objects tab: the outliner and the selected object's settings (the page's object panel).
-pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>, t: f64, hidden: &mut Vec<u64>) -> bool {
+/// act: a button asking the window to "dup"licate or "del"ete the selection.
+pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>, t: f64, hidden: &mut Vec<u64>, act: &mut Option<&'static str>) -> bool {
     HOVER.with(|h| h.set(None));
     let mut changed = false;
     let Some(list) = j.get_mut("objs").and_then(Value::as_array_mut) else { return false; };
@@ -242,6 +268,10 @@ pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>, t: f64
     });
     let Some(o) = sel.and_then(|k| list.get_mut(k)) else { return false; };
     ui.separator();
+    ui.horizontal(|ui| {
+        if ui.button("Duplicate (Shift+D)").clicked() { *act = Some("dup"); }
+        if ui.button("Delete (X)").clicked() { *act = Some("del"); }
+    });
     let emitter = crate::tf::is_emitter(o);
     let mut name = o["name"].as_str().unwrap_or("").to_owned();
     ui.horizontal(|ui| { ui.label("Name"); if ui.text_edit_singleline(&mut name).changed() { o["name"] = json!(name); changed = true; } });
@@ -259,7 +289,33 @@ pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>, t: f64
     }
     if !emitter {
         changed |= vec3(ui, o, "Rotation", ["rx", "yaw", "rz"], 0.0, 180.0 / std::f64::consts::PI, 0.5, "Turned about X, Y and Z, in degrees.", kr);
-        changed |= vec3(ui, o, "Scale", ["sx", "sy", "sz"], 1.0, 1.0, 0.01, "A factor on the shape along its own axes.", kc);
+        // Scale and Dimensions (the size in scene units it gives), with the page's lock that keeps the proportions
+        let s0 = [num(o, "sx", 1.0), num(o, "sy", 1.0), num(o, "sz", 1.0)];
+        let lock = o["lockScale"].as_bool().unwrap_or(false);
+        let mut sc = o.clone();
+        if vec3(ui, &mut sc, "Scale", ["sx", "sy", "sz"], 1.0, 1.0, 0.01, "A factor on the shape along its own axes.", kc) {
+            let k = ["sx", "sy", "sz"].iter().enumerate().find(|(i, a)| (num(&sc, a, 1.0) - s0[*i]).abs() > 1e-12).map(|(i, _)| i);
+            if let Some(i) = k {
+                let f = (num(&sc, ["sx", "sy", "sz"][i], 1.0) / s0[i].max(1e-9)).max(1e-3);
+                for (a, s) in ["sx", "sy", "sz"].iter().zip(s0) { o[*a] = json!(if lock || *a == ["sx", "sy", "sz"][i] { (s * f).max(0.02) } else { s }); }
+                changed = true;
+            }
+        }
+        let base = crate::editmode::base_dims(o);
+        let mut dm = json!({ "dx": base[0] * s0[0], "dy": base[1] * s0[1], "dz": base[2] * s0[2] });
+        if vec3(ui, &mut dm, "Dimensions", ["dx", "dy", "dz"], 1.0, 1.0, 0.01, "The shape's size in scene units (Scale times its own size).", kc) {
+            for (i, (a, d)) in ["sx", "sy", "sz"].iter().zip(["dx", "dy", "dz"]).enumerate() {
+                let want = num(&dm, d, 1.0) / base[i].max(1e-9);
+                if (want - s0[i]).abs() > 1e-9 {
+                    let f = (want / s0[i].max(1e-9)).max(1e-3);
+                    for (b, s) in ["sx", "sy", "sz"].iter().zip(s0) { if lock || b == a { o[*b] = json!((s * f).max(0.02)); } }
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        let mut lk = lock;
+        if ui.checkbox(&mut lk, "Lock proportions").on_hover_text("Typing one Scale or Dimensions value changes the other two by the same factor, and S scales evenly.").changed() { o["lockScale"] = json!(lk); changed = true; }
         let mut water = o["water"].as_bool().unwrap_or(false);
         if ui.checkbox(&mut water, "Water volume").on_hover_text("The shape is filled with water instead of colliding.").changed() { o["water"] = json!(water); changed = true; }
         let mut spin = num(o, "spin", 0.0);

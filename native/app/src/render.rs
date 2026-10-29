@@ -121,6 +121,8 @@ pub struct Look {
     pub water: bool,
     /// Colour by Type instead of speed
     pub by_type: bool,
+    /// background: 0 grey, 1 light, 2 black (the page's Display > Background)
+    pub bg: u8,
     /// the time shown (seconds), for the ocean past the walls
     pub time: f32,
     pub deep: bool,
@@ -132,7 +134,7 @@ pub struct Look {
     pub scene_objs: bool,
 }
 impl Default for Look {
-    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None, scene_objs: false, by_type: false, time: 0.0 } }
+    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None, scene_objs: false, by_type: false, time: 0.0, bg: 0 } }
 }
 
 #[repr(C)]
@@ -315,7 +317,7 @@ impl Renderer {
         let ortho = if cam.ortho { ht / (2.0 * cam.half_h()) } else { 0.0 };
         let base = CamU { view: cam.view().to_cols_array_2d(), proj: cam.proj(wd / ht).to_cols_array_2d(), org: [org[0], org[1], org[2], 0.0],
             vp: [wd, ht, ht / (2.0 * HALF_FOV.tan()), ortho], a: [look.size * d, d, cell, umax], b: [look.foam, vs, 1.0 / fps, w],
-            c: [look.detail as f32, look.spr_detail.min(15) as f32, look.streak, look.skip_buried as u32 as f32], d: [2.0, 1.0, if look.by_type { 1.0 } else { 0.0 }, 0.0] };
+            c: [look.detail as f32, look.spr_detail.min(15) as f32, look.streak, look.skip_buried as u32 as f32], d: [2.0, 1.0, if look.by_type { 1.0 } else { 0.0 }, look.bg as f32] };
         // copies a point: water 1 + its detail, deep water 5, whitewater 1 + its detail (at most 16 in all)
         let k = [1 + look.detail.min(15), 5, 1 + look.spr_detail.min(15), 1];
         for (i, s) in self.cams.iter().enumerate() { let mut u = base; u.d[1] = k[i] as f32; queue.write_buffer(&s.buf, 0, bytemuck::bytes_of(&u)); }
@@ -410,7 +412,8 @@ fn geometry(doc: &Doc, a: usize, b: usize, w: f32, look: &Look) -> (Vec<Vert>, V
     };
     if let Some(b) = doc.tank() {
         // the page's tank: grey 0x8a949e at half strength, and a floor grid about 0.2 units apart at a fifth
-        let grey = [0x8a as f32 / 255.0, 0x94 as f32 / 255.0, 0x9e as f32 / 255.0];
+        // dark lines on the light background, light ones on the others (the page's lineMat)
+        let grey = if look.bg == 1 { [0x2b as f32 / 255.0, 0x33 as f32 / 255.0, 0x3b as f32 / 255.0] } else { [0x8a as f32 / 255.0, 0x94 as f32 / 255.0, 0x9e as f32 / 255.0] };
         edges(&mut lines, &b, [grey[0], grey[1], grey[2], 0.5], 0.0);
         let (wd, dd) = (b.x1 - b.x0, b.z1 - b.z0);
         let (nx, nz) = (((wd / 0.2).round() as u32).max(2), ((dd / 0.2).round() as u32).max(2));

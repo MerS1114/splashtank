@@ -121,12 +121,14 @@ pub struct BakeUi {
     pub follow: bool,
     /// a stopped bake that can carry on: its cache and what its checkpoint says
     resumable: Option<(PathBuf, String)>,
+    /// the estimate for the settings and scene it was made for (worked out again when either changes)
+    est: Option<(String, String)>,
 }
 
 impl Default for BakeUi {
     fn default() -> BakeUi {
         BakeUi { src: None, spacing: 0.04, seconds: 5.0, quality: 1.0, auto_max: true, max_m: 4.0, accurate: false, water_only: false, ckpt_min: 5.0,
-            det: DetailOpts::default(), det_open: false, follow: true, resumable: None }
+            det: DetailOpts::default(), det_open: false, follow: true, resumable: None, est: None }
     }
 }
 
@@ -189,6 +191,38 @@ impl BakeUi {
         } else if self.resumable.as_ref().is_some_and(|r| r.0 == out) { None } else { self.resumable.take() };
     }
 
+/// The page's bake estimate: the water the bake starts with (the narrow band seeds just as the bake will, else the volume of the starting
+    /// water over the spacing cubed), the video memory that takes, and the cache's size on disk (compact frames: 6 bytes a point).
+    fn estimate(&mut self, scene: &serde_json::Value) -> String {
+        let o = self.opts();
+        let key = format!("{:?}{:?}{}", o.spacing, o.detail, scene);
+        if let Some((k, v)) = &self.est { if *k == key { return v.clone(); } }
+        let v = match splash_sim::scene::desc_from_scene(scene, &o) {
+            Err(e) => e,
+            Ok(d) => {
+                let lay = splash_sim::flip::layout(d.d, d.cell_ratio, d.size);
+                let start = if d.nb.is_some() || d.ocean.is_some() {
+                    let w = d.ocean.map(|oc| splash_sim::nb::waves(&oc, d.g as f64, oc.level - lay.b.y0 as f64)).unwrap_or_default();
+                    let s = splash_sim::nb::seed(&lay, &d.fills, d.nb.unwrap_or(3.0), d.ocean.as_ref().map(|c| (c, &w[..])), 0.0, &mut |_, _| true);
+                    s.seeded
+                } else {
+                    let v: f64 = d.fills.iter().map(|f| match f {
+                        splash_sim::scene::Fill::Box { x0, x1, y0, y1, z0, z1 } => (x1 - x0) * (y1 - y0) * (z1 - z0),
+                        splash_sim::scene::Fill::Sphere { r, .. } => 4.0 / 3.0 * std::f64::consts::PI * r * r * r,
+                        splash_sim::scene::Fill::Vol { lo, hi, .. } => ((hi[0] - lo[0]) * (hi[1] - lo[1]) * (hi[2] - lo[2]) * 0.6) as f64,
+                    }).sum();
+                    (v / (d.d as f64).powi(3)) as u64
+                };
+                let mem = splash_sim::bake::estimate_bytes(d.max_n as u64, d.apic, d.cell_ratio, d.spray_cap as u64);
+                let per = start as f64 * 6.0 + if d.spray_cap > 0 { 200_000.0 * 10.0 } else { 0.0 };
+                format!("About {:.2} M points to start (Max points {:.1} M), about {:.1} GB of video memory, about {:.0} MB a frame, {:.1} GB for {} frames.",
+                    start as f64 / 1e6, d.max_n as f64 / 1e6, mem as f64 / 1e9, per / 1048576.0, per * (d.frames + 1) as f64 / 1073741824.0, d.frames + 1)
+            }
+        };
+        self.est = Some((key, v.clone()));
+        v
+    }
+
     fn opts(&self) -> BakeOpts {
         BakeOpts { spacing: self.spacing, seconds: Some(self.seconds), detail: Some(self.quality),
             max_points: (!self.auto_max).then(|| (self.max_m * 1e6) as u32), accurate: Some(self.accurate) }
@@ -240,6 +274,8 @@ impl BakeUi {
                 ui.add(egui::DragValue::new(&mut self.ckpt_min).range(0.0..=120.0).speed(0.1).max_decimals(1).suffix(" min"));
                 ui.end_row();
             });
+            let est = self.estimate(&scene);
+            ui.label(egui::RichText::new(est).small()).on_hover_text("The water a narrow band bake starts with is counted exactly; it can grow after impacts (Max points Auto allows for that). Sizes on disk assume compact frames.");
             if ui.button("Bake...").on_hover_text("Choose where to save the cache, then bake. The view follows the newest frame.").clicked() {
                 let def = beside(&src, if is_cache { "-again" } else { "-native" });
                 if let Some(out) = save_as("Save the bake as", &def) {

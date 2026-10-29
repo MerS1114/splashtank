@@ -230,4 +230,9 @@ fn vs_bg(@builtin(vertex_index) vi: u32) -> BOut {
   var o: BOut; o.p = vec4<f32>(xy, 1.0, 1.0); o.y = xy.y * 0.5 + 0.5; return o;
 }
 @fragment
-fn fs_bg(i: BOut) -> @location(0) vec4<f32> { return vec4<f32>(mix(vec3<f32>(0x33, 0x33, 0x33), vec3<f32>(0x45, 0x45, 0x45), i.y) / 255.0, 1.0); }
+fn fs_bg(i: BOut) -> @location(0) vec4<f32> {
+  // Display > Background (cam.d.w): grey #454545 to #333, light #a2acb6 to #6c7780, black #08090a to #181b1e (top to bottom)
+  var top = vec3<f32>(0x45, 0x45, 0x45); var bot = vec3<f32>(0x33, 0x33, 0x33);
+  if (cam.d.w > 1.5) { top = vec3<f32>(0x08, 0x09, 0x0a); bot = vec3<f32>(0x18, 0x1b, 0x1e); } else if (cam.d.w > 0.5) { top = vec3<f32>(0xa2, 0xac, 0xb6); bot = vec3<f32>(0x6c, 0x77, 0x80); }
+  return vec4<f32>(mix(bot, top, i.y) / 255.0, 1.0);
+}

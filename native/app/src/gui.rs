@@ -64,6 +64,27 @@ fn scenes() -> &'static Value {
     S.get_or_init(|| serde_json::from_str(include_str!("scenes.json")).expect("scenes.json"))
 }
 
+/// The Help tab: the hotkeys, as the page lists them.
+fn help(ui: &mut egui::Ui) {
+    ui.heading("Hotkeys, Blender style");
+    for l in [
+        "G move, R rotate, S scale; then X, Y or Z locks an axis (pressed again: the object's own axis), Shift + an axis locks a plane",
+        "type a number for an exact value; Ctrl held flips snapping; Shift + Tab turns snapping on or off; V held snaps to points; middle click picks the axis you moved along",
+        "click or Enter confirms, right click or Esc cancels",
+        "click selects, Shift + click adds to the selection, drag for a box",
+        "A select all, Alt + A none",
+        "Shift + A add, Shift + D duplicate, X or Delete delete, H hide, Alt + H show all",
+        "I keys the selection at the playhead (over a row in the Objects tab: only that row), Alt + I takes the key off; click a key mark to pick it, drag it to move it, Delete removes it",
+        "Tab edits the shape of a collider: 1 points, 2 edges, 3 faces, E extrude, I inset, Tab to leave",
+        "Ctrl + Z undo, Ctrl + Shift + Z or Ctrl + Y redo, Ctrl + S save the scene",
+        "Space plays, Left / Right step a frame, Shift + Left / Right go to the ends, Up / Down jump between keys",
+        "orbit: middle or right drag, or Alt + drag; pan: Shift + drag; zoom: the wheel or Ctrl + drag",
+        "F focuses the selection, Home frames the tank; 1, 3, 7 look from the front, side and top (Ctrl: the other side), 5 switches orthographic",
+        "P shows the performance overlay",
+        "Simulation tab: type in Search to find a setting; right-click a setting to reset it",
+    ] { ui.label(format!("- {l}")); }
+}
+
 /// The page's Blender-style dark theme (the colours in src/head.html).
 fn theme(ctx: &egui::Context) {
     let hex = |v: u32| egui::Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8);
@@ -93,7 +114,7 @@ struct Target { size: [u32; 2], color: wgpu::Texture, id: egui::TextureId }
 
 /// The side panel's tabs (the page's property tabs).
 #[derive(Clone, Copy, PartialEq)]
-enum Tab { Bake, Sim, Tank, Objects, View }
+enum Tab { Bake, Sim, Tank, Objects, View, Help }
 
 struct App {
     doc: Doc,
@@ -120,6 +141,9 @@ struct App {
     box_from: Option<egui::Pos2>,
     /// the New scene menu is open
     new_menu: bool,
+    /// the Simulation tab's search text, and a button in the Objects tab asking for something done to the selection
+    find: String,
+    obj_act: Option<&'static str>,
     /// the scene's time (seconds) on its timeline, and whether the scene plays (its keyed objects move)
     st: f64,
     splay: bool,
@@ -164,6 +188,9 @@ struct App {
     gpu: String,
     last: Instant,
     frame_ms: f32,
+    /// the performance overlay (P): shown, and the slowest frame lately
+    perf: bool,
+    slow_ms: f32,
     /// frames to read ahead from disk (the loader thread touches their pages so uploads do not wait for the disk)
     ahead: mpsc::Sender<(Arc<Cache>, Vec<usize>)>,
     /// the file opened last
@@ -194,12 +221,12 @@ impl App {
         App {
             doc: Doc::default(), tab: Tab::Bake, scene_path: None, dirty: false, sel: None, r: Renderer::new(&rs.device), target: None,
             sel_set: Vec::new(), tool: Tool::Select, tf: None, tf_text: String::new(), scene_view: false, undo: Vec::new(), redo: Vec::new(), stable: None, burst: false,
-            changed_now: false, hover: None, add_at: None, box_from: None, new_menu: false, edit: None, etf: None, orient_local: false, snap_on: false, snap_to: 0, handles: true, face_drag: None, st: 0.0, splay: false, auto_key: false, pb: 1, sel_key: None, key_drag: None, key_del_now: false,
+            changed_now: false, hover: None, add_at: None, box_from: None, new_menu: false, find: String::new(), obj_act: None, edit: None, etf: None, orient_local: false, snap_on: false, snap_to: 0, handles: true, face_drag: None, st: 0.0, splay: false, auto_key: false, pb: 1, sel_key: None, key_drag: None, key_del_now: false,
             live: false, live_w: Worker::new(ctx.clone()), live_rx: None, live_pending: Vec::new(), live_stale: false, swallow: false,
             cam: Orbit { target: glam::Vec3::new(0.0, 0.7, 0.0), theta: 0.8, phi: 1.0, r: 6.2, ortho: false }, goal: None,
             t: 0.0, playing: false, looping: true, speed: 1.0, look: Look::default(),
             msg: "Open a bake cache (.splc) or a scene file (.json), or drop one on the window.".into(),
-            gpu: crate::gpu::describe(&rs.adapter, &rs.device), last: Instant::now(), frame_ms: 0.0, ahead: tx,
+            gpu: crate::gpu::describe(&rs.adapter, &rs.device), last: Instant::now(), frame_ms: 0.0, perf: false, slow_ms: 0.0, ahead: tx,
             path: None, bake: BakeUi::default(), worker: Worker::new(ctx.clone()), seen: 0, was_busy: false, autobake: None,
         }
     }
@@ -624,6 +651,13 @@ impl App {
             let mut smooth = self.smooth();
             if ui.selectable_label(smooth, "Smooth").on_hover_text("Ease in and out between keys").clicked() { smooth = true; }
             if ui.selectable_label(!smooth, "Linear").on_hover_text("Straight between keys, at even speed").clicked() { smooth = false; }
+            // what playing does at the end: Hold or Stop stop there, Loop goes round (timeline.end)
+            let end = self.doc.scene.as_ref().and_then(|s| s.json.pointer("/timeline/end")?.as_str().map(str::to_owned)).unwrap_or_else(|| "hold".into());
+            let mut e2 = end.clone();
+            egui::ComboBox::from_id_salt("tlend").selected_text(match e2.as_str() { "loop" => "Loop", "stop" => "Stop", _ => "Hold" }).width(60.0).show_ui(ui, |ui| {
+                for (v, n) in [("hold", "Hold"), ("stop", "Stop"), ("loop", "Loop")] { ui.selectable_value(&mut e2, v.to_string(), n); }
+            }).response.on_hover_text("At the end: Hold and Stop stop there, Loop starts again");
+            if e2 != end { if let Some(s) = self.doc.scene.as_mut() { s.json["timeline"]["end"] = Value::String(e2); } self.dirty = true; }
             if smooth != self.smooth() { if let Some(s) = self.doc.scene.as_mut() { s.json["timeline"]["smooth"] = Value::Bool(smooth); } self.edited(); self.apply_keys(); }
             let mut d = dur;
             if ui.add(egui::DragValue::new(&mut d).range(1.0..=60.0).speed(0.05).max_decimals(1).prefix("length ").suffix(" s")).on_hover_text("How long the scene (and its bake) is").changed() {
@@ -1000,9 +1034,61 @@ impl App {
                         for (k, n) in names.iter().enumerate() { ui.selectable_value(&mut self.snap_to, k as u8, *n); }
                     }).response.on_hover_text("Increment: steps of 0.1 (5 degrees, 0.1 scale). Point, Edge centre, Face centre: the place nearest the mouse on other objects or the tank, and the moving place closest to it lands on it.");
                     if ui.selectable_label(self.handles, "Tank arrows").on_hover_text("Arrows on the tank's faces: drag one to move that face").clicked() { self.handles = !self.handles; }
+                    if ui.button("Drop water").on_hover_text("Drop a ball of water into the tank at the time shown (the page's Drop a blob); it falls in when the scene is simulated or baked").clicked() { self.drop_water(); }
                 }
             });
         });
+    }
+
+    /// Drop water (the page's Drop a blob): a ball of water 0.38 across, a little off the middle and high in the tank, added to the scene's
+    /// events at the time shown.
+    fn drop_water(&mut self) {
+        let Some(j) = self.doc.scene.as_mut().map(|s| &mut s.json) else { return; };
+        let n = |p: &str, d: f64| j.pointer(p).and_then(Value::as_f64).unwrap_or(d);
+        let (w, h, d) = (n("/box/size/w", 3.0), n("/box/size/h", 2.6), n("/box/size/d", 3.0));
+        let (cx, y0, cz) = (n("/box/min/x", -w / 2.0) + w / 2.0, n("/box/min/y", 0.0), n("/box/min/z", -d / 2.0) + d / 2.0);
+        let k = j["events"].as_array().map_or(0, Vec::len) as f64;
+        let (x, z) = (cx + (k * 2.399).sin() * 0.4f64.min(w * 0.25), cz + (k * 1.731).cos() * 0.4f64.min(d * 0.25));
+        let y = y0 + (h - 0.5).clamp(0.6, 2.0);
+        if !j["events"].is_array() { j["events"] = serde_json::json!([]); }
+        j["events"].as_array_mut().unwrap().push(serde_json::json!({ "t": self.st, "x": x, "y": y, "z": z, "r": 0.38, "done": false }));
+        self.msg = format!("A ball of water drops in at {:.2} s", self.st);
+        self.edited();
+    }
+
+    /// The page's camera tools at the viewport's bottom right: frame the tank, focus the selection, the axis views, orthographic.
+    fn camera_buttons(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let r = egui::Rect::from_min_size(egui::pos2(rect.right() - 330.0, rect.bottom() - 34.0), egui::vec2(320.0, 28.0));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
+            ui.horizontal(|ui| {
+                if ui.small_button("All").on_hover_text("Frame the tank (Home)").clicked() { self.frame_all(); }
+                if ui.small_button("Focus").on_hover_text("Frame the selection (F)").clicked() { self.focus_selected(); }
+                if ui.small_button("Front").on_hover_text("Numpad 1").clicked() { self.snap_view("front"); }
+                if ui.small_button("Side").on_hover_text("Numpad 3").clicked() { self.snap_view("right"); }
+                if ui.small_button("Top").on_hover_text("Numpad 7").clicked() { self.snap_view("top"); }
+                if ui.selectable_label(self.cam.ortho, "Ortho").on_hover_text("Orthographic or perspective (numpad 5)").clicked() { self.cam.ortho = !self.cam.ortho; }
+            });
+        });
+    }
+
+    /// P: drawing, the live sim and the frames kept, as the page's performance overlay.
+    fn perf_overlay(&mut self, ui: &egui::Ui, rect: egui::Rect, dt: f32) {
+        self.slow_ms = (self.slow_ms * 0.995).max(dt * 1000.0);
+        let mut lines = vec![
+            format!("drawn {:.1} ms a frame ({:.0} a second), slowest lately {:.0} ms", self.frame_ms, 1000.0 / self.frame_ms.max(0.1), self.slow_ms),
+            format!("frames on the GPU {} ({} MB), uploads {}", self.r.kept_frames(), self.r.kept_bytes >> 20, self.r.uploads),
+        ];
+        if let Some(c) = &self.doc.cache { lines.push(format!("{} frames, {} water points this frame", c.frames.len(), c.frames.get(self.t as usize).map_or(0, |f| f.water.n))); }
+        for (w, name) in [(&self.live_w, "live water"), (&self.worker, "bake")] {
+            let j = w.job.lock().unwrap();
+            if let (true, Some(p)) = (j.busy, j.prog) { lines.push(format!("{name}: frame {}/{}, {:.0} ms a frame, {} substeps, {} points", p.f, p.frames, p.frame_ms, p.sub, p.n)); }
+        }
+        let txt = lines.join("\n");
+        let pos = rect.left_top() + egui::vec2(12.0, 44.0);
+        let galley = ui.painter().layout_no_wrap(txt, egui::FontId::monospace(12.0), egui::Color32::from_gray(0xe0));
+        ui.painter().rect_filled(egui::Rect::from_min_size(pos, galley.size()).expand(6.0), 4.0, egui::Color32::from_black_alpha(170));
+        ui.painter().galley(pos, galley, egui::Color32::WHITE);
+        ui.ctx().request_repaint();
     }
 
     /// Shift+A: the page's add menu.
@@ -1075,13 +1161,14 @@ impl App {
 
     fn side(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            for (t, name) in [(Tab::Bake, "Bake"), (Tab::Sim, "Simulation"), (Tab::Tank, "Tank"), (Tab::Objects, "Objects"), (Tab::View, "View")] {
+            for (t, name) in [(Tab::Bake, "Bake"), (Tab::Sim, "Simulation"), (Tab::Tank, "Tank"), (Tab::Objects, "Objects"), (Tab::View, "View"), (Tab::Help, "Help")] {
                 ui.selectable_value(&mut self.tab, t, name);
             }
         });
         ui.separator();
         egui::ScrollArea::vertical().show(ui, |ui| {
             let tab = self.tab;
+            if tab == Tab::Help { help(ui); return; }
             if tab == Tab::Bake {
                 let shown = self.path.clone().filter(|p| self.doc.cache.is_some() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("splc")));
                 let scene = self.doc.scene.as_ref().map(|s| &s.json);
@@ -1092,16 +1179,19 @@ impl App {
                 let Some(s) = self.doc.scene.as_mut() else { ui.label("Open a scene file (.json) or a bake (.splc) to edit its scene."); return; };
                 if self.doc.cache.is_some() && !self.live { ui.label(egui::RichText::new("Changes apply to the next bake; the bake shown stays as it was.").small()); }
                 let changed = match tab {
-                    Tab::Sim => crate::edit::settings(ui, &mut s.json),
+                    Tab::Sim => crate::edit::settings(ui, &mut s.json, &mut self.find),
                     Tab::Tank => crate::edit::tank(ui, &mut s.json),
                     _ => {
                         let before = self.sel;
-                        let ch = crate::edit::objects(ui, &mut s.json, &mut self.sel, self.st, &mut self.doc.hidden);
+                        let mut act = None;
+                        let ch = crate::edit::objects(ui, &mut s.json, &mut self.sel, self.st, &mut self.doc.hidden, &mut act);
                         if self.sel != before { self.sel_set = self.sel.into_iter().collect(); }
+                        self.obj_act = act;
                         ch
                     }
                 };
                 if changed { self.edited(); }
+                match self.obj_act.take() { Some("dup") => self.duplicate(egui::pos2(0.0, 0.0)), Some("del") => self.delete_selected(), _ => {} }
                 return;
             }
             ui.heading("Cache");
@@ -1118,6 +1208,32 @@ impl App {
                 // a cache still being written always ends inside a frame
                 let writing = { let j = self.worker.job.lock().unwrap(); j.busy && j.out == self.path };
                 if c.truncated && !writing { ui.colored_label(egui::Color32::ORANGE, "The file ends inside a frame: a bake cut short."); }
+                // the bake report: what the bake's measurements say (the page's bakeLimits), and the whole report saved to a file
+                let m = &i.meta;
+                if let Some(dg) = m["diag"].as_array().filter(|d| !d.is_empty()) {
+                    let sc = i.scale as f64;
+                    let fastest = dg.iter().filter_map(|d| d["fastestParticle"].as_f64()).fold(0.0, f64::max) * sc;
+                    let max_sub = m.pointer("/desc/maxSub").and_then(Value::as_u64).unwrap_or(u64::MAX);
+                    let vmax = m.pointer("/desc/vmaxW").and_then(Value::as_f64).unwrap_or(f64::MAX) * sc;
+                    let at_sub = dg.iter().filter(|d| d["sub"].as_u64().is_some_and(|s| s >= max_sub)).count();
+                    let at_v = dg.iter().filter(|d| d["fastestParticle"].as_f64().is_some_and(|v| v * sc >= 0.99 * vmax)).count();
+                    let most = dg.iter().filter_map(|d| d["alive"].as_u64()).max().unwrap_or(0);
+                    let unsolved = dg.iter().filter_map(|d| d["unsolved"].as_f64()).fold(0.0, f64::max);
+                    egui::CollapsingHeader::new("Bake report").default_open(false).show(ui, |ui| {
+                        ui.label(format!("Baked in {:.0} s", m["seconds"].as_f64().unwrap_or(0.0)));
+                        ui.label(format!("Fastest water {fastest:.1} m/s (limit {vmax:.0}); frames at the speed limit {at_v}, at the substep limit ({max_sub}) {at_sub}"));
+                        ui.label(format!("Most particles {most}{}", m["maxN"].as_u64().map(|n| format!(" of Max points {n}")).unwrap_or_default()));
+                        if unsolved > 0.0 { ui.label(format!("Pressure left unsolved at most {:.2}%", unsolved * 100.0)); }
+                        if m["cancelled"] == true { ui.colored_label(egui::Color32::ORANGE, "Stopped before its end."); }
+                        if ui.button("Save report...").on_hover_text("The bake's settings, its measurements for every frame and the scene, as a file to send").clicked() {
+                            if let Some(p) = rfd::FileDialog::new().set_file_name("splashtank-bake-report.json").add_filter("Report", &["json"]).save_file() {
+                                let mut rep = serde_json::json!({ "app": "SplashTank native bake report", "version": 1, "gpu": self.gpu, "frames": c.frames.len(), "fps": i.fps, "spacing": i.d, "scale": i.scale });
+                                for k in ["desc", "diag", "scene", "seconds", "maxN", "native", "cancelled"] { if !m[k].is_null() { rep[k] = m[k].clone(); } }
+                                self.msg = match std::fs::write(&p, serde_json::to_vec_pretty(&rep).unwrap_or_default()) { Ok(()) => format!("Saved {}", p.display()), Err(e) => format!("Could not save the report: {e}") };
+                            }
+                        }
+                    });
+                }
             } else {
                 ui.label("No cache open.");
             }
@@ -1158,6 +1274,10 @@ impl App {
                     self.dirty = true;
                 }
             }
+            ui.horizontal(|ui| {
+                ui.label("Background");
+                for (v, n) in [(0u8, "Grey"), (1, "Light"), (2, "Black")] { ui.selectable_value(&mut self.look.bg, v, n); }
+            });
             ui.checkbox(&mut self.look.skip_buried, "Skip buried water").on_hover_text("Water three cells inside the water cannot be seen; drawing 1 in 16 of it is faster. Same as the page's setting.");
             ui.separator();
             ui.heading("GPU");
@@ -1218,6 +1338,7 @@ impl eframe::App for App {
                 if k3 { self.snap_view(if ctrl { "left" } else { "right" }); }
                 if k7 { self.snap_view(if ctrl { "bottom" } else { "top" }); }
                 if k5 { self.cam.ortho = !self.cam.ortho; }
+                if ui.input(|i| i.key_pressed(egui::Key::P)) { self.perf = !self.perf; }
             }
         }
         if self.step_cam(dt) { ui.ctx().request_repaint(); }
@@ -1238,7 +1359,8 @@ impl eframe::App for App {
             // the scene plays its keys, round and round
             let d = self.scene_dur();
             let t = self.st + dt.min(0.1) as f64;
-            self.st = if t > d { 0.0 } else { t };
+            let looping = self.doc.scene.as_ref().and_then(|s| s.json.pointer("/timeline/end")?.as_str()) == Some("loop") || self.live;
+            self.st = if t > d { if looping { 0.0 } else { self.splay = false; d } } else { t };
             self.apply_keys();
             ui.ctx().request_repaint();
         } else if !self.editing() { self.splay = false; }
@@ -1378,6 +1500,8 @@ impl eframe::App for App {
             }
             self.axis_widget(ui, rect);
             self.viewport_bar(ui, rect);
+            self.camera_buttons(ui, rect);
+            if self.perf { self.perf_overlay(ui, rect, dt); }
             if !self.tf_text.is_empty() {
                 let help = "X Y Z: axis (twice: its own axes, Shift: across) · type a number · Ctrl: snap · click or Enter: done · Esc or right click: cancel";
                 ui.painter().text(rect.left_bottom() + egui::vec2(12.0, -30.0), egui::Align2::LEFT_BOTTOM, &self.tf_text, egui::FontId::proportional(15.0), egui::Color32::WHITE);

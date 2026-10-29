@@ -20,6 +20,15 @@ pub fn faces(o: &Value) -> Vec<Vec<usize>> {
 fn local(o: &Value) -> Vec<[f64; 3]> {
     o["mesh"]["v"].as_array().map(|v| v.iter().map(|q| [0, 1, 2].map(|k| q[k].as_f64().unwrap_or(0.0))).collect()).unwrap_or_default()
 }
+/// The shape's own size (its points' extent before Scale), for Dimensions.
+pub fn base_dims(o: &Value) -> [f64; 3] {
+    let v = local(o);
+    if v.is_empty() { return [1.0; 3]; }
+    let mut lo = [f64::MAX; 3]; let mut hi = [f64::MIN; 3];
+    for p in &v { for k in 0..3 { lo[k] = lo[k].min(p[k]); hi[k] = hi[k].max(p[k]); } }
+    [0, 1, 2].map(|k| (hi[k] - lo[k]).max(1e-6))
+}
+
 /// The shape's edges, each once (smaller point first).
 pub fn edges(o: &Value) -> Vec<(usize, usize)> {
     let mut s = BTreeSet::new();
