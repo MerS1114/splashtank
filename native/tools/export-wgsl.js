@@ -19,7 +19,9 @@ const want = {
   'flip_layout.json': JSON.stringify({ note: head.slice(3).trim(), paramsBytes: o.params, mgLevels: o.mgLevels, deepMax: o.deepMax, bindings: o.L }, null, 1) + '\n',
 };
 if (process.argv.includes('--check')) {
-  const stale = Object.keys(want).filter((f) => { try { return fs.readFileSync(path.join(out, f), 'utf8') !== want[f]; } catch (e) { return true; } });
+  // line endings do not count: git on Windows may check the files out with CRLF
+  const lf = (t) => t.split('\r\n').join('\n');
+  const stale = Object.keys(want).filter((f) => { try { return lf(fs.readFileSync(path.join(out, f), 'utf8')) !== lf(want[f]); } catch (e) { return true; } });
   if (stale.length) { console.error('Out of date: ' + stale.join(', ') + '. Run node native/tools/export-wgsl.js'); process.exit(1); }
   console.log('shaders up to date');
 } else {
