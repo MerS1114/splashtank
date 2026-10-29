@@ -293,6 +293,8 @@ impl FlipSim {
             "ocean": self.ocean.map(|o| serde_json::json!([o.height, o.length, o.dir, o.spread, o.seed, o.level, o.layer])), "oceanW": self.ocean_w,
             "sprayCap": self.spray_cap, "sprDispMax": self.spr_disp_max, "deepOn": self.deep_on,
             "air": self.air_dims.map(|a| serde_json::json!([a.n, a.cells, a.h])), "ndrip": self.ndrip, "dripSig": self.drip_sig,
+            // the last step's counters: they decide growing and sorting on the next steps
+            "stats": self.stats.map(|s| serde_json::json!([s.sc, s.ovf, s.fluid, s.settled, s.free, s.need, s.vmax, s.seen])),
         }))
     }
 
@@ -332,7 +334,11 @@ impl FlipSim {
         self.ndrip = u("ndrip") as u32;
         self.drip_sig = v["dripSig"].as_array().map(|a| a.iter().map(|x| x.as_u64().unwrap_or(0) as u32).collect()).unwrap_or_else(|| vec![u32::MAX]);
         self.nb_fills.clear(); self.nb_vols.clear();
-        self.stats = None; self.cf_prev = None; self.solid_dirty = true;
+        self.stats = v["stats"].as_array().filter(|a| a.len() == 8).map(|a| {
+            let k = |i: usize| a[i].as_u64().unwrap_or(0) as u32;
+            Stats { sc: k(0), ovf: k(1), fluid: k(2), settled: k(3), free: k(4), need: k(5), vmax: a[6].as_f64().unwrap_or(0.0) as f32, seen: a[7].as_bool().unwrap_or(true) }
+        });
+        self.cf_prev = None; self.solid_dirty = true;
         self.run_pos.clear(); self.run_vel.clear();
         self.groups_dirty = true;
         Ok(())

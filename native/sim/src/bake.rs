@@ -234,6 +234,11 @@ pub struct RunOpts {
     pub resume: bool,
     /// what the bake was started with, kept in the checkpoint so resuming needs nothing else
     pub started_with: Value,
+    /// where the bake's remarks go (Max points chosen, checkpoints written); the terminal when None
+    pub log: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
+}
+impl RunOpts {
+    fn say(&self, s: &str) { match &self.log { Some(l) => l(s), None => eprintln!("{s}") } }
 }
 
 /// Where a bake's checkpoint lives: next to its cache.
@@ -312,7 +317,7 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, ro: &RunOpts, mut progress: impl 
                 want = want.min((room / per) as u64).max((need as f64 * 1.3).ceil() as u64);
             }
             max_n = (max_n as u64).max(want).min(lim as u64) as u32;
-            eprintln!("Max points {:.1}M: the starting water needs {:.1}M, and the narrow band refills from the rest", max_n as f64 / 1e6, need as f64 / 1e6);
+            ro.say(&format!("Max points {:.1}M: the starting water needs {:.1}M, and the narrow band refills from the rest", max_n as f64 / 1e6, need as f64 / 1e6));
         } else if need as f64 * 1.15 > max_n as f64 { max_n = lim.min((need as f64 * 1.3).ceil() as u32); }
     }
     // the card must hold it: say so before baking rather than fail partway
@@ -492,8 +497,10 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, ro: &RunOpts, mut progress: impl 
         if tx.send(Job::Frame(std::mem::take(&mut buf), n as usize, poses(&states), dg, raw)).is_err() { break; }
         let w1 = tw.elapsed().as_secs_f64();
         wait += w1;
-        // a checkpoint: once the frame is in the file, the GPU state and the bake's own state next to it
-        if ro.checkpoint_secs > 0.0 && f < frames && last_ck.elapsed().as_secs_f32() >= ck_gap {
+        stopped = !progress(&Progress { f, frames, n, elapsed: since(&t0) as f32, sub, frame_ms: tf0.elapsed().as_secs_f32() * 1000.0, wait: wait as f32 });
+        // a checkpoint: once the frame is in the file, the GPU state and the bake's own state next to it; also when stopped, so a
+        // stopped bake can always carry on
+        if ro.checkpoint_secs > 0.0 && f < frames && (stopped || last_ck.elapsed().as_secs_f32() >= ck_gap) {
             let tc = Instant::now();
             let (ms, mr) = mpsc::channel();
             if tx.send(Job::Mark(ms)).is_err() { break; }
@@ -503,10 +510,9 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, ro: &RunOpts, mut progress: impl 
             write_checkpoint(gpu, &sim, st, &ck_path)?;
             let took = tc.elapsed().as_secs_f32();
             ck_gap = ro.checkpoint_secs.max(10.0 * took);
-            eprintln!("checkpoint after frame {f} in {took:.1} s ({}); the next in {ck_gap:.0} s", ck_path.display());
+            if stopped { ro.say(&format!("Stopped; checkpoint after frame {f} written in {took:.1} s, so it can carry on")); } else { ro.say(&format!("Checkpoint after frame {f} in {took:.1} s; the next in {ck_gap:.0} s")); }
             last_ck = Instant::now();
         }
-        stopped = !progress(&Progress { f, frames, n, elapsed: since(&t0) as f32, sub, frame_ms: tf0.elapsed().as_secs_f32() * 1000.0, wait: wait as f32 });
         f += 1;
     }
     drop(tx);

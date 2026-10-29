@@ -5,7 +5,8 @@ use eframe::egui;
 use eframe::egui_wgpu::{self, WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
 use eframe::wgpu;
 use splash_format::Cache;
-use std::path::PathBuf;
+use crate::bakeui::{Action, BakeUi, Worker};
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
@@ -25,8 +26,10 @@ pub fn run(files: Vec<PathBuf>) {
     let r = eframe::run_native("SplashTank", options, Box::new(move |cc| {
         let rs = cc.wgpu_render_state.as_ref().ok_or("This program needs a GPU through wgpu.")?;
         theme(&cc.egui_ctx);
-        let mut app = App::new(rs);
+        let mut app = App::new(rs, cc.egui_ctx.clone());
         for f in &files { app.open(f); }
+        // for checking the panel without clicking: SPLASH_AUTOBAKE=out.splc starts a bake of the opened file
+        if let Ok(out) = std::env::var("SPLASH_AUTOBAKE") { app.autobake = Some(PathBuf::from(out)); }
         Ok(Box::new(app))
     }));
     if let Err(e) = r { eprintln!("{e}"); }
@@ -77,10 +80,18 @@ struct App {
     frame_ms: f32,
     /// frames to read ahead from disk (the loader thread touches their pages so uploads do not wait for the disk)
     ahead: mpsc::Sender<(Arc<Cache>, Vec<usize>)>,
+    /// the file opened last
+    path: Option<PathBuf>,
+    bake: BakeUi,
+    worker: Worker,
+    /// frames of the cache being written already shown, and whether a task was running at the last redraw
+    seen: u32,
+    was_busy: bool,
+    autobake: Option<PathBuf>,
 }
 
 impl App {
-    fn new(rs: &egui_wgpu::RenderState) -> App {
+    fn new(rs: &egui_wgpu::RenderState, ctx: egui::Context) -> App {
         let (tx, rx) = mpsc::channel::<(Arc<Cache>, Vec<usize>)>();
         std::thread::spawn(move || {
             let mut sum = 0u64;
@@ -100,19 +111,89 @@ impl App {
             t: 0.0, playing: false, looping: true, speed: 1.0, look: Look::default(),
             msg: "Open a bake cache (.splc) or a scene file (.json), or drop one on the window.".into(),
             gpu: crate::gpu::describe(&rs.adapter, &rs.device), last: Instant::now(), frame_ms: 0.0, ahead: tx,
+            path: None, bake: BakeUi::default(), worker: Worker::new(ctx), seen: 0, was_busy: false, autobake: None,
         }
     }
 
-    fn open(&mut self, path: &std::path::Path) {
+    fn open(&mut self, path: &Path) {
+        let same = self.path.as_deref() == Some(path);
         match crate::open_into(&mut self.doc, path) {
             Ok(m) => {
                 self.msg = m;
                 self.t = 0.0;
                 self.playing = false;
-                if let Some(b) = self.doc.tank() { self.cam = Orbit::frame(&b); self.goal = None; }
+                if !same { if let Some(b) = self.doc.tank() { self.cam = Orbit::frame(&b); self.goal = None; } }
+                self.path = Some(path.to_owned());
+                self.bake.source(path);
             }
             Err(e) => self.msg = e,
         }
+    }
+
+    /// Shows the newest frame of the cache a task is writing (frames are only added, so the ones kept on the GPU stay good).
+    fn follow(&mut self, p: &Path) {
+        let Ok(c) = Cache::open(p) else { return; };
+        if self.path.as_deref() != Some(p) {
+            self.path = Some(p.to_owned());
+            self.doc.gen += 1;
+            if let Some(s) = c.info.meta.get("scene").filter(|v| v.is_object()).and_then(|v| splash_format::Scene::from_json(v.clone()).ok()) { self.doc.scene = Some(s); }
+            let first = self.doc.cache.is_none();
+            self.doc.cache = Some(Arc::new(c));
+            if first { if let Some(b) = self.doc.tank() { self.cam = Orbit::frame(&b); self.goal = None; } }
+        } else {
+            self.doc.cache = Some(Arc::new(c));
+        }
+        self.t = self.frames().saturating_sub(1) as f64;
+        self.playing = false;
+        self.msg = format!("Showing {} as it is written: {} frames", p.file_name().unwrap_or_default().to_string_lossy(), self.frames());
+    }
+
+    /// Lets go of the cache at p when it is open (a task is about to write or replace it).
+    fn close_if(&mut self, p: &Path) {
+        if self.path.as_deref() == Some(p) && self.doc.cache.is_some() { self.doc.cache = None; self.doc.gen += 1; }
+    }
+
+    fn act(&mut self, a: Action) {
+        match a {
+            Action::Stop => self.worker.stop(),
+            Action::Start(title, t) => {
+                if t.inp.as_deref() == Some(t.out.as_path()) { self.worker.job.lock().unwrap().result = Some(("Save to another file than the bake it works on.".into(), true)); return; }
+                self.close_if(&t.out);
+                let slow = t.out.to_string_lossy().to_ascii_uppercase().starts_with("C:");
+                self.bake.follow = true;
+                self.seen = 0;
+                self.worker.start(title, t);
+                // measured on this computer: C: wrote about 13 MB/s on long writes, G: 463 MB/s
+                if slow { self.worker.job.lock().unwrap().log.push("This cache goes to drive C:, which writes slowly on this computer (about 13 MB/s on long writes). Big bakes are much faster on G:.".into()); }
+            }
+        }
+    }
+
+    /// Keeps the view in step with a running task: the newest frame while it writes, letting go of the file when it finishes, and the
+    /// finished cache opened at the end.
+    fn poll_job(&mut self) {
+        let (busy, done, fin, released, out, ok) = {
+            let j = self.worker.job.lock().unwrap();
+            (j.busy, j.done, j.finishing, j.released, j.out.clone(), j.result.as_ref().is_some_and(|r| !r.1))
+        };
+        let Some(out) = out else { return; };
+        if fin && !released {
+            self.close_if(&out);
+            self.worker.job.lock().unwrap().released = true;
+        }
+        if busy && !fin && self.bake.follow && done > self.seen {
+            self.seen = done;
+            self.follow(&out);
+        }
+        if self.was_busy && !busy {
+            self.bake.check_resume(&out);
+            if ok || out.exists() {
+                let keep = self.bake.follow;
+                self.open(&out);
+                if keep { self.t = self.frames().saturating_sub(1) as f64; }
+            }
+        }
+        self.was_busy = busy;
     }
 
     /// Home: the whole tank in view, from the angle the camera has now (frameAll)
@@ -202,6 +283,7 @@ impl App {
     fn step(&mut self, k: f64) {
         let n = self.frames();
         if n == 0 { return; }
+        self.bake.follow = false;
         self.playing = false;
         self.t = (self.t.floor() + k).rem_euclid(n as f64);
     }
@@ -221,16 +303,16 @@ impl App {
         let n = self.frames();
         ui.horizontal(|ui| {
             ui.add_enabled_ui(n > 0, |ui| {
-                if ui.button("|<").on_hover_text("First frame (Shift+Left)").clicked() { self.playing = false; self.t = 0.0; }
+                if ui.button("|<").on_hover_text("First frame (Shift+Left)").clicked() { self.bake.follow = false; self.playing = false; self.t = 0.0; }
                 if ui.button("<").on_hover_text("One frame back (Left)").clicked() { self.step(-1.0); }
-                if ui.button(if self.playing { "Pause" } else { "Play" }).on_hover_text("Play or pause (Space)").clicked() { self.playing = !self.playing; }
+                if ui.button(if self.playing { "Pause" } else { "Play" }).on_hover_text("Play or pause (Space)").clicked() { self.bake.follow = false; self.playing = !self.playing; }
                 if ui.button(">").on_hover_text("One frame on (Right)").clicked() { self.step(1.0); }
-                if ui.button(">|").on_hover_text("Last frame (Shift+Right)").clicked() { self.playing = false; self.t = n.saturating_sub(1) as f64; }
+                if ui.button(">|").on_hover_text("Last frame (Shift+Right)").clicked() { self.bake.follow = false; self.playing = false; self.t = n.saturating_sub(1) as f64; }
                 ui.checkbox(&mut self.looping, "Loop");
                 ui.add(egui::DragValue::new(&mut self.speed).range(0.05..=4.0).speed(0.01).prefix("speed ").suffix("x"));
                 let mut f = self.t.floor() as usize;
                 ui.spacing_mut().slider_width = (ui.available_width() - 160.0).max(100.0);
-                if ui.add(egui::Slider::new(&mut f, 0..=n.saturating_sub(1)).text("frame")).changed() { self.playing = false; self.t = f as f64; }
+                if ui.add(egui::Slider::new(&mut f, 0..=n.saturating_sub(1)).text("frame")).changed() { self.bake.follow = false; self.playing = false; self.t = f as f64; }
                 ui.label(format!("{:.2} s", self.t.floor() / self.fps() as f64));
             });
         });
@@ -238,6 +320,9 @@ impl App {
 
     fn side(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
+            let shown = self.path.clone().filter(|p| self.doc.cache.is_some() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("splc")));
+            if let Some(a) = self.bake.panel(ui, &self.worker, shown.as_deref()) { self.act(a); }
+            ui.separator();
             ui.heading("Cache");
             if let Some(c) = &self.doc.cache {
                 let f = (self.t.floor() as usize).min(c.frames.len().saturating_sub(1));
@@ -249,7 +334,9 @@ impl App {
                     ui.label(format!("Frame {f}: {} water points{}", fr.water.n, if fr.compact() { " (compact)" } else { "" }));
                     ui.label(format!("{} deep water, {} whitewater", fr.deep.as_ref().map(|d| d.n).unwrap_or(0), fr.ww.as_ref().map(|w| w.n).unwrap_or(0)));
                 }
-                if c.truncated { ui.colored_label(egui::Color32::ORANGE, "The file ends inside a frame: a bake cut short."); }
+                // a cache still being written always ends inside a frame
+                let writing = { let j = self.worker.job.lock().unwrap(); j.busy && j.out == self.path };
+                if c.truncated && !writing { ui.colored_label(egui::Color32::ORANGE, "The file ends inside a frame: a bake cut short."); }
             } else {
                 ui.label("No cache open.");
             }
@@ -305,7 +392,8 @@ impl eframe::App for App {
         let (k1, k3, k5, k7, kf) = ui.input(|i| (i.key_pressed(egui::Key::Num1), i.key_pressed(egui::Key::Num3), i.key_pressed(egui::Key::Num5),
             i.key_pressed(egui::Key::Num7), i.key_pressed(egui::Key::F)));
         if !typing {
-            if space && n > 0 { self.playing = !self.playing; }
+            if space && n > 0 { self.bake.follow = false; self.playing = !self.playing; }
+            if (left || right) && shift { self.bake.follow = false; }
             if left { if shift { self.playing = false; self.t = 0.0; } else { self.step(-1.0); } }
             if right { if shift { if n > 0 { self.playing = false; self.t = (n - 1) as f64; } } else { self.step(1.0); } }
             if home || kf { self.frame_all(); }
@@ -315,6 +403,17 @@ impl eframe::App for App {
             if k5 { self.cam.ortho = !self.cam.ortho; }
         }
         if self.step_cam(dt) { ui.ctx().request_repaint(); }
+        if let Some(out) = self.autobake.take() {
+            if let Some(src) = self.path.clone() {
+                let scene = if src.extension().is_some_and(|e| e.eq_ignore_ascii_case("splc")) { crate::bake_cli::from_cache(&src).map(|x| x.0) } else { crate::bake_cli::read_json(&src) };
+                if let Ok(scene) = scene {
+                    let o = splash_sim::scene::BakeOpts { spacing: std::env::var("SPLASH_AUTOBAKE_SPACING").ok().and_then(|v| v.parse().ok()).unwrap_or(0.04), ..Default::default() };
+                    self.act(Action::Start("Baking (automatic)".into(), crate::bake_cli::Task { kind: crate::bake_cli::Kind::Bake { water_only: false, checkpoint_secs: 300.0 }, inp: None, scene, o, out }));
+                }
+            }
+        }
+        self.poll_job();
+        self.look.region = self.bake.det_open.then_some((self.bake.det.c, self.bake.det.s));
 
         if self.playing && n > 0 {
             self.t += (dt.min(0.1) * self.fps() * self.speed) as f64;

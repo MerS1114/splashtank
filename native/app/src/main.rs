@@ -1,6 +1,6 @@
 //! SplashTank native: opens bake caches (.splc) and scene files (.json) made by the web page and plays them back, and bakes them.
 //!
-//!   splashtank [file.splc | scene.json ...]                    the window
+//!   splashtank [file.splc | scene.json ...]                    the window (its Bake panel bakes, resumes, makes whitewater and detail)
 //!   splashtank --playback-test file.splc [--budget MB] [--size WxH]  plays a cache through twice without a window and times it
 //!   splashtank --info file.splc                                what a cache holds, frame by frame
 //!   splashtank --picture out.png file [--frame n] [--size WxH] draws one frame without a window (n.5: blended halfway)
@@ -18,6 +18,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod bake_cli;
+mod bakeui;
 mod gpu;
 mod gui;
 mod render;

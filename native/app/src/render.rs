@@ -118,9 +118,11 @@ pub struct Look {
     pub deep: bool,
     pub whitewater: bool,
     pub objects: bool,
+    /// the Detail region (centre and size as shares of the tank), shown dashed while the Bake panel's Detail is open
+    pub region: Option<([f32; 3], [f32; 3])>,
 }
 impl Default for Look {
-    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true } }
+    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None } }
 }
 
 #[repr(C)]
@@ -412,6 +414,14 @@ fn geometry(doc: &Doc, a: usize, b: usize, w: f32, look: &Look) -> (Vec<Vert>, V
             if ar.x1 - ar.x0 > wd * 1.01 || ar.y1 - ar.y0 > (b.y1 - b.y0) * 1.01 {
                 edges(&mut lines, &ar, [0xb8 as f32 / 255.0, 0xc4 as f32 / 255.0, 0xd0 as f32 / 255.0, 0.45], (ar.x1 - ar.x0).max(ar.z1 - ar.z0) * 0.015);
             }
+        }
+        if let Some((c, s)) = look.region {
+            // the Detail region, dashed blue as the page's detBox
+            let sh = |k: usize| ((c[k] - s[k] / 2.0).clamp(0.0, 1.0), (c[k] + s[k] / 2.0).clamp(0.0, 1.0));
+            let ((x0, x1), (y0, y1), (z0, z1)) = (sh(0), sh(1), sh(2));
+            let l = |a: f32, z: f32, t: f32| a + (z - a) * t;
+            let r = Box3 { x0: l(b.x0, b.x1, x0), x1: l(b.x0, b.x1, x1), y0: l(b.y0, b.y1, y0), y1: l(b.y0, b.y1, y1), z0: l(b.z0, b.z1, z0), z1: l(b.z0, b.z1, z1) };
+            edges(&mut lines, &r, [0.36, 0.62, 1.0, 0.9], (r.x1 - r.x0).max(r.z1 - r.z0) * 0.03);
         }
         if let Some(lv) = doc.scene.as_ref().and_then(|s| s.ocean_level).filter(|_| doc.cache.is_none()) {
             // the ocean's still level as a grid
