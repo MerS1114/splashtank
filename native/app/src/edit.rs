@@ -183,7 +183,7 @@ fn vec3(ui: &mut egui::Ui, o: &mut Value, name: &str, keys: [&str; 3], d: f64, s
 }
 
 /// The Objects tab: the outliner and the selected object's settings (the page's object panel).
-pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>, t: f64) -> bool {
+pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>, t: f64, hidden: &mut Vec<u64>) -> bool {
     let mut changed = false;
     let Some(list) = j.get_mut("objs").and_then(Value::as_array_mut) else { return false; };
     if list.is_empty() { ui.label("No objects."); return false; }
@@ -192,7 +192,15 @@ pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>, t: f64
             let kind = if crate::tf::is_emitter(o) { "source" } else if o["water"].as_bool() == Some(true) { "water" } else { o["shape"].as_str().unwrap_or("mesh") };
             let keys = o["keys"].as_array().map_or(0, Vec::len);
             let txt = format!("{}  ({kind}{})", o["name"].as_str().unwrap_or("?"), if keys > 0 { format!(", {keys} keys") } else { String::new() });
-            if ui.selectable_label(*sel == Some(k), txt).clicked() { *sel = Some(k); }
+            let id = o["id"].as_u64().unwrap_or(0);
+            ui.horizontal(|ui| {
+                // the page's eye: shown or hidden in the view (H, Alt+H); hidden objects still act on the water
+                let hid = hidden.contains(&id);
+                if ui.small_button(if hid { "hidden" } else { "shown" }).on_hover_text("Show or hide in the view (H, Alt+H). Hidden objects still act on the water.").clicked() {
+                    if hid { hidden.retain(|&x| x != id); } else { hidden.push(id); }
+                }
+                if ui.selectable_label(*sel == Some(k), txt).clicked() { *sel = Some(k); }
+            });
         }
     });
     let Some(o) = sel.and_then(|k| list.get_mut(k)) else { return false; };

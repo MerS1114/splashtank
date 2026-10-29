@@ -23,6 +23,8 @@ pub struct Doc {
     pub gen: u64,
     /// ids of the selected objects (drawn orange, as Blender does)
     pub selected: Vec<u64>,
+    /// ids of hidden objects (H; not drawn, still in the water)
+    pub hidden: Vec<u64>,
 }
 
 impl Doc {
@@ -456,7 +458,7 @@ fn geometry(doc: &Doc, a: usize, b: usize, w: f32, look: &Look) -> (Vec<Vert>, V
     if !look.objects { return (tris, lines); }
     // sources (no shape): the page's green handle, a ring the size of the stream and an arrow where it points
     if doc.cache.is_none() || look.scene_objs {
-        for o in scene.json["objs"].as_array().into_iter().flatten().filter(|o| crate::tf::is_emitter(o) && o["hidden"] != true) {
+        for o in scene.json["objs"].as_array().into_iter().flatten().filter(|o| crate::tf::is_emitter(o) && !o["id"].as_u64().is_some_and(|id| doc.hidden.contains(&id))) {
             let id = o["id"].as_u64().unwrap_or(0);
             let c = if doc.selected.contains(&id) { [1.0, 0.63, 0.16, 1.0] } else { [0x35 as f32 / 255.0, 0xd0 as f32 / 255.0, 0x7f as f32 / 255.0, 1.0] };
             let p = crate::tf::pos(o);
@@ -478,7 +480,7 @@ fn geometry(doc: &Doc, a: usize, b: usize, w: f32, look: &Look) -> (Vec<Vert>, V
     }
     let cache = doc.cache.as_ref().filter(|c| !look.scene_objs && a < c.frames.len() && b < c.frames.len());
     let poses = cache.map(|c| { let (pa, pb) = (c.poses(a), c.poses(b)); pa.iter().zip(&pb).map(|(x, y)| x + (y - x) * w).collect::<Vec<f32>>() });
-    for o in &scene.objs {
+    for o in scene.objs.iter().filter(|o| !doc.hidden.contains(&o.id)) {
         let Some(m) = &o.mesh else { continue; };
         // in a cache, an object's pose comes from the frame (relative to the origin); otherwise from the scene
         let (pos, rot) = match (cache, &poses) {

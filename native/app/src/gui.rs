@@ -126,6 +126,13 @@ struct App {
     swallow: bool,
     /// edit mode: the shape being edited, and a move of its points going on (the move, the points, the points as tiny objects)
     edit: Option<crate::editmode::Edit>,
+    /// Global or Local axes, snapping on (the magnet) and what it snaps to (0 increments, 1 points, 2 edge centres, 3 face centres),
+    /// the tank's face arrows shown, and a face being dragged (which, and the tank's low and high corners when the drag began)
+    orient_local: bool,
+    snap_on: bool,
+    snap_to: u8,
+    handles: bool,
+    face_drag: Option<(usize, glam::Vec3, glam::Vec3, egui::Pos2)>,
     etf: Option<(Tf, Vec<usize>, Vec<Value>)>,
     r: Renderer,
     target: Option<Target>,
@@ -171,7 +178,7 @@ impl App {
         App {
             doc: Doc::default(), tab: Tab::Bake, scene_path: None, dirty: false, sel: None, r: Renderer::new(&rs.device), target: None,
             sel_set: Vec::new(), tool: Tool::Select, tf: None, tf_text: String::new(), scene_view: false, undo: Vec::new(), redo: Vec::new(), stable: None, burst: false,
-            changed_now: false, hover: None, add_at: None, box_from: None, new_menu: false, edit: None, etf: None, st: 0.0, splay: false, auto_key: false,
+            changed_now: false, hover: None, add_at: None, box_from: None, new_menu: false, edit: None, etf: None, orient_local: false, snap_on: false, snap_to: 0, handles: true, face_drag: None, st: 0.0, splay: false, auto_key: false,
             live: false, live_w: Worker::new(ctx.clone()), live_rx: None, live_pending: Vec::new(), live_stale: false, swallow: false,
             cam: Orbit { target: glam::Vec3::new(0.0, 0.7, 0.0), theta: 0.8, phi: 1.0, r: 6.2, ortho: false }, goal: None,
             t: 0.0, playing: false, looping: true, speed: 1.0, look: Look::default(),
@@ -408,8 +415,21 @@ impl App {
     fn start_tf(&mut self, kind: Kind, m: egui::Pos2, axis: Option<usize>, from_drag: bool) {
         if self.doc.cache.is_some() && !self.live { self.scene_view = true; }
         if self.sel_set.is_empty() { self.msg = "Click an object first.".into(); return; }
-        let t = Tf::start(kind, self.objs(), self.sel_set.clone(), m, axis, from_drag);
-        if t.is_some() { self.edited(); }
+        let mut t = Tf::start(kind, self.objs(), self.sel_set.clone(), m, axis, from_drag);
+        if let Some(t) = t.as_mut() {
+            t.orient_local = self.orient_local;
+            // what it may snap to: everything not moving (shown) and the tank; what lands: the moving objects' places
+            let mut tg: [Vec<glam::Vec3>; 3] = Default::default();
+            let mut sr: [Vec<glam::Vec3>; 3] = Default::default();
+            for (i, o) in self.objs().iter().enumerate() {
+                let p = tf::snap_places(o);
+                if self.sel_set.contains(&i) { for k in 0..3 { sr[k].extend(&p[k]); } }
+                else if !o["id"].as_u64().is_some_and(|id| self.doc.hidden.contains(&id)) { for k in 0..3 { tg[k].extend(&p[k]); } }
+            }
+            if let Some(b) = self.doc.tank() { let bp = tf::box_places(glam::Vec3::new(b.x0, b.y0, b.z0), glam::Vec3::new(b.x1, b.y1, b.z1)); for k in 0..3 { tg[k].extend(&bp[k]); } }
+            t.targets = tg; t.sources = sr;
+            self.edited();
+        }
         self.tf = t;
     }
     fn end_tf(&mut self, keep: bool) {
@@ -424,6 +444,60 @@ impl App {
             self.edited();
         }
         self.tf_text.clear();
+    }
+
+    /// The tank's face arrows (the page's face handles): drawn at each face's centre pointing out; dragging one moves that face along
+    /// its axis (Ctrl: steps of 0.1), the tank kept at least 0.1 across. Returns Some while a face is being dragged.
+    #[allow(clippy::too_many_arguments)]
+    fn face_arrows(&mut self, ui: &egui::Ui, resp: &egui::Response, view: &tf::View, m: egui::Pos2, press: Option<egui::Pos2>, ct: bool) -> Option<usize> {
+        let b = self.doc.tank()?;
+        let (lo, hi) = (glam::Vec3::new(b.x0, b.y0, b.z0), glam::Vec3::new(b.x1, b.y1, b.z1));
+        let arrow = |k: usize, lo: glam::Vec3, hi: glam::Vec3| -> (glam::Vec3, glam::Vec3) {
+            let a = k / 2;
+            let mut p = (lo + hi) * 0.5;
+            p[a] = if k % 2 == 0 { lo[a] } else { hi[a] };
+            let mut d = glam::Vec3::ZERO; d[a] = if k % 2 == 0 { -1.0 } else { 1.0 };
+            (p, d)
+        };
+        let seg = |k: usize| -> Option<(egui::Pos2, egui::Pos2)> {
+            let (p, d) = arrow(k, lo, hi);
+            let s0 = view.screen(p)?;
+            let s1 = view.screen(p + d * 0.001)?;
+            let dir = (s1 - s0).normalized();
+            Some((s0 + dir * 8.0, s0 + dir * 46.0))
+        };
+        let near = |at: egui::Pos2| (0..6).filter_map(|k| { let (a, bb) = seg(k)?; let ab = bb - a; let t = ((at - a).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0); Some(((a + ab * t).distance(at), k)) })
+            .filter(|x| x.0 < 9.0).min_by(|x, y| x.0.total_cmp(&y.0)).map(|x| x.1);
+        if self.face_drag.is_none() && resp.drag_started_by(egui::PointerButton::Primary) {
+            if let Some(k) = press.and_then(near) { self.face_drag = Some((k, lo, hi, press.unwrap())); }
+        }
+        let hover = if self.face_drag.is_none() { resp.hover_pos().and_then(near) } else { None };
+        if let Some((k, lo0, hi0, m0)) = self.face_drag {
+            let (p, d) = arrow(k, lo0, hi0);
+            let a = k / 2;
+            if let (Some(t0), Some(t1)) = (tf::line_param(p, d, view.ray(m0)), tf::line_param(p, d, view.ray(m))) {
+                let mv = (t1 - t0) * d[a];
+                let (mut l, mut h) = (lo0, hi0);
+                if k % 2 == 0 { l[a] = (lo0[a] + mv).min(hi0[a] - 0.1); if ct { l[a] = (l[a] / 0.1).round() * 0.1; } } else { h[a] = (hi0[a] + mv).max(lo0[a] + 0.1); if ct { h[a] = (h[a] / 0.1).round() * 0.1; } }
+                if let Some(s) = self.doc.scene.as_mut() {
+                    // the file's box is the page's min and size; the cache-less tank is the scene's box
+                    s.json["box"]["min"] = serde_json::json!({ "x": l.x, "y": l.y, "z": l.z });
+                    s.json["box"]["size"] = serde_json::json!({ "w": h.x - l.x, "h": h.y - l.y, "d": h.z - l.z });
+                }
+                self.edited();
+            }
+            if resp.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) { self.face_drag = None; }
+        }
+        for k in 0..6 {
+            let Some((s0, s1)) = seg(k) else { continue; };
+            let on = hover == Some(k) || self.face_drag.is_some_and(|f| f.0 == k);
+            let col = if on { egui::Color32::from_rgb(0xff, 0xd3, 0x4a) } else { tf::AXCOL[k / 2] };
+            ui.painter().line_segment([s0, s1], egui::Stroke::new(2.5, col));
+            let dv = (s1 - s0).normalized();
+            let n = egui::vec2(-dv.y, dv.x) * 5.0;
+            ui.painter().add(egui::Shape::convex_polygon(vec![s1 + dv * 10.0, s1 + n, s1 - n], col, egui::Stroke::NONE));
+        }
+        self.face_drag.map(|f| f.0)
     }
 
     /// The scene's length (the page's timeline length, which is also the bake's).
@@ -701,7 +775,17 @@ impl App {
             if let Some(keep) = Self::modal_keys(t, ui) { self.end_tf(keep); }
             return;
         }
-        if ui.input(|i| i.key_pressed(egui::Key::Tab)) && !mods.shift { self.toggle_edit(); ui.ctx().memory_mut(|m| m.stop_text_input()); return; }
+        if ui.input(|i| i.key_pressed(egui::Key::Tab)) {
+            // Shift+Tab: the snapping magnet; Tab: edit mode
+            if mods.shift { self.snap_on = !self.snap_on; self.msg = format!("Snapping {}", if self.snap_on { "on" } else { "off" }); } else { self.toggle_edit(); }
+            ui.ctx().memory_mut(|m| m.stop_text_input());
+            return;
+        }
+        // H hides the selection, Alt+H shows everything again
+        if ui.input(|i| i.key_pressed(egui::Key::H)) && !mods.command {
+            if mods.alt { self.doc.hidden.clear(); } else { for &i in &self.sel_set.clone() { if let Some(id) = self.objs().get(i).and_then(|o| o["id"].as_u64()) { if !self.doc.hidden.contains(&id) { self.doc.hidden.push(id); } } } self.select(None, false); }
+            return;
+        }
         let k = |key| ui.input(|i| i.key_pressed(key));
         if mods.command {
             if k(egui::Key::Z) { self.undo_redo(mods.shift); }
@@ -835,6 +919,14 @@ impl App {
                         if ui.selectable_label(self.tool == t, name).on_hover_text(tip).clicked() { self.tool = t; }
                     }
                     if ui.button("Add").on_hover_text("Add an object (Shift+A)").clicked() { self.add_at = Some(rect.min + egui::vec2(300.0, 40.0)); }
+                    ui.separator();
+                    if ui.selectable_label(self.orient_local, if self.orient_local { "Local" } else { "Global" }).on_hover_text("Which axes X, Y and Z mean when moving: the scene's (Global) or a shape's own (Local). Pressing an axis key twice switches for that move.").clicked() { self.orient_local = !self.orient_local; }
+                    if ui.selectable_label(self.snap_on, "Snap").on_hover_text("Snapping while moving (Shift+Tab). Holding Ctrl flips it for the moment; holding V snaps to points whatever this says.").clicked() { self.snap_on = !self.snap_on; }
+                    let names = ["Increment", "Point", "Edge centre", "Face centre"];
+                    egui::ComboBox::from_id_salt("snapto").selected_text(names[self.snap_to as usize]).width(100.0).show_ui(ui, |ui| {
+                        for (k, n) in names.iter().enumerate() { ui.selectable_value(&mut self.snap_to, k as u8, *n); }
+                    }).response.on_hover_text("Increment: steps of 0.1 (5 degrees, 0.1 scale). Point, Edge centre, Face centre: the place nearest the mouse on other objects or the tank, and the moving place closest to it lands on it.");
+                    if ui.selectable_label(self.handles, "Tank arrows").on_hover_text("Arrows on the tank's faces: drag one to move that face").clicked() { self.handles = !self.handles; }
                 }
             });
         });
@@ -931,7 +1023,7 @@ impl App {
                     Tab::Tank => crate::edit::tank(ui, &mut s.json),
                     _ => {
                         let before = self.sel;
-                        let ch = crate::edit::objects(ui, &mut s.json, &mut self.sel, self.st);
+                        let ch = crate::edit::objects(ui, &mut s.json, &mut self.sel, self.st, &mut self.doc.hidden);
                         if self.sel != before { self.sel_set = self.sel.into_iter().collect(); }
                         ch
                     }
@@ -1132,7 +1224,13 @@ impl eframe::App for App {
             } else if editing {
                 if let Some(mut t) = self.tf.take() {
                     // moving: follow the mouse; a click (or letting go of a handle) finishes, a right click puts things back
-                    if let Some(o) = self.objs_mut() { self.tf_text = t.apply(o, &view, m, ct); }
+                    // snapping: the magnet flipped by Ctrl, or V held for points
+                    let vk = ui.input(|i| i.key_down(egui::Key::V));
+                    t.snap_mode = if vk { 1 } else { self.snap_to };
+                    if ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Middle)) { t.mid_axis(&view, m); }
+                    let on = vk || (self.snap_on != ct);
+                    if let Some(o) = self.objs_mut() { self.tf_text = t.apply(o, &view, m, on); }
+                    if let Some(p) = t.snapped.and_then(|p| view.screen(p)) { ui.painter().circle_stroke(p, 9.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(0xff, 0xd3, 0x4a))); }
                     self.tf = Some(t);
                     self.edited();
                     let (pressed, released, right) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.pointer.secondary_pressed()));
@@ -1140,10 +1238,12 @@ impl eframe::App for App {
                     if right { self.end_tf(false); self.swallow = true; } else if (from_drag && released) || (!from_drag && pressed) { self.end_tf(true); self.swallow = true; }
                     ui.ctx().request_repaint();
                 } else {
-                    let giz = (self.tool != Tool::Select).then(|| tf::gizmo(self.objs(), &self.sel_set, &view)).flatten();
+                    let giz = (self.tool != Tool::Select).then(|| tf::gizmo(self.objs(), &self.sel_set, &view, self.orient_local)).flatten();
                     self.hover = giz.as_ref().and_then(|g| resp.hover_pos().and_then(|p| tf::pick_gizmo(g, &view, self.tool, p)));
                     let press = ui.input(|i| i.pointer.press_origin()).filter(|p| rect.contains(*p));
-                    if resp.drag_started_by(egui::PointerButton::Primary) && !alt {
+                    // the tank's face arrows: drag a face to move it
+                    if self.handles { self.face_arrows(ui, &resp, &view, m, press, ct); }
+                    if resp.drag_started_by(egui::PointerButton::Primary) && !alt && self.face_drag.is_none() {
                         let at = press.unwrap_or(m);
                         match giz.as_ref().and_then(|g| tf::pick_gizmo(g, &view, self.tool, at)) {
                             Some(part) => self.start_tf(part.kind, at, part.axis, true),
@@ -1155,15 +1255,15 @@ impl eframe::App for App {
                         let r = egui::Rect::from_two_pos(b, m);
                         ui.painter().rect(r, 0.0, egui::Color32::from_rgba_unmultiplied(120, 160, 230, 25), egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 160, 230)), egui::StrokeKind::Inside);
                         if resp.drag_stopped() {
-                            let hits = tf::in_box(self.objs(), &view, r);
+                            let hits = tf::in_box(self.objs(), &view, r, &self.doc.hidden);
                             if !sh { self.sel_set.clear(); }
                             for i in hits { if !self.sel_set.contains(&i) { self.sel_set.push(i); } }
                             self.sel = self.sel_set.last().copied();
                             self.box_from = None;
                         }
                     }
-                    if resp.clicked() && self.add_at.is_none() && !self.swallow { let hit = tf::pick(self.objs(), &view, m); self.select(hit, sh); }
-                    if resp.double_clicked() { let hit = tf::pick(self.objs(), &view, m); if hit.is_some() { self.select(hit, false); self.focus_selected(); } else { self.frame_all(); } }
+                    if resp.clicked() && self.add_at.is_none() && !self.swallow { let hit = tf::pick(self.objs(), &view, m, &self.doc.hidden); self.select(hit, sh); }
+                    if resp.double_clicked() { let hit = tf::pick(self.objs(), &view, m, &self.doc.hidden); if hit.is_some() { self.select(hit, false); self.focus_selected(); } else { self.frame_all(); } }
                     if let Some(g) = &giz { tf::draw_gizmo(ui.painter(), g, &view, self.tool, self.hover); }
                     // the middle or right button (or Alt with the left) orbits, as on the page
                     orbiting = resp.dragged_by(egui::PointerButton::Secondary) || resp.dragged_by(egui::PointerButton::Middle) || (alt && resp.dragged_by(egui::PointerButton::Primary));

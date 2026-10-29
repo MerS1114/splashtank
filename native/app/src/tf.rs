@@ -77,11 +77,11 @@ fn ray_tri(o: Vec3, d: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
 }
 
 /// The object under the mouse: the nearest shape the ray hits, or a source's handle within 10 points.
-pub fn pick(objs: &[Value], v: &View, p: Pos2) -> Option<usize> {
+pub fn pick(objs: &[Value], v: &View, p: Pos2, hidden: &[u64]) -> Option<usize> {
     let (o, d) = v.ray(p);
     let mut best: Option<(f32, usize)> = None;
     for (i, ob) in objs.iter().enumerate() {
-        if ob["hidden"] == true { continue; }
+        if ob["id"].as_u64().is_some_and(|id| hidden.contains(&id)) { continue; }
         if is_emitter(ob) {
             let c = pos(ob);
             if v.screen(c).is_some_and(|s| s.distance(p) < 10.0) {
@@ -102,8 +102,8 @@ pub fn pick(objs: &[Value], v: &View, p: Pos2) -> Option<usize> {
 }
 
 /// Objects whose centre is inside the screen rectangle (box select).
-pub fn in_box(objs: &[Value], v: &View, r: egui::Rect) -> Vec<usize> {
-    objs.iter().enumerate().filter(|(_, o)| o["hidden"] != true && v.screen(pos(o)).is_some_and(|s| r.contains(s))).map(|(i, _)| i).collect()
+pub fn in_box(objs: &[Value], v: &View, r: egui::Rect, hidden: &[u64]) -> Vec<usize> {
+    objs.iter().enumerate().filter(|(_, o)| !o["id"].as_u64().is_some_and(|id| hidden.contains(&id)) && v.screen(pos(o)).is_some_and(|s| r.contains(s))).map(|(i, _)| i).collect()
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -128,6 +128,37 @@ pub struct Tf {
     pub from_drag: bool,
     /// a direction of its own to move along (an extrude moves along the faces' normal) until an axis key is pressed
     pub nrm: Option<Vec3>,
+    /// the Global / Local setting (an axis key pressed twice switches to the other for this move)
+    pub orient_local: bool,
+    /// snapping (snapMove): 0 increments, 1 points, 2 edge centres, 3 face centres; the places it snaps to (what is not moving, and
+    /// the tank) and the moving places that land on them, for each of points, edges and faces, worked out once when the move starts
+    pub snap_mode: u8,
+    pub targets: [Vec<Vec3>; 3],
+    pub sources: [Vec<Vec3>; 3],
+    /// where the last move snapped to (drawn as a ring)
+    pub snapped: Option<Vec3>,
+}
+
+/// A shape's points, edge centres and face centres in the scene (a source: its handle for all three), for snapping.
+pub fn snap_places(o: &Value) -> [Vec<Vec3>; 3] {
+    if is_emitter(o) { let p = pos(o); return [vec![p], vec![p], vec![p]]; }
+    let w = world_points(o);
+    let fs = faces(o);
+    let mut es = std::collections::BTreeSet::new();
+    for f in &fs { for k in 0..f.len() { let (a, b) = (f[k], f[(k + 1) % f.len()]); es.insert((a.min(b), a.max(b))); } }
+    let em = es.into_iter().filter_map(|(a, b)| Some((*w.get(a)? + *w.get(b)?) * 0.5)).collect();
+    let fc = fs.iter().map(|f| f.iter().filter_map(|&i| w.get(i)).copied().sum::<Vec3>() / f.len().max(1) as f32).collect();
+    [w, em, fc]
+}
+/// The tank's corners, edge centres and face centres.
+pub fn box_places(lo: Vec3, hi: Vec3) -> [Vec<Vec3>; 3] {
+    let c = |i: u32| Vec3::new(if i & 1 != 0 { hi.x } else { lo.x }, if i & 2 != 0 { hi.y } else { lo.y }, if i & 4 != 0 { hi.z } else { lo.z });
+    let corners: Vec<Vec3> = (0..8).map(c).collect();
+    let mut em = Vec::new();
+    for i in 0..8u32 { for k in [1u32, 2, 4] { if i & k == 0 { em.push((c(i) + c(i | k)) * 0.5); } } }
+    let m = (lo + hi) * 0.5;
+    let fc = vec![Vec3::new(lo.x, m.y, m.z), Vec3::new(hi.x, m.y, m.z), Vec3::new(m.x, lo.y, m.z), Vec3::new(m.x, hi.y, m.z), Vec3::new(m.x, m.y, lo.z), Vec3::new(m.x, m.y, hi.z)];
+    [corners, em, fc]
 }
 
 const AXES: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
@@ -137,11 +168,12 @@ impl Tf {
         let list: Vec<usize> = list.into_iter().filter(|&i| i < objs.len()).collect();
         if list.is_empty() { return None; }
         let pivot = list.iter().map(|&i| pos(&objs[i])).sum::<Vec3>() / list.len() as f32;
-        Some(Tf { kind, orig: list.iter().map(|&i| objs[i].clone()).collect(), list, pivot, axis, plane: false, local: false, num: String::new(), m0, ang: 0.0, prev_a: None, from_drag, nrm: None })
+        Some(Tf { kind, orig: list.iter().map(|&i| objs[i].clone()).collect(), list, pivot, axis, plane: false, local: false, num: String::new(), m0, ang: 0.0, prev_a: None, from_drag, nrm: None,
+            orient_local: false, snap_mode: 0, targets: Default::default(), sources: Default::default(), snapped: None })
     }
     /// the object whose own axes Local means: one shape on its own
     fn frame(&self) -> Option<&Value> { (self.orig.len() == 1 && !is_emitter(&self.orig[0])).then(|| &self.orig[0]) }
-    fn use_local(&self) -> bool { self.local && self.frame().is_some() }
+    fn use_local(&self) -> bool { self.frame().is_some() && (self.orient_local != self.local) }
     fn axis_dir(&self, a: usize) -> Vec3 { match (self.use_local(), self.frame()) { (true, Some(o)) => rot(o).col(a), _ => AXES[a] } }
 
     /// X, Y or Z: along that axis; again: the object's own axis; with Shift: the plane across it.
@@ -150,6 +182,26 @@ impl Tf {
         if shift { self.axis = Some(a); self.plane = true; self.local = false; }
         else if self.axis == Some(a) && !self.plane { self.local = !self.local; }
         else { self.axis = Some(a); self.plane = false; self.local = false; }
+    }
+
+    /// Middle click (midAxis): the axis that lines up best with where the mouse has moved (rotating: the one facing the view); the same
+    /// axis again lets go of it.
+    pub fn mid_axis(&mut self, v: &View, m: Pos2) {
+        let Some(pv) = v.screen(self.pivot) else { return; };
+        let dm = m - self.m0;
+        let mut best = (-1.0f32, 0usize);
+        for a in 0..3 {
+            let s = if self.kind == Kind::R { AXES[a].dot(v.fwd).abs() } else {
+                if dm.length() < 4.0 { return; }
+                let Some(q) = v.screen(self.pivot + AXES[a]) else { continue; };
+                let ax = q - pv;
+                (ax.dot(dm)).abs() / (ax.length() * dm.length()).max(1e-6)
+            };
+            if s > best.0 { best = (s, a); }
+        }
+        self.nrm = None;
+        if self.axis == Some(best.1) && !self.plane { self.axis = None; } else { self.axis = Some(best.1); self.plane = false; }
+        self.local = false;
     }
 
     /// Puts the objects back where they were.
@@ -177,7 +229,20 @@ impl Tf {
                             if let (Some(h0), Some(h1)) = (plane_hit(self.pivot, n, r0), plane_hit(self.pivot, n, r1)) { d = h1 - h0; }
                         }
                     }
-                    if snap {
+                    self.snapped = None;
+                    if snap && self.snap_mode > 0 {
+                        // the place to snap to nearest the mouse (within 30 points), and the moving place that comes closest to it lands on it
+                        let k = (self.snap_mode - 1) as usize;
+                        let near = self.targets[k].iter().filter_map(|t| Some((v.screen(*t)?.distance(m), *t))).filter(|x| x.0 < 30.0).min_by(|a, b| a.0.total_cmp(&b.0));
+                        if let Some((_, t)) = near {
+                            if let Some(s) = self.sources[k].iter().min_by(|a, b| (**a + d - t).length().total_cmp(&(**b + d - t).length())) {
+                                d = t - *s;
+                                // along an axis, only that part of the jump
+                                if let (Some(a), false) = (ax, self.plane) { d = a * d.dot(a); }
+                                self.snapped = Some(t);
+                            }
+                        }
+                    } else if snap {
                         // increments of 0.1 (Snap to Increment)
                         d = match ax { Some(a) if !self.plane => a * ((d.dot(a) / 0.1).round() * 0.1), _ => (d / 0.1).round() * 0.1 };
                     }
@@ -248,7 +313,7 @@ impl Tf {
 }
 
 /// Where along the line p + a t the ray comes closest.
-fn line_param(p: Vec3, a: Vec3, (ro, rd): (Vec3, Vec3)) -> Option<f32> {
+pub fn line_param(p: Vec3, a: Vec3, (ro, rd): (Vec3, Vec3)) -> Option<f32> {
     let w = p - ro;
     let b = a.dot(rd);
     let den = 1.0 - b * b;
@@ -274,12 +339,14 @@ const HOVER: Color32 = Color32::from_rgb(0xff, 0xd3, 0x4a);
 
 /// The gizmo's place and axes: at the selection's centre, the one shape's own axes when it is alone and local is wanted.
 pub struct Giz { pivot: Vec3, ax: [Vec3; 3], len: f32 }
-pub fn gizmo(objs: &[Value], sel: &[usize], v: &View) -> Option<Giz> {
+pub fn gizmo(objs: &[Value], sel: &[usize], v: &View, local: bool) -> Option<Giz> {
     let list: Vec<&Value> = sel.iter().filter_map(|&i| objs.get(i)).collect();
     if list.is_empty() { return None; }
     let pivot = list.iter().map(|o| pos(o)).sum::<Vec3>() / list.len() as f32;
+    // Local with one shape: its own axes
+    let ax = if local && list.len() == 1 && !is_emitter(list[0]) { let r = rot(list[0]); [r.col(0), r.col(1), r.col(2)] } else { AXES };
     // a fixed size on screen: the arrows are about 64 points long whatever the zoom
-    Some(Giz { pivot, ax: AXES, len: v.per_px(pivot) * 64.0 })
+    Some(Giz { pivot, ax, len: v.per_px(pivot) * 64.0 })
 }
 fn shows(tool: Tool, p: Part) -> bool {
     match p.kind {
@@ -430,6 +497,34 @@ pub fn duplicate(j: &Value, sel: &[usize]) -> Vec<Value> {
 mod tests {
     use super::*;
 
+    /// Snapping to points: a cube moved near another's corner lands with its nearest corner exactly on it; the middle click picks the
+    /// axis the mouse moved along.
+    #[test]
+    fn snap_to_points() {
+        let j = json!({ "objs": [] });
+        let mut objs = vec![new_object(&j, "cube", false), new_object(&j, "cube", false)];
+        objs[0]["x"] = json!(0.0); objs[0]["y"] = json!(0.0); objs[0]["z"] = json!(0.0);
+        objs[1]["x"] = json!(2.0); objs[1]["y"] = json!(0.0); objs[1]["z"] = json!(0.0);
+        let cam = Orbit { target: Vec3::new(1.0, 0.0, 0.0), theta: 0.8, phi: 1.0, r: 6.0, ortho: false };
+        let v = View::new(&cam, egui::Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(1200.0, 800.0)));
+        let m0 = v.screen(pos(&objs[0])).unwrap();
+        let mut t = Tf::start(Kind::G, &objs, vec![0], m0, None, false).unwrap();
+        t.targets = snap_places(&objs[1]); t.sources = snap_places(&objs[0]); t.snap_mode = 1;
+        // the mouse near the other cube's corner (-0.3 on each axis from its centre, so x 1.7)
+        let corner = Vec3::new(1.7, -0.3, -0.3);
+        t.apply(&mut objs, &v, v.screen(corner).unwrap() + egui::vec2(4.0, 3.0), true);
+        assert_eq!(t.snapped, Some(corner));
+        let moved: Vec<Vec3> = snap_places(&objs[0])[0].clone();
+        assert!(moved.iter().any(|p| (*p - corner).length() < 1e-4), "a corner lands on it");
+        // middle click after moving the mouse along the screen's X axis direction picks X
+        let mut t = Tf::start(Kind::G, &objs, vec![0], m0, None, false).unwrap();
+        let sx = v.screen(pos(&objs[0]) + Vec3::X).unwrap();
+        t.mid_axis(&v, sx);
+        assert_eq!(t.axis, Some(0));
+        t.mid_axis(&v, sx);
+        assert_eq!(t.axis, None, "the same axis again lets go of it");
+    }
+
     /// Rotations go back into rx, yaw, rz the way the page's Euler 'ZYX' reads them.
     #[test]
     fn euler_round_trip() {
@@ -449,8 +544,10 @@ mod tests {
         let v = View::new(&cam, egui::Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(1200.0, 800.0)));
         let objs = j["objs"].as_array_mut().unwrap();
         let c = v.screen(pos(&objs[0])).unwrap();
-        assert_eq!(pick(objs, &v, c), Some(0));
-        assert_eq!(pick(objs, &v, pos2(5.0, 5.0)), None);
+        assert_eq!(pick(objs, &v, c, &[]), Some(0));
+        assert_eq!(pick(objs, &v, pos2(5.0, 5.0), &[]), None);
+        let id = objs[0]["id"].as_u64().unwrap();
+        assert_eq!(pick(objs, &v, c, &[id]), None, "hidden objects are not picked");
         let p0 = pos(&objs[0]);
         let mut t = Tf::start(Kind::G, objs, vec![0], c, None, false).unwrap();
         t.key_axis(0, false);
