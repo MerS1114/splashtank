@@ -24,6 +24,8 @@ pub enum Kind {
     Detail(DetailOpts),
     /// the live sim: a bake of the scene whose frames go to the window (the header, then one message a frame) instead of a file
     Live(std::sync::mpsc::Sender<Vec<u8>>),
+    /// the solver benchmark: the scene simulated up to at (s), then steps steps timed stage by stage (nothing is written)
+    Bench { at: f32, steps: u32, out: Arc<std::sync::Mutex<Option<bake::Bench>>> },
 }
 
 #[derive(Clone)]
@@ -89,6 +91,21 @@ pub fn execute(t: &Task, gpu: &mut Option<Gpu>, report: &mut dyn FnMut(Note) -> 
             let started = serde_json::json!({ "scene": t.scene, "waterOnly": water_only, "opts": { "spacing": o.spacing, "seconds": o.seconds, "detail": o.detail, "maxPoints": o.max_points, "accurate": o.accurate } });
             bake_now(gpu, &desc, o, &t.out, bake::RunOpts { checkpoint_secs: *checkpoint_secs, resume: false, started_with: started, ..Default::default() }, report)?;
         }
+        Kind::Bench { at, steps, out } => {
+            let desc = desc_of(&t.scene, &t.o, false)?;
+            let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+            let drain = std::thread::spawn(move || for _ in rx {});
+            let ro = bake::RunOpts { sink: Some(tx), profile: Some((*at, *steps, out.clone())), ..Default::default() };
+            report(Note::Line(format!("Benchmark: simulating up to {at:.2} s, then timing {steps} steps")));
+            let r = bake::run(gpu, &desc, &t.out, &ro, |p| report(Note::Frame(p)));
+            drop(ro);
+            let _ = drain.join();
+            r?;
+            match out.lock().unwrap().as_ref() {
+                Some(b) => report(Note::Line(b.text())),
+                None => report(Note::Line("The scene ended before the benchmark's moment: pick an earlier time.".into())),
+            };
+        }
         Kind::Live(tx) => {
             let desc = desc_of(&t.scene, &t.o, false)?;
             bake::run(gpu, &desc, &t.out, &bake::RunOpts { sink: Some(tx.clone()), ..Default::default() }, |p| report(Note::Frame(p)))?;
@@ -138,6 +155,18 @@ fn bake_now(gpu: &Gpu, desc: &Desc, o: &BakeOpts, out: &Path, mut ro: bake::RunO
 /// The command line: builds the task from the arguments and prints its progress.
 pub fn run(args: &[String]) -> Result<(), String> {
     let flag = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
+    if let Some(inp) = flag("--benchmark") {
+        let p = Path::new(&inp);
+        let (scene, mut o) = if inp.to_ascii_lowercase().ends_with(".splc") { from_cache(p)? } else { (read_json(p)?, BakeOpts::default()) };
+        if let Some(v) = flag("--spacing") { o.spacing = v.parse().map_err(|_| "bad --spacing")?; }
+        let at: f32 = flag("--at").and_then(|v| v.parse().ok()).unwrap_or(2.5);
+        let steps: u32 = flag("--steps").and_then(|v| v.parse().ok()).unwrap_or(60);
+        o.seconds = Some(o.seconds.unwrap_or(0.0).max(at + 1.0));
+        let out = Arc::new(std::sync::Mutex::new(None));
+        let t = Task { kind: Kind::Bench { at, steps, out }, inp: None, scene, o, out: std::env::temp_dir().join("splashtank-bench.splc") };
+        let mut gpu = None;
+        return execute(&t, &mut gpu, &mut |n| { if let Note::Line(s) = n { eprintln!("{s}"); } true });
+    }
     let ww = args.iter().any(|a| a == "--bake-whitewater");
     let det = args.iter().any(|a| a == "--detail-pass");
     let task = if let Some(out) = flag("--resume") {

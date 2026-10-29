@@ -8,6 +8,8 @@
 //!       bakes without a window, streaming frames to out.splc. From a page cache: its scene and settings, baked again natively.
 //!       --water-only leaves whitewater, air and drips out (the page's Bake water). A checkpoint is written every --checkpoint-every s
 //!       (300; 0: none) next to the cache (out.splc.ckpt) and removed when the bake finishes.
+//!   splashtank --benchmark in.json|in.splc [--spacing 0.04] [--at 2.5] [--steps 60]
+//!       the solver benchmark: simulates up to --at seconds, then times --steps steps stage by stage on the GPU.
 //!   splashtank --resume out.splc
 //!       carries on a bake that stopped, from its last checkpoint.
 //!   splashtank --bake-whitewater in.splc out.splc [--scene scene.json]
@@ -80,7 +82,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     if args.iter().any(|a| a.starts_with("--")) { attach_console(); }
-    if args.iter().any(|a| a == "--bake" || a == "--bake-whitewater" || a == "--detail-pass" || a == "--resume") {
+    if args.iter().any(|a| a == "--bake" || a == "--bake-whitewater" || a == "--detail-pass" || a == "--resume" || a == "--benchmark") {
         if let Err(e) = bake_cli::run(&args) { eprintln!("{e}"); std::process::exit(1); }
         return;
     }

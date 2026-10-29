@@ -15,6 +15,9 @@ const MG_LEVELS: usize = 7;
 const STOR: wgpu::BufferUsages = wgpu::BufferUsages::STORAGE.union(wgpu::BufferUsages::COPY_SRC).union(wgpu::BufferUsages::COPY_DST);
 
 /// Grid of a sim with these options (FlipSim.layout): cell size h = ratio x spacing, cells a side, the box centred on x and z on y = 0.
+/// The most timestamps a profiled step takes (about 16 stages).
+const PROF_CAP: u32 = 64;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Layout { pub d: f32, pub ratio: f32, pub h: f32, pub n: [u32; 3], pub b: splash_format::Box3, pub size: [f32; 3] }
 
@@ -153,6 +156,10 @@ pub struct FlipSim {
     pub ww_only: bool,
     /// tall cells (native only, tall.wgsl): the row they started below (0: off); the GPU lowers it when the water needs the room
     pub tall_t0: u32,
+    /// the solver benchmark: timestamps between the stages of each step (enable_prof), and GPU milliseconds a stage summed with the steps
+    prof: Option<(wgpu::QuerySet, wgpu::Buffer, wgpu::Buffer)>,
+    pub prof_acc: Vec<(String, f64)>,
+    pub prof_steps: u32,
     // narrow band and ocean
     vel_g_on: bool,
     /// the next step starts the depth field from the starting shapes (1: a restart)
@@ -220,7 +227,7 @@ impl FlipSim {
             l, rest: l.ratio.powi(3), open, max_n, cap: max_n, n: 0, opt: Opt::default(), ntiles, t, scap, scap_max, lcap: 0, buf,
             groups: HashMap::new(), groups_dirty: true, pu: vec![0; (gpu.params_bytes / 4) as usize], cf: vec![0.0; 32 * 32], cf_prev: None, solid_dirty: true,
             sdf_sig: 0, sdf_cap: 16, run_start: 0, run_pos: Vec::new(), run_vel: Vec::new(), tm: 0.0, seed: 0, sort_tick: 0, sort_moved: 0.0, sorted_ever: false,
-            last_dt: 0.0, mg_size: 0, mg_dense: Vec::new(), mg_top: 0, only_tiles: false, stats_ring, stats: None, ovf_total: 0, stage: None, grew: 0, ww_only: false, tall_t0: 0,
+            last_dt: 0.0, mg_size: 0, mg_dense: Vec::new(), mg_top: 0, only_tiles: false, stats_ring, stats: None, ovf_total: 0, stage: None, grew: 0, ww_only: false, tall_t0: 0, prof: None, prof_acc: Vec::new(), prof_steps: 0,
             vel_g_on: false, nb_init: 0, nb_fills: Vec::new(), nb_vols: Vec::new(), nb_band: None, ocean: None, ocean_w: Vec::new(), nb_on: false, init_step: 0,
             spray_cap: 0, spr_disp_max: 0, deep_on: false, air_dims: None, ndrip: 0, drip_sig: vec![u32::MAX], drip_cache: HashMap::new(),
             air_real: false, air_feel: false, air_iters: 20, air_on_step: false, drip_on_step: false, spr_on_step: false, ab: l.b,
@@ -449,6 +456,18 @@ impl FlipSim {
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         let v: Vec<f32> = { let m = st.slice(..).get_mapped_range().unwrap(); bytemuck::cast_slice(&m).to_vec() };
         v[0] as u32
+    }
+
+    /// Times every stage of each step from now on (needs timestamps inside compute passes; false when the device has none).
+    pub fn enable_prof(&mut self, gpu: &Gpu) -> bool {
+        if !gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES) { return false; }
+        let qs = gpu.device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("prof"), ty: wgpu::QueryType::Timestamp, count: PROF_CAP });
+        let res = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: PROF_CAP as u64 * 8, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let rd = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: PROF_CAP as u64 * 8, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        self.prof = Some((qs, res, rd));
+        self.prof_acc.clear();
+        self.prof_steps = 0;
+        true
     }
 
     fn enable_nb(&mut self, gpu: &Gpu) {
@@ -804,16 +823,40 @@ impl FlipSim {
         self.make_groups(gpu);
         let iters = o.iters.max(1);
         let mut enc = gpu.device.create_command_encoder(&Default::default());
+        let qs = self.prof.as_ref().map(|p| p.0.clone());
+        let names = std::cell::RefCell::new(Vec::<&'static str>::new());
+        let mk = |ps: &mut wgpu::ComputePass, name: &'static str| {
+            if let Some(q) = &qs { let i = names.borrow().len() as u32; if i < PROF_CAP { ps.write_timestamp(q, i); names.borrow_mut().push(name); } }
+        };
         {
             let mut ps = enc.begin_compute_pass(&Default::default());
-            self.stages(gpu, &mut ps, n, iters);
+            mk(&mut ps, "start");
+            self.stages(gpu, &mut ps, n, iters, &mk);
         }
         let k = self.read_stats(gpu, &mut enc);
+        let names = names.into_inner();
+        if let (Some((q, res, rd)), true) = (&self.prof, names.len() > 1) {
+            enc.resolve_query_set(q, 0..names.len() as u32, res, 0);
+            enc.copy_buffer_to_buffer(res, 0, rd, 0, names.len() as u64 * 8);
+        }
         gpu.queue.submit([enc.finish()]);
         if let Some(k) = k { self.start_map(k); }
+        if let (Some((_, _, rd)), true) = (&self.prof, names.len() > 1) {
+            rd.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            let t: Vec<u64> = { let m = rd.slice(..).get_mapped_range().unwrap(); bytemuck::cast_slice(&m[..names.len() * 8]).to_vec() };
+            rd.unmap();
+            let per = gpu.queue.get_timestamp_period() as f64 * 1e-6;
+            for i in 1..names.len() {
+                let ms = t[i].saturating_sub(t[i - 1]) as f64 * per;
+                match self.prof_acc.iter_mut().find(|e| e.0 == names[i]) { Some(e) => e.1 += ms, None => self.prof_acc.push((names[i].to_string(), ms)) }
+            }
+            self.prof_steps += 1;
+        }
     }
 
-    fn stages(&mut self, gpu: &Gpu, ps: &mut wgpu::ComputePass, n: u32, iters: u32) {
+    /// mk(ps, name): a timestamp for the benchmark, ending the stage of that name (nothing unless profiling).
+    fn stages(&mut self, gpu: &Gpu, ps: &mut wgpu::ComputePass, n: u32, iters: u32, mk: &dyn Fn(&mut wgpu::ComputePass, &'static str)) {
         let g = &self.groups;
         let args = &self.buf[&14];
         let dispatch = |ps: &mut wgpu::ComputePass, name: &str, items: u32| {
@@ -837,6 +880,7 @@ impl FlipSim {
                 dispatch(ps, "sortClear", 65536); dispatch(ps, "sortHist", n);
                 ps.set_pipeline(&gpu.pipes["sortScan"].pipeline); ps.set_bind_group(0, &g["sortScan"], &[]); ps.dispatch_workgroups(1, 1, 1);
                 dispatch(ps, "sortScatter", n); dispatch(ps, "sortCopy", n);
+                mk(ps, "sort");
             }
         }
         let (nb, init) = (self.nb_on, self.init_step);
@@ -851,15 +895,18 @@ impl FlipSim {
         indirect(ps, "initNew", 48); dispatch(ps, "slotListBuild", self.ntiles); dispatch(ps, "argsSlots", 1);
         if tall { indirect(ps, "tallFill", 64); }   // a block row given back by the tall cells: ordinary deep water again
         if init > 0 { indirect(ps, "phiInitAll", 64); }
+        mk(ps, "blocks");
         if self.only_tiles { return; }
         indirect(ps, "clearSlots", 80);
         dispatch(ps, if self.opt.p2g_win && !apic { "p2gWin" } else { "p2g" }, n);
-        if nb { indirect(ps, "nbPhi", 64); indirect(ps, "nbJacA", 64); indirect(ps, "nbJacB", 64); indirect(ps, "nbJacA", 64); }
+        mk(ps, "p2g");
+        if nb { indirect(ps, "nbPhi", 64); indirect(ps, "nbJacA", 64); indirect(ps, "nbJacB", 64); indirect(ps, "nbJacA", 64); mk(ps, "narrow band"); }
         if self.solid_dirty { indirect(ps, "solidBuild", 64); self.solid_dirty = false; }
         indirect(ps, "classify", 64);
         if nb { indirect(ps, "nbVel", 64); }
         indirect(ps, "normFaces", 64);
-        if !self.ww_only { self.water_stages(gpu, ps, n, iters); }
+        mk(ps, "classify");
+        if !self.ww_only { self.water_stages(gpu, ps, n, iters, mk); }
         // the air field first, so the whitewater moves with this step's air
         if self.air_on_step {
             let na = self.air_dims.unwrap().cells;
@@ -872,6 +919,7 @@ impl FlipSim {
             }
             dispatch(ps, "airCopy", na);
             if self.air_feel { dispatch(ps, "airDragW", n); }   // the water feels this step's air
+            mk(ps, "air");
         }
         // whitewater: sampling the water at each point, moving the points, and making new ones from the water
         if self.spray_cap > 0 {
@@ -879,17 +927,19 @@ impl FlipSim {
             indirect(ps, "sprayStep", 112);
             if self.spr_on_step { dispatch(ps, "sprayEmit", n); if f32::from_bits(self.pu[83]) > 0.0 { dispatch(ps, "spinEmit", n); } }
             if self.drip_on_step { dispatch(ps, "dripStep", self.ndrip); }
+            mk(ps, "whitewater");
         }
         if nb {
             if tall { indirect(ps, "tallCheck", 64); }
             dispatch(ps, "nbKill", n); dispatch(ps, "nbReset", 1); dispatch(ps, "nbDead", n); indirect(ps, "nbDeficit", 64); dispatch(ps, "nbArgs", 1); indirect(ps, "nbSpawn", 96);
+            mk(ps, "narrow band");
         }
         if self.ww_only { dispatch(ps, "wwAdvect", n); }   // the particles move on towards the next baked frame
     }
 
     /// The water's own solve: divergence, pressure, projection, grid to particles, fast drops and separation (left out by the
     /// whitewater-only pass, which moves the baked particles along their own velocity instead).
-    fn water_stages(&self, gpu: &Gpu, ps: &mut wgpu::ComputePass, n: u32, iters: u32) {
+    fn water_stages(&self, gpu: &Gpu, ps: &mut wgpu::ComputePass, n: u32, iters: u32, mk: &dyn Fn(&mut wgpu::ComputePass, &'static str)) {
         let g = &self.groups;
         let args = &self.buf[&14];
         let dispatch = |ps: &mut wgpu::ComputePass, name: &str, items: u32| {
@@ -912,6 +962,7 @@ impl FlipSim {
         dispatch(ps, "listClear", 1);
         indirect(ps, if gpu.sg && gpu.pipes.contains_key("buildListSG") { "buildListSG" } else { "buildList" }, 64);
         dispatch(ps, "listArgs", 1);
+        mk(ps, "divergence");
         // pressure: red-black sweeps, or multigrid V-cycles (about one per 10 iterations asked for) between sweeps
         // the tall cells are relaxed with the ordinary ones, twice per sweep (their sideways coupling is their height in cells strong)
         let sweep = |ps: &mut wgpu::ComputePass, k: u32| { for _ in 0..k {
@@ -933,16 +984,20 @@ impl FlipSim {
             }
             sweep(ps, 2);
         }
+        mk(ps, "pressure");
         indirect(ps, "project", 64);
         if tall { dispatch(ps, "tallProj", (self.l.n[0] + 1) * (self.l.n[2] + 1)); }
         if nb { indirect(ps, "saveVel", 64); }
         if self.opt.extrap { indirect(ps, "extrap", 64); }
+        mk(ps, "project");
         dispatch(ps, if apic { if gpu.pipes.contains_key("g2pAo") { "g2pAo" } else { "g2pA" } } else if self.opt.p2g_win { "g2pWin" } else { "g2p" }, n);
-        if self.opt.ballistic { dispatch(ps, "ballistic", n); }
+        mk(ps, "g2p");
+        if self.opt.ballistic { dispatch(ps, "ballistic", n); mk(ps, "fast drops"); }
         if self.opt.sep > 0.0 {
             indirect(ps, "sepClear", 64);
             for _ in 0..self.opt.sep_iters { indirect(ps, "sepRed", 0); indirect(ps, "sepBlack", 16); }
             dispatch(ps, "sepMove", n);
+            mk(ps, "separation");
         }
     }
 

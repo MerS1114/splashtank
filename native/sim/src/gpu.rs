@@ -128,7 +128,7 @@ impl Gpu {
             .map_err(|e| format!("No GPU: {e}"))?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("splash-sim"),
-            required_features: adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::SUBGROUP),
+            required_features: adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES | wgpu::Features::SUBGROUP),
             required_limits: adapter.limits(),
             ..Default::default()
         })).map_err(|e| format!("No GPU device: {e}"))?;

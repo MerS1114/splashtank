@@ -190,6 +190,10 @@ struct App {
     frame_ms: f32,
     /// the performance overlay (P): shown, and the slowest frame lately
     perf: bool,
+    /// the solver benchmark: its result, from when, how many steps
+    bench: Arc<std::sync::Mutex<Option<splash_sim::bake::Bench>>>,
+    bench_at: f32,
+    bench_steps: u32,
     slow_ms: f32,
     /// frames to read ahead from disk (the loader thread touches their pages so uploads do not wait for the disk)
     ahead: mpsc::Sender<(Arc<Cache>, Vec<usize>)>,
@@ -226,7 +230,7 @@ impl App {
             cam: Orbit { target: glam::Vec3::new(0.0, 0.7, 0.0), theta: 0.8, phi: 1.0, r: 6.2, ortho: false }, goal: None,
             t: 0.0, playing: false, looping: true, speed: 1.0, look: Look::default(),
             msg: "Open a bake cache (.splc) or a scene file (.json), or drop one on the window.".into(),
-            gpu: crate::gpu::describe(&rs.adapter, &rs.device), last: Instant::now(), frame_ms: 0.0, perf: false, slow_ms: 0.0, ahead: tx,
+            gpu: crate::gpu::describe(&rs.adapter, &rs.device), last: Instant::now(), frame_ms: 0.0, perf: false, bench: Arc::new(std::sync::Mutex::new(None)), bench_at: 2.5, bench_steps: 60, slow_ms: 0.0, ahead: tx,
             path: None, bake: BakeUi::default(), worker: Worker::new(ctx.clone()), seen: 0, was_busy: false, autobake: None,
         }
     }
@@ -1194,6 +1198,22 @@ impl App {
                 match self.obj_act.take() { Some("dup") => self.duplicate(egui::pos2(0.0, 0.0)), Some("del") => self.delete_selected(), _ => {} }
                 return;
             }
+            ui.heading("Performance");
+            ui.horizontal(|ui| {
+                ui.label("From");
+                ui.add(egui::DragValue::new(&mut self.bench_at).range(0.0..=60.0).speed(0.05).max_decimals(2).suffix(" s"));
+                ui.add(egui::DragValue::new(&mut self.bench_steps).range(5..=600).suffix(" steps"));
+                let can = self.doc.scene.is_some() && !self.worker.busy();
+                if ui.add_enabled(can, egui::Button::new("Solver benchmark")).on_hover_text("Simulates the scene (Bake tab spacing) up to that moment, then times that many steps, every stage on the GPU (the page's Solver benchmark). Nothing is saved.").clicked() {
+                    let scene = self.doc.scene.as_ref().unwrap().json.clone();
+                    let o = splash_sim::scene::BakeOpts { spacing: self.bake.spacing(), seconds: Some(self.scene_dur().max(self.bench_at as f64 + 1.0) as f32), detail: Some(1.0), max_points: None, accurate: None };
+                    *self.bench.lock().unwrap() = None;
+                    self.worker.start("Solver benchmark".into(), crate::bake_cli::Task { kind: crate::bake_cli::Kind::Bench { at: self.bench_at, steps: self.bench_steps, out: self.bench.clone() }, inp: None, scene, o, out: std::env::temp_dir().join("splashtank-bench.splc") });
+                }
+            });
+            if let Some(b) = self.bench.lock().unwrap().as_ref() { ui.label(egui::RichText::new(b.text()).monospace().small()); }
+            else if self.worker.busy() && self.worker.job.lock().unwrap().title == "Solver benchmark" { ui.label("Running..."); }
+            ui.separator();
             ui.heading("Cache");
             if let Some(c) = &self.doc.cache {
                 let f = (self.t.floor() as usize).min(c.frames.len().saturating_sub(1));

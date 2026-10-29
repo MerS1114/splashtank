@@ -238,6 +238,23 @@ pub struct RunOpts {
     pub log: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
     /// the live sim: frames go here (the header first, then one message a frame) instead of a file at out
     pub sink: Option<mpsc::Sender<Vec<u8>>>,
+    /// the solver benchmark: from this time (s), time this many steps stage by stage, put the result here and stop
+    pub profile: Option<(f32, u32, std::sync::Arc<std::sync::Mutex<Option<Bench>>>)>,
+}
+
+/// What the solver benchmark measured: GPU milliseconds a step for each stage, the steps timed, substeps a frame, particles, wall time a
+/// step (the whole step, waiting included).
+#[derive(Clone, Debug, Default)]
+pub struct Bench { pub stages: Vec<(String, f64)>, pub steps: u32, pub sub: u32, pub n: u32, pub wall_ms: f64, pub at: f32 }
+impl Bench {
+    pub fn text(&self) -> String {
+        let busy: f64 = self.stages.iter().map(|s| s.1).sum();
+        let mut s = format!("From {:.2} s, {} steps ({} a frame), {} particles: GPU busy {:.2} ms a step, the whole step {:.2} ms\n", self.at, self.steps, self.sub, self.n, busy, self.wall_ms);
+        let mut st = self.stages.clone();
+        st.sort_by(|a, b| b.1.total_cmp(&a.1));
+        for (n, ms) in st { s += &format!("  {n:<12} {ms:7.3} ms  {:4.1}%\n", 100.0 * ms / busy.max(1e-9)); }
+        s
+    }
 }
 impl RunOpts {
     fn say(&self, s: &str) { match &self.log { Some(l) => l(s), None => eprintln!("{s}") } }
@@ -499,6 +516,7 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, ro: &RunOpts, mut progress: impl 
         wind: desc.wind, drag: desc.drag, gust: desc.gust, foam_sens: desc.foam_sens, foam_tau: desc.foam_tau, spr: desc.spr, air: desc.air, drip: desc.drip };
     // checkpoints are spaced so writing them takes at most a tenth of the bake (a slow drive takes minutes for a big one)
     let (mut last_ck, mut ck_gap) = (Instant::now(), ro.checkpoint_secs);
+    let mut prof_wall = 0.0f64;
     while f <= frames && !stopped {
         let tf0 = Instant::now();
         let ovf0 = sim.ovf_total;
@@ -508,7 +526,17 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, ro: &RunOpts, mut progress: impl 
         for s in 0..sub {
             let t = (f - 1) as f32 * dtf + (s + 1) as f32 * dt;
             while ei < ev.len() && ev[ei].t <= t { let e = ev[ei]; ei += 1; sim.fill_sphere(gpu, &mut rng, [e.x, e.y, e.z], e.r, [0.0, -1.0, 0.0]); }
+            let tw = Instant::now();
             runner.step(gpu, &mut sim, dt, &sample_all(t), &par_of(iters, t), desc.col_max, desc.scale);
+            if let Some((at, steps, out)) = &ro.profile {
+                if t >= *at && sim.prof_steps == 0 && prof_wall == 0.0 && !sim.enable_prof(gpu) { return Err("This graphics card cannot time the solver's stages (no timestamps inside compute passes).".into()); }
+                if sim.prof_steps > 0 || t >= *at { let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely()); prof_wall += tw.elapsed().as_secs_f64() * 1000.0; }
+                if sim.prof_steps >= *steps {
+                    let k = sim.prof_steps as f64;
+                    *out.lock().unwrap() = Some(Bench { stages: sim.prof_acc.iter().map(|(n, ms)| (n.clone(), ms / k)).collect(), steps: sim.prof_steps, sub, n: sim.n, wall_ms: prof_wall / k, at: *at });
+                    return Ok(());
+                }
+            }
         }
         let t_sub = tf0.elapsed().as_secs_f32();
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
