@@ -82,6 +82,7 @@ fn group(ui: &mut egui::Ui, j: &mut Value, gi: usize) -> bool {
     if rows.is_empty() && subs.is_empty() { return false; }
     let mut changed = false;
     let h = egui::CollapsingHeader::new(g["title"].as_str().unwrap_or("")).id_salt(("simgroup", gi)).default_open(g["open"].as_bool().unwrap_or(false)).show(ui, |ui| {
+        if g["id"] == "spray" { changed |= looks(ui, j); }
         egui::Grid::new(("simrows", gi)).num_columns(2).spacing([8.0, 3.0]).show(ui, |ui| {
             for r in &rows { changed |= row(ui, j, r); ui.end_row(); }
         });
@@ -89,6 +90,32 @@ fn group(ui: &mut egui::Ui, j: &mut Value, gi: usize) -> bool {
     });
     if let Some(t) = g["tip"].as_str().filter(|t| !t.is_empty()) { h.header_response.on_hover_text(t); }
     changed
+}
+
+/// Whitewater > Look (WW_LOOKS): whole sets of the whitewater settings; any setting changed by hand shows as Custom.
+fn looks(ui: &mut egui::Ui, j: &mut Value) -> bool {
+    let lk = &spec()["looks"];
+    let keys: Vec<&str> = lk["keys"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    let defs = &lk["values"]["impact"];
+    let now = |j: &Value, name: &str| keys.iter().all(|k| {
+        let v = get(j, &["solver", k]).and_then(Value::as_f64).unwrap_or(defs[*k].as_f64().unwrap_or(0.0));
+        (v - lk["values"][name][*k].as_f64().unwrap_or(f64::NAN)).abs() < 1e-6
+    });
+    let mut pick = None;
+    ui.horizontal_wrapped(|ui| {
+        label(ui, "Look", false, lk["tip"].as_str().unwrap_or(""));
+        let mut any = false;
+        for o in lk["order"].as_array().into_iter().flatten() {
+            let (id, name) = (o[0].as_str().unwrap_or(""), o[1].as_str().unwrap_or(""));
+            let on = now(j, id);
+            any |= on;
+            if ui.selectable_label(on, name).clicked() { pick = Some(id.to_owned()); }
+        }
+        ui.add_enabled_ui(false, |ui| { let _ = ui.selectable_label(!any, "Custom"); });
+    });
+    let Some(id) = pick else { return false; };
+    for k in &keys { set(j, &["solver", k], lk["values"][id.as_str()][*k].clone()); }
+    true
 }
 
 /// The Simulation tab: every setting a scene file keeps, grouped as on the page.

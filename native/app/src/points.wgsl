@@ -200,7 +200,9 @@ fn fs_water(i: VOut) -> @location(0) vec4<f32> {
   if (r2 > 1.0) { discard; }
   let sh = 0.78 + 0.22 * (1.0 - r2);
   let t = clamp(i.k.x / cam.a.w, 0.0, 1.0);
-  let col = select(mix(ramp(t), vec3<f32>(0.97, 0.99, 1.0), i.k.y), ramp(t) * 0.82, i.k.z > 2.5);
+  var col = select(mix(ramp(t), vec3<f32>(0.97, 0.99, 1.0), i.k.y), ramp(t) * 0.82, i.k.z > 2.5);
+  // Colour by Type (cam.d.z): water blue, churned water pale blue, deep water dark blue (TYPE_COL in 02-viewport.js)
+  if (cam.d.z > 0.5) { col = select(select(vec3<f32>(0.16, 0.46, 0.96), vec3<f32>(0.55, 0.85, 0.97), i.k.y > 0.3), vec3<f32>(0.07, 0.2, 0.52), i.k.z > 2.5); }
   return vec4<f32>(col * sh, 1.0);
 }
 
@@ -212,10 +214,11 @@ fn fs_ww(i: VOut) -> @location(0) vec4<f32> {
   let edge = 1.0 - smoothstep(0.45, 1.0, r2);
   let life = clamp(i.k.x / 63.0, 0.0, 1.0);
   var c: vec3<f32>; var a: f32;
-  if (i.k.z > 4.5) { c = vec3<f32>(0.74, 0.89, 0.97); a = 0.55; }
-  else if (i.k.z > 3.5) { c = vec3<f32>(0.95, 0.97, 0.99); a = 0.85 * (0.35 + 0.65 * life); }
-  else if (i.k.z > 1.5) { c = vec3<f32>(0.86, 0.9, 0.95); a = 0.22; }
-  else { c = vec3<f32>(0.96, 0.98, 1.0); a = 0.9; }
+  let ty = cam.d.z > 0.5;
+  if (i.k.z > 4.5) { c = select(vec3<f32>(0.74, 0.89, 0.97), vec3<f32>(0.25, 0.85, 0.6), ty); a = 0.55; }
+  else if (i.k.z > 3.5) { c = select(vec3<f32>(0.95, 0.97, 0.99), vec3<f32>(0.98, 0.98, 0.98), ty); a = 0.85 * (0.35 + 0.65 * life); }
+  else if (i.k.z > 1.5) { c = select(vec3<f32>(0.86, 0.9, 0.95), vec3<f32>(0.86, 0.56, 1.0), ty); a = 0.22; }
+  else { c = select(vec3<f32>(0.96, 0.98, 1.0), vec3<f32>(1.0, 0.6, 0.16), ty); a = 0.9; }
   return vec4<f32>(c, a * edge);
 }
 

@@ -116,6 +116,8 @@ struct App {
     splay: bool,
     /// Blender's record button: changing an object keys what changed
     auto_key: bool,
+    /// Bake playback: 0 Full, 1 Smooth (drops the look-only extras while playback falls behind), 2 Fast
+    pb: u8,
     /// a key time picked on the timeline (Delete removes the keys there), and a key mark being dragged (from, to)
     sel_key: Option<f64>,
     key_drag: Option<(f64, f64)>,
@@ -183,7 +185,7 @@ impl App {
         App {
             doc: Doc::default(), tab: Tab::Bake, scene_path: None, dirty: false, sel: None, r: Renderer::new(&rs.device), target: None,
             sel_set: Vec::new(), tool: Tool::Select, tf: None, tf_text: String::new(), scene_view: false, undo: Vec::new(), redo: Vec::new(), stable: None, burst: false,
-            changed_now: false, hover: None, add_at: None, box_from: None, new_menu: false, edit: None, etf: None, orient_local: false, snap_on: false, snap_to: 0, handles: true, face_drag: None, st: 0.0, splay: false, auto_key: false, sel_key: None, key_drag: None, key_del_now: false,
+            changed_now: false, hover: None, add_at: None, box_from: None, new_menu: false, edit: None, etf: None, orient_local: false, snap_on: false, snap_to: 0, handles: true, face_drag: None, st: 0.0, splay: false, auto_key: false, pb: 1, sel_key: None, key_drag: None, key_del_now: false,
             live: false, live_w: Worker::new(ctx.clone()), live_rx: None, live_pending: Vec::new(), live_stale: false, swallow: false,
             cam: Orbit { target: glam::Vec3::new(0.0, 0.7, 0.0), theta: 0.8, phi: 1.0, r: 6.2, ortho: false }, goal: None,
             t: 0.0, playing: false, looping: true, speed: 1.0, look: Look::default(),
@@ -1131,6 +1133,22 @@ impl App {
             ui.checkbox(&mut self.look.deep, "Deep water");
             ui.checkbox(&mut self.look.whitewater, "Whitewater");
             ui.checkbox(&mut self.look.objects, "Objects");
+            ui.horizontal(|ui| {
+                ui.label("Colour by").on_hover_text("Speed: blue to cyan to white as the water speeds up, churned water white. Type: one colour per kind of point: water blue, churned water pale blue, foam white, spray orange, mist lilac, bubbles green, deep water (narrow band) dark blue.");
+                ui.selectable_value(&mut self.look.by_type, false, "Speed");
+                ui.selectable_value(&mut self.look.by_type, true, "Type");
+            });
+            ui.horizontal(|ui| {
+                ui.label("Bake playback").on_hover_text("Full: every look-only extra point. Smooth: drops them while playback cannot keep up. Fast: never draws them (each point once).");
+                for (v, n) in [(0u8, "Full"), (1, "Smooth"), (2, "Fast")] { ui.selectable_value(&mut self.pb, v, n); }
+            });
+            if let Some(s) = self.doc.scene.as_mut().filter(|s| s.json.pointer("/ocean/on") == Some(&serde_json::json!(true))) {
+                let mut ov = s.json.pointer("/solver/oceanView").and_then(Value::as_bool).unwrap_or(true);
+                if ui.checkbox(&mut ov, "Ocean past the walls").on_hover_text("Draws the wave surface around the tank, from the same waves the water feels. Drawing only.").changed() {
+                    s.json["solver"]["oceanView"] = Value::Bool(ov);
+                    self.dirty = true;
+                }
+            }
             ui.checkbox(&mut self.look.skip_buried, "Skip buried water").on_hover_text("Water three cells inside the water cannot be seen; drawing 1 in 16 of it is faster. Same as the page's setting.");
             ui.separator();
             ui.heading("GPU");
@@ -1272,7 +1290,11 @@ impl eframe::App for App {
             let mut enc = rs.device.create_command_encoder(&Default::default());
             // the scene view leaves the bake out of the picture (it stays open)
             let hidden = if self.scene_view && !self.live { self.doc.cache.take() } else { None };
-            self.r.draw(&rs.device, &rs.queue, &mut enc, &t.color.create_view(&Default::default()), size, &self.cam, &self.doc, f, fb, w, &self.look);
+            // what this frame draws with: the time shown, and Bake playback's lighter look when asked for or when playing falls behind
+            let mut lk = self.look;
+            lk.time = if self.doc.cache.is_some() && !self.live && !self.scene_view { (self.t / self.fps() as f64) as f32 } else { self.st as f32 };
+            if self.pb == 2 || (self.pb == 1 && (self.playing || self.splay) && self.frame_ms > 30.0) { lk.detail = 0; lk.spr_detail = lk.spr_detail.min(1); }
+            self.r.draw(&rs.device, &rs.queue, &mut enc, &t.color.create_view(&Default::default()), size, &self.cam, &self.doc, f, fb, w, &lk);
             if hidden.is_some() { self.doc.cache = hidden; }
             rs.queue.submit([enc.finish()]);
             let resp = ui.add(egui::Image::new(egui::load::SizedTexture::new(t.id, avail)).sense(egui::Sense::click_and_drag()));

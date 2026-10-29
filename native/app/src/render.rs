@@ -119,6 +119,10 @@ pub struct Look {
     /// blend the water between frames while playing
     pub blend: bool,
     pub water: bool,
+    /// Colour by Type instead of speed
+    pub by_type: bool,
+    /// the time shown (seconds), for the ocean past the walls
+    pub time: f32,
     pub deep: bool,
     pub whitewater: bool,
     pub objects: bool,
@@ -128,7 +132,7 @@ pub struct Look {
     pub scene_objs: bool,
 }
 impl Default for Look {
-    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None, scene_objs: false } }
+    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None, scene_objs: false, by_type: false, time: 0.0 } }
 }
 
 #[repr(C)]
@@ -311,7 +315,7 @@ impl Renderer {
         let ortho = if cam.ortho { ht / (2.0 * cam.half_h()) } else { 0.0 };
         let base = CamU { view: cam.view().to_cols_array_2d(), proj: cam.proj(wd / ht).to_cols_array_2d(), org: [org[0], org[1], org[2], 0.0],
             vp: [wd, ht, ht / (2.0 * HALF_FOV.tan()), ortho], a: [look.size * d, d, cell, umax], b: [look.foam, vs, 1.0 / fps, w],
-            c: [look.detail as f32, look.spr_detail.min(15) as f32, look.streak, look.skip_buried as u32 as f32], d: [2.0, 1.0, 0.0, 0.0] };
+            c: [look.detail as f32, look.spr_detail.min(15) as f32, look.streak, look.skip_buried as u32 as f32], d: [2.0, 1.0, if look.by_type { 1.0 } else { 0.0 }, 0.0] };
         // copies a point: water 1 + its detail, deep water 5, whitewater 1 + its detail (at most 16 in all)
         let k = [1 + look.detail.min(15), 5, 1 + look.spr_detail.min(15), 1];
         for (i, s) in self.cams.iter().enumerate() { let mut u = base; u.d[1] = k[i] as f32; queue.write_buffer(&s.buf, 0, bytemuck::bytes_of(&u)); }
@@ -440,6 +444,31 @@ fn geometry(doc: &Doc, a: usize, b: usize, w: f32, look: &Look) -> (Vec<Vert>, V
                 let fb = Box3 { x0: b.x0 + g("fx0", 0.0) * w, x1: b.x0 + g("fx1", 1.0) * w, y0: b.y0 + g("y0", 0.0), y1: b.y0 + y1, z0: b.z0 + g("fz0", 0.0) * d, z1: b.z0 + g("fz1", 1.0) * d };
                 edges(&mut lines, &fb, [0.25, 0.6, 1.0, 1.0], 0.0);
             }
+        }
+        // the ocean past the walls (the page's ocean view): the wave surface around the tank, from the same waves the solver uses,
+        // drawn as a grid out to three quarters of the tank's size beyond it (and over the boundary layer at the sides)
+        if let Some(s) = doc.scene.as_ref().filter(|s| s.json.pointer("/ocean/on") == Some(&serde_json::json!(true)) && s.json.pointer("/solver/oceanView") != Some(&serde_json::json!(false))) {
+            let n = |p: &str, d: f64| s.json.pointer(p).and_then(serde_json::Value::as_f64).unwrap_or(d);
+            let sc = n("/solver/scale", 1.0).max(1e-6);
+            let (w, h, d) = ((b.x1 - b.x0) as f64, (b.y1 - b.y0) as f64, (b.z1 - b.z0) as f64);
+            let oc = splash_sim::flip::Ocean { height: n("/ocean/height", 2.0) / sc, length: n("/ocean/length", 30.0) / sc, dir: n("/ocean/dir", 0.0), spread: n("/ocean/spread", 25.0),
+                seed: n("/ocean/seed", 1.0) as i32, level: n("/ocean/level", 0.5) * h, layer: n("/ocean/layer", 0.15) * w.min(d) };
+            let wv = splash_sim::nb::waves(&oc, n("/solver/g", 9.8) / sc, oc.level);
+            let (cx, cz) = ((b.x0 + b.x1) as f64 / 2.0, (b.z0 + b.z1) as f64 / 2.0);
+            let ext = 0.75 * w.max(d);
+            let l = w.max(d) + 2.0 * ext;
+            let res = 72usize;
+            let step = l / (res - 1) as f64;
+            let (ox, oz) = (cx - l / 2.0, cz - l / 2.0);
+            let shown = |x: f64, z: f64| (x - b.x0 as f64).min(b.x1 as f64 - x).min((z - b.z0 as f64).min(b.z1 as f64 - z)) <= 0.5 * oc.layer;
+            let pt = |i: usize, j: usize| { let (x, z) = (ox + i as f64 * step, oz + j as f64 * step); Vec3::new(x as f32, b.y0 + splash_sim::nb::eta(&wv, &oc, x - cx, z - cz, look.time as f64) as f32, z as f32) };
+            let c = [0.2, 0.5, 0.95, 0.7];
+            for j in 0..res { for i in 0..res {
+                let (x, z) = (ox + i as f64 * step, oz + j as f64 * step);
+                if !shown(x, z) { continue; }
+                if i + 1 < res && shown(x + step, z) { line(&mut lines, pt(i, j), pt(i + 1, j), c); }
+                if j + 1 < res && shown(x, z + step) { line(&mut lines, pt(i, j), pt(i, j + 1), c); }
+            } }
         }
         if let Some(lv) = doc.scene.as_ref().and_then(|s| s.ocean_level).filter(|_| doc.cache.is_none()) {
             // the ocean's still level as a grid

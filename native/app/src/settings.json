@@ -1182,6 +1182,174 @@
     "vmaxW"
    ],
    "def": 50
+  },
+  {
+   "group": 14,
+   "kind": "check",
+   "label": "Sort particles",
+   "key": "sortP",
+   "tip": "Reorders particles by position every 16 steps so neighbours sit together in memory. Same result. Clearly faster with a million or more points; about even on small scenes. Costs 32 bytes per point of GPU memory.",
+   "path": [
+    "solver",
+    "sortP"
+   ],
+   "def": true
+  },
+  {
+   "group": 14,
+   "kind": "check",
+   "label": "Fast drops fly free",
+   "key": "ballistic",
+   "tip": "A drop on its own that moves fast leaves the grid and flies by itself (gravity, air, objects, walls) in its own small steps, until it reaches water again. The grid then takes its substeps from the water that is still together, not from the fastest flying drop, so splashes and impacts simulate much faster. Drops in flight move almost exactly as before.",
+   "path": [
+    "solver",
+    "ballistic"
+   ],
+   "def": true
+  },
+  {
+   "group": 14,
+   "kind": "check",
+   "label": "Settled water skips pressure",
+   "key": "settle",
+   "tip": "Water whose pressure from the last step still holds (calm deep water, mostly) is left out of the pressure solve and keeps its pressure; it is checked again every step and joins in when the water there changes. Experimental: an impact needs the pressure of the whole body of water to change at once, but settled water only rejoins cell by cell, so it holds its old pressure and the water squeezes instead of splashing (impacts lose almost all their spray). Saves little time.",
+   "path": [
+    "solver",
+    "settle"
+   ],
+   "def": false
+  },
+  {
+   "group": 14,
+   "kind": "check",
+   "label": "Multigrid pressure",
+   "key": "mg",
+   "tip": "Solves the pressure on coarser and coarser grids as well as the fine one, so it reaches deep water: without it, at fine spacings deep water is left part-solved and gives a little under impacts (then springs back). Uses about a third less work for a pressure many times closer to exact in deep water; about the same in shallow scenes. The water can move differently (splashes out of deep water stand taller).",
+   "path": [
+    "solver",
+    "mg"
+   ],
+   "def": true
+  },
+  {
+   "group": 14,
+   "kind": "check",
+   "label": "Grouped transfer",
+   "key": "p2gWin",
+   "tip": "Particles hand their velocity to the grid, and read it back, through a small patch of the grid kept in fast workgroup memory, instead of each particle going to the grid on its own. Exactly the same result. Needs Sort particles on to help. Whether it is faster depends on the GPU: the Solver benchmark compares both (row G) on this computer.",
+   "path": [
+    "solver",
+    "p2gWin"
+   ],
+   "def": false
   }
- ]
+ ],
+ "looks": {
+  "keys": [
+   "sprAmt",
+   "sprMin",
+   "sprLife",
+   "sprMist",
+   "sprDrag",
+   "mistDrag",
+   "wwCrest",
+   "wwEdge",
+   "wwImpact",
+   "wwLand",
+   "wwTrail",
+   "wwSpin",
+   "wwFoamLife",
+   "wwErode",
+   "wwRise"
+  ],
+  "order": [
+   [
+    "calm",
+    "Calm"
+   ],
+   [
+    "waves",
+    "Breaking waves"
+   ],
+   [
+    "impact",
+    "Impact"
+   ],
+   [
+    "storm",
+    "Storm"
+   ]
+  ],
+  "values": {
+   "calm": {
+    "sprAmt": 0.6,
+    "sprMin": 4,
+    "sprLife": 1,
+    "sprMist": 0.2,
+    "sprDrag": 1,
+    "mistDrag": 5,
+    "wwCrest": 0.6,
+    "wwEdge": 60,
+    "wwImpact": 0.15,
+    "wwLand": 0.5,
+    "wwTrail": 0.3,
+    "wwSpin": 0.3,
+    "wwFoamLife": 5,
+    "wwErode": 0.4,
+    "wwRise": 0.4
+   },
+   "waves": {
+    "sprAmt": 1.5,
+    "sprMin": 3,
+    "sprLife": 1.2,
+    "sprMist": 0.35,
+    "sprDrag": 1,
+    "mistDrag": 5,
+    "wwCrest": 1.5,
+    "wwEdge": 75,
+    "wwImpact": 0.4,
+    "wwLand": 1,
+    "wwTrail": 0.8,
+    "wwSpin": 0.8,
+    "wwFoamLife": 10,
+    "wwErode": 0.25,
+    "wwRise": 0.4
+   },
+   "storm": {
+    "sprAmt": 3,
+    "sprMin": 2,
+    "sprLife": 1.6,
+    "sprMist": 0.5,
+    "sprDrag": 0.8,
+    "mistDrag": 4,
+    "wwCrest": 2,
+    "wwEdge": 85,
+    "wwImpact": 0.6,
+    "wwLand": 1.5,
+    "wwTrail": 2,
+    "wwSpin": 1,
+    "wwFoamLife": 14,
+    "wwErode": 0.2,
+    "wwRise": 0.5
+   },
+   "impact": {
+    "sprAmt": 2,
+    "sprMin": 2.5,
+    "sprLife": 1.2,
+    "sprMist": 0.3,
+    "sprDrag": 1,
+    "mistDrag": 5,
+    "wwCrest": 1,
+    "wwEdge": 70,
+    "wwImpact": 0.25,
+    "wwLand": 1,
+    "wwTrail": 1,
+    "wwSpin": 0.5,
+    "wwFoamLife": 8,
+    "wwErode": 0.25,
+    "wwRise": 0.4
+   }
+  },
+  "tip": "Starting points for the whitewater settings. Pick one, then fine-tune; changing any setting by hand makes it Custom."
+ }
 }

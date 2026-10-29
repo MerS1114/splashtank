@@ -16,6 +16,9 @@ S0.iters = PRE.flip.iters;
 // the keys a scene file saves (sceneData), so only settings that travel with the scene are shown
 const files = fs.readFileSync(path.join(root, 'src/app/13-files.js'), 'utf8');
 const saved = new Set([...files.match(/solver: \{([^}]*)\}/)[1].matchAll(/(\w+): S\.\w+/g)].map((m) => m[1]));
+// the Speed-ups switches are not in the page's scene files; the native program keeps them under solver (the page ignores them there)
+const NATIVE_EXTRA = ['sortP', 'ballistic', 'settle', 'mg', 'p2gWin'];
+for (const k of NATIVE_EXTRA) saved.add(k);
 
 const NB_FULL = Number(state.match(/const NB_FULL = (\d+)/)[1]);
 const body = panels.slice(panels.indexOf('function buildLiveUI'), panels.indexOf('const gd = $(\'#g-disp\')'));
@@ -61,6 +64,15 @@ const skip = new Set(['visc', 'cap', 'dragSpeed']);
 out.rows = out.rows.filter((r) => !skip.has(r.key) && r.label !== 'Iterations').filter((r) => r.key.startsWith('ocean.') || saved.has(r.key.split('.')[0])).map((r) => Object.assign(r, { path: where(r.key), def: defOf(r.key) }));
 // the Enabled box of the narrow band is S.nbOn || S.ocean.on: it is nbOn
 for (const r of out.rows) if (r.key === 'nbOn') r.label = 'Enabled';
+// whitewater looks (WW_LOOKS: Impact is the defaults)
+{
+  const keys = vm.runInNewContext(panels.match(/const WW_KEYS = (\[[^\]]*\]);/)[1]);
+  const looks = {};
+  for (const n of ['calm', 'waves', 'storm']) looks[n] = vm.runInNewContext('(' + panels.match(new RegExp(n + ': (\\{[^}]*\\})'))[1] + ')');
+  looks.impact = Object.fromEntries(keys.map((k) => [k, S0[k]]));
+  out.looks = { keys, order: [['calm', 'Calm'], ['waves', 'Breaking waves'], ['impact', 'Impact'], ['storm', 'Storm']], values: looks,
+    tip: 'Starting points for the whitewater settings. Pick one, then fine-tune; changing any setting by hand makes it Custom.' };
+}
 const text = JSON.stringify(out, null, 1) + '\n';
 if (process.argv.includes('--check')) {
   const lf = (t) => t.split('\r\n').join('\n');
