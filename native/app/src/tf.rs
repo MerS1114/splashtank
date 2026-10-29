@@ -126,6 +126,8 @@ pub struct Tf {
     prev_a: Option<f32>,
     /// started by dragging a gizmo handle: letting go finishes it
     pub from_drag: bool,
+    /// a direction of its own to move along (an extrude moves along the faces' normal) until an axis key is pressed
+    pub nrm: Option<Vec3>,
 }
 
 const AXES: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
@@ -135,7 +137,7 @@ impl Tf {
         let list: Vec<usize> = list.into_iter().filter(|&i| i < objs.len()).collect();
         if list.is_empty() { return None; }
         let pivot = list.iter().map(|&i| pos(&objs[i])).sum::<Vec3>() / list.len() as f32;
-        Some(Tf { kind, orig: list.iter().map(|&i| objs[i].clone()).collect(), list, pivot, axis, plane: false, local: false, num: String::new(), m0, ang: 0.0, prev_a: None, from_drag })
+        Some(Tf { kind, orig: list.iter().map(|&i| objs[i].clone()).collect(), list, pivot, axis, plane: false, local: false, num: String::new(), m0, ang: 0.0, prev_a: None, from_drag, nrm: None })
     }
     /// the object whose own axes Local means: one shape on its own
     fn frame(&self) -> Option<&Value> { (self.orig.len() == 1 && !is_emitter(&self.orig[0])).then(|| &self.orig[0]) }
@@ -144,6 +146,7 @@ impl Tf {
 
     /// X, Y or Z: along that axis; again: the object's own axis; with Shift: the plane across it.
     pub fn key_axis(&mut self, a: usize, shift: bool) {
+        self.nrm = None;
         if shift { self.axis = Some(a); self.plane = true; self.local = false; }
         else if self.axis == Some(a) && !self.plane { self.local = !self.local; }
         else { self.axis = Some(a); self.plane = false; self.local = false; }
@@ -154,7 +157,7 @@ impl Tf {
 
     /// Works out the move from the mouse (or the typed value) and applies it; returns the text for the viewport. snap: Ctrl held.
     pub fn apply(&mut self, objs: &mut [Value], v: &View, m: Pos2, snap: bool) -> String {
-        let ax = self.axis.map(|a| self.axis_dir(a));
+        let ax = self.axis.map(|a| self.axis_dir(a)).or(self.nrm);
         let typed = (!self.num.is_empty()).then(|| self.num.parse::<f32>().ok()).flatten();
         let multi = self.list.len() > 1;
         let axname = match (self.axis, self.plane) { (Some(a), false) => format!(" along {}{}", ["X", "Y", "Z"][a], if self.use_local() { " (own)" } else { "" }), (Some(a), true) => format!(" across {}", ["X", "Y", "Z"][a]), _ => String::new() };

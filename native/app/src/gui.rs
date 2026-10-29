@@ -124,6 +124,9 @@ struct App {
     live_stale: bool,
     /// the click that finished a move is only that (it does not also select)
     swallow: bool,
+    /// edit mode: the shape being edited, and a move of its points going on (the move, the points, the points as tiny objects)
+    edit: Option<crate::editmode::Edit>,
+    etf: Option<(Tf, Vec<usize>, Vec<Value>)>,
     r: Renderer,
     target: Option<Target>,
     cam: Orbit,
@@ -168,7 +171,7 @@ impl App {
         App {
             doc: Doc::default(), tab: Tab::Bake, scene_path: None, dirty: false, sel: None, r: Renderer::new(&rs.device), target: None,
             sel_set: Vec::new(), tool: Tool::Select, tf: None, tf_text: String::new(), scene_view: false, undo: Vec::new(), redo: Vec::new(), stable: None, burst: false,
-            changed_now: false, hover: None, add_at: None, box_from: None, new_menu: false, st: 0.0, splay: false, auto_key: false,
+            changed_now: false, hover: None, add_at: None, box_from: None, new_menu: false, edit: None, etf: None, st: 0.0, splay: false, auto_key: false,
             live: false, live_w: Worker::new(ctx.clone()), live_rx: None, live_pending: Vec::new(), live_stale: false, swallow: false,
             cam: Orbit { target: glam::Vec3::new(0.0, 0.7, 0.0), theta: 0.8, phi: 1.0, r: 6.2, ortho: false }, goal: None,
             t: 0.0, playing: false, looping: true, speed: 1.0, look: Look::default(),
@@ -217,6 +220,7 @@ impl App {
     /// New scene: an empty tank, or one of the page's starting scenes (scenes.json, made by native/tools/export-scenes.js from the page).
     fn new_scene(&mut self, name: &str) {
         self.live_off();
+        self.edit = None; self.etf = None;
         let all = scenes();
         let mut j = if name == "Empty tank" {
             // the page's default tank and settings (Wave tank is built from them) with nothing in it
@@ -262,6 +266,7 @@ impl App {
                 self.scene_path = is_json.then(|| path.to_owned());
                 self.dirty = false;
                 if !same { self.sel = None; self.sel_set.clear(); }
+                self.edit = None; self.etf = None;
                 self.scene_view = false;
                 self.undo.clear(); self.redo.clear(); self.burst = false;
                 self.stable = self.doc.scene.as_ref().map(|s| s.json.clone());
@@ -530,6 +535,7 @@ impl App {
         self.sel = self.sel.filter(|&i| i < n);
         self.dirty = true;
         self.apply_keys();
+        if self.edit.as_ref().is_some_and(|e| e.obj >= n) { self.edit = None; } else if let Some(ed) = self.edit.as_mut() { ed.clear(); }
         self.msg = if redo { "Redone" } else { "Undone" }.into();
     }
 
@@ -545,6 +551,7 @@ impl App {
     }
     fn delete_selected(&mut self) {
         if self.sel_set.is_empty() { return; }
+        self.edit = None;
         let mut del = self.sel_set.clone();
         del.sort_unstable();
         if let Some(v) = self.objs_mut() { for &i in del.iter().rev() { if i < v.len() { v.remove(i); } } }
@@ -577,29 +584,124 @@ impl App {
     /// The scene editing keys (the page's): G move, R rotate, S scale, Shift+A add, Shift+D duplicate, X or Delete delete, A select all
     /// (Alt+A none), Ctrl+Z undo, Ctrl+Shift+Z or Ctrl+Y redo. While moving: X Y Z pick an axis (twice: the object's own; with Shift the
     /// plane across it), numbers type an amount, Enter or a click finishes, Esc or a right click puts things back, Ctrl snaps.
-    fn edit_keys(&mut self, ui: &egui::Ui, m: egui::Pos2) {
-        let (ev, mods) = ui.input(|i| (i.events.clone(), i.modifiers));
-        if let Some(t) = self.tf.as_mut() {
-            for e in &ev {
-                match e {
-                    egui::Event::Text(s) => for c in s.chars() {
-                        match c {
-                            'x' | 'y' | 'z' => t.key_axis((c as u8 - b'x') as usize, false),
-                            'X' | 'Y' | 'Z' => t.key_axis((c as u8 - b'X') as usize, true),
-                            '0'..='9' | '.' => t.num.push(c),
-                            ',' => t.num.push('.'),
-                            '-' => { if t.num.starts_with('-') { t.num.remove(0); } else { t.num.insert(0, '-'); } }
-                            _ => {}
-                        }
-                    },
-                    egui::Event::Key { key: egui::Key::Backspace, pressed: true, .. } => { t.num.pop(); }
-                    _ => {}
-                }
+    /// While moving: X Y Z, numbers, Backspace; Some(true) for Enter, Some(false) for Esc.
+    fn modal_keys(t: &mut Tf, ui: &egui::Ui) -> Option<bool> {
+        let ev = ui.input(|i| i.events.clone());
+        for e in &ev {
+            match e {
+                egui::Event::Text(s) => for c in s.chars() {
+                    match c {
+                        'x' | 'y' | 'z' => t.key_axis((c as u8 - b'x') as usize, false),
+                        'X' | 'Y' | 'Z' => t.key_axis((c as u8 - b'X') as usize, true),
+                        '0'..='9' | '.' => t.num.push(c),
+                        ',' => t.num.push('.'),
+                        '-' => { if t.num.starts_with('-') { t.num.remove(0); } else { t.num.insert(0, '-'); } }
+                        _ => {}
+                    }
+                },
+                egui::Event::Key { key: egui::Key::Backspace, pressed: true, .. } => { t.num.pop(); }
+                _ => {}
             }
-            if ui.input(|i| i.key_pressed(egui::Key::Escape)) { self.end_tf(false); }
-            else if ui.input(|i| i.key_pressed(egui::Key::Enter)) { self.end_tf(true); }
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) { Some(false) } else if ui.input(|i| i.key_pressed(egui::Key::Enter)) { Some(true) } else { None }
+    }
+
+    // ---------- edit mode ----------
+    fn edit_obj(&self) -> Option<&Value> { self.objs().get(self.edit.as_ref()?.obj) }
+    /// Tab: edit the selected shape, or leave edit mode.
+    fn toggle_edit(&mut self) {
+        if self.edit.is_some() { self.end_etf(true); self.edit = None; self.msg = "Object mode".into(); return; }
+        let Some(i) = self.sel else { self.msg = "Click a shape first, then press Tab to edit it.".into(); return; };
+        let ok = self.objs().get(i).is_some_and(|o| !tf::is_emitter(o) && o["mesh"]["v"].is_array());
+        if !ok { self.msg = "Only shapes have points to edit (a source has none).".into(); return; }
+        self.edit = Some(crate::editmode::Edit::new(i));
+        self.msg = "Edit mode: 1 points, 2 edges, 3 faces. Click or drag a box to select, A all, G R S move, E extrude, I inset, Tab to leave.".into();
+    }
+    fn start_etf(&mut self, kind: Kind, m: egui::Pos2, nrm: Option<glam::Vec3>) {
+        let Some(o) = self.edit_obj() else { return; };
+        let verts = self.edit.as_ref().unwrap().verts(o);
+        if verts.is_empty() { self.msg = "Select some points, edges or faces first.".into(); return; }
+        let pts = crate::editmode::as_objects(o, &verts);
+        let Some(mut t) = Tf::start(kind, &pts, (0..pts.len()).collect(), m, None, false) else { return; };
+        t.nrm = nrm;
+        self.edited();
+        self.etf = Some((t, verts, pts));
+    }
+    fn end_etf(&mut self, keep: bool) {
+        let Some((t, verts, mut pts)) = self.etf.take() else { return; };
+        if !keep {
+            t.cancel(&mut pts);
+            let i = self.edit.as_ref().map(|e| e.obj);
+            if let (Some(i), Some(objs)) = (i, self.objs_mut()) { if let Some(o) = objs.get_mut(i) { crate::editmode::put_back(o, &verts, &pts); } }
+            self.edited();
+        }
+        self.tf_text.clear();
+    }
+    /// E (and I): the selected faces extruded, then moved out along their normal (I: shrunk towards their centre instead).
+    fn extrude(&mut self, m: egui::Pos2, inset: bool) {
+        let Some(ed) = self.edit.as_ref() else { return; };
+        let (i, fs) = (ed.obj, self.edit_obj().map(|o| ed.sel_faces(o)).unwrap_or_default());
+        if fs.is_empty() { self.msg = "Extrude and inset need faces: press 3, click a face, then E or I.".into(); return; }
+        let n = self.objs_mut().and_then(|objs| crate::editmode::extrude(objs.get_mut(i)?, &fs));
+        if let Some(ed) = self.edit.as_mut() { ed.clear(); ed.mode = crate::editmode::Mode::F; ed.f = fs; }
+        self.edited();
+        if inset { self.start_etf(Kind::S, m, None); } else { self.start_etf(Kind::G, m, n); }
+    }
+    fn edit_mode_keys(&mut self, ui: &egui::Ui, m: egui::Pos2) {
+        if let Some((t, _, _)) = self.etf.as_mut() {
+            if let Some(keep) = Self::modal_keys(t, ui) { self.end_etf(keep); }
             return;
         }
+        let mods = ui.input(|i| i.modifiers);
+        let k = |key| ui.input(|i| i.key_pressed(key));
+        if mods.command { if k(egui::Key::Z) { self.undo_redo(mods.shift); } if k(egui::Key::Y) { self.undo_redo(true); } return; }
+        use crate::editmode::Mode;
+        // Tab is edit mode here, not moving the keyboard focus to the next field
+        if k(egui::Key::Tab) { self.toggle_edit(); ui.ctx().memory_mut(|m| m.stop_text_input()); return; }
+        let o = self.edit_obj().cloned().unwrap_or_default();
+        for (key, md) in [(egui::Key::Num1, Mode::V), (egui::Key::Num2, Mode::E), (egui::Key::Num3, Mode::F)] { if k(key) { if let Some(ed) = self.edit.as_mut() { ed.set_mode(&o, md); } } }
+        if k(egui::Key::G) { self.start_etf(Kind::G, m, None); }
+        else if k(egui::Key::R) { self.start_etf(Kind::R, m, None); }
+        else if k(egui::Key::S) { self.start_etf(Kind::S, m, None); }
+        else if k(egui::Key::E) { self.extrude(m, false); }
+        else if k(egui::Key::I) { self.extrude(m, true); }
+        else if k(egui::Key::A) { if let Some(ed) = self.edit.as_mut() { if mods.alt { ed.clear(); } else { ed.all(&o); } } }
+        else if k(egui::Key::X) || k(egui::Key::Delete) { self.msg = "Points and faces cannot be deleted because the collider has to stay closed. Move or scale them instead.".into(); }
+    }
+    /// The viewport in edit mode; returns whether the mouse orbits.
+    #[allow(clippy::too_many_arguments)]
+    fn edit_view(&mut self, ui: &egui::Ui, resp: &egui::Response, view: &tf::View, m: egui::Pos2, sh: bool, ct: bool, alt: bool) -> bool {
+        let i = self.edit.as_ref().unwrap().obj;
+        if let Some((mut t, verts, mut pts)) = self.etf.take() {
+            self.tf_text = t.apply(&mut pts, view, m, ct);
+            if let Some(o) = self.objs_mut().and_then(|v| v.get_mut(i)) { crate::editmode::put_back(o, &verts, &pts); }
+            self.etf = Some((t, verts, pts));
+            self.edited();
+            let (pressed, right) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.secondary_pressed()));
+            if right { self.end_etf(false); self.swallow = true; } else if pressed { self.end_etf(true); self.swallow = true; }
+            ui.ctx().request_repaint();
+            return false;
+        }
+        let o = self.objs().get(i).cloned().unwrap_or_default();
+        let press = ui.input(|i| i.pointer.press_origin());
+        if resp.drag_started_by(egui::PointerButton::Primary) && !alt { self.box_from = Some(press.unwrap_or(m)); }
+        if let Some(b) = self.box_from {
+            let r = egui::Rect::from_two_pos(b, m);
+            ui.painter().rect(r, 0.0, egui::Color32::from_rgba_unmultiplied(120, 160, 230, 25), egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 160, 230)), egui::StrokeKind::Inside);
+            if resp.drag_stopped() { if let Some(ed) = self.edit.as_mut() { ed.boxed(&o, view, r, sh); } self.box_from = None; }
+        }
+        if resp.clicked() && !self.swallow { if let Some(ed) = self.edit.as_mut() { ed.click(&o, view, m, sh); } }
+        resp.dragged_by(egui::PointerButton::Secondary) || resp.dragged_by(egui::PointerButton::Middle) || (alt && resp.dragged_by(egui::PointerButton::Primary))
+    }
+
+    fn edit_keys(&mut self, ui: &egui::Ui, m: egui::Pos2) {
+        if self.edit.is_some() { self.edit_mode_keys(ui, m); return; }
+        let mods = ui.input(|i| i.modifiers);
+        if let Some(t) = self.tf.as_mut() {
+            if let Some(keep) = Self::modal_keys(t, ui) { self.end_tf(keep); }
+            return;
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Tab)) && !mods.shift { self.toggle_edit(); ui.ctx().memory_mut(|m| m.stop_text_input()); return; }
         let k = |key| ui.input(|i| i.key_pressed(key));
         if mods.command {
             if k(egui::Key::Z) { self.undo_redo(mods.shift); }
@@ -716,7 +818,18 @@ impl App {
                     if ui.selectable_label(self.scene_view, "Scene").on_hover_text("Show the scene to edit its objects (the bake stays open)").clicked() { self.scene_view = true; }
                     ui.separator();
                 }
-                if self.editing() {
+                if self.edit.is_some() {
+                    ui.label(egui::RichText::new("Edit mode").strong());
+                    let o = self.edit_obj().cloned().unwrap_or_default();
+                    use crate::editmode::Mode;
+                    for (md, name, tip) in [(Mode::V, "Points", "1"), (Mode::E, "Edges", "2"), (Mode::F, "Faces", "3")] {
+                        let on = self.edit.as_ref().is_some_and(|e| e.mode == md);
+                        if ui.selectable_label(on, name).on_hover_text(tip).clicked() { if let Some(ed) = self.edit.as_mut() { ed.set_mode(&o, md); } }
+                    }
+                    if ui.button("Extrude").on_hover_text("E: the selected faces pulled out along their normal").clicked() { self.extrude(rect.center(), false); }
+                    if ui.button("Inset").on_hover_text("I: a smaller copy of the selected faces inside them").clicked() { self.extrude(rect.center(), true); }
+                    if ui.button("Done").on_hover_text("Leave edit mode (Tab)").clicked() { self.toggle_edit(); }
+                } else if self.editing() {
                     for (t, name, tip) in [(Tool::Select, "Select", "Click to select, drag for a box. G, R, S move, turn and scale."), (Tool::Move, "Move", "Arrows move along an axis, the ball moves freely."),
                         (Tool::Rotate, "Rotate", "Rings turn about an axis."), (Tool::Scale, "Scale", "Cubes scale along an axis."), (Tool::Transform, "Transform", "All the handles.")] {
                         if ui.selectable_label(self.tool == t, name).on_hover_text(tip).clicked() { self.tool = t; }
@@ -905,7 +1018,7 @@ impl eframe::App for App {
                     if right { self.splay = false; let d = self.scene_dur(); self.set_time(if shift { d } else { self.st + f }); }
                     if up { if let Some(t) = self.key_times().into_iter().find(|&t| t > self.st + 1e-6) { self.splay = false; self.set_time(t); } }
                     if down { if let Some(t) = self.key_times().into_iter().rev().find(|&t| t < self.st - 1e-6) { self.splay = false; self.set_time(t); } }
-                    if ki && !ctrl { self.key_selected(alt); }
+                    if ki && !ctrl && self.edit.is_none() { self.key_selected(alt); }
                 }
             } else {
             if space && n > 0 { self.bake.follow = false; self.playing = !self.playing; }
@@ -915,8 +1028,8 @@ impl eframe::App for App {
             }
             if home { self.frame_all(); }
             if kf { if self.editing() { self.focus_selected(); } else { self.frame_all(); } }
-            // while moving, number keys type an amount instead
-            if self.tf.is_none() {
+            // while moving, number keys type an amount instead; in edit mode 1 2 3 pick points, edges, faces
+            if self.tf.is_none() && self.etf.is_none() && self.edit.is_none() {
                 if k1 { self.snap_view(if ctrl { "back" } else { "front" }); }
                 if k3 { self.snap_view(if ctrl { "left" } else { "right" }); }
                 if k7 { self.snap_view(if ctrl { "bottom" } else { "top" }); }
@@ -1013,7 +1126,10 @@ impl eframe::App for App {
             let view = tf::View::new(&self.cam, rect);
             if editing && !typing && self.add_at.is_none() && (resp.hovered() || self.tf.is_some()) { self.edit_keys(ui, m); }
             let mut orbiting = !editing;
-            if editing {
+            if editing && self.edit.is_some() {
+                orbiting = self.edit_view(ui, &resp, &view, m, sh, ct, alt);
+                if let (Some(ed), Some(o)) = (&self.edit, self.edit_obj()) { ed.draw(&ui.painter().with_clip_rect(rect), o, &view); }
+            } else if editing {
                 if let Some(mut t) = self.tf.take() {
                     // moving: follow the mouse; a click (or letting go of a handle) finishes, a right click puts things back
                     if let Some(o) = self.objs_mut() { self.tf_text = t.apply(o, &view, m, ct); }
