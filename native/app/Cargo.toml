@@ -1,0 +1,15 @@
+[package]
+name = "splashtank"
+version = "0.1.0"
+edition = "2021"
+description = "SplashTank native: plays bake caches and opens scene files made by the web page"
+
+[dependencies]
+splash-format = { path = "../format" }
+eframe = { version = "0.37", default-features = false, features = ["wgpu", "default_fonts"] }
+rfd = "0.17"
+glam = "0.34"
+bytemuck = { version = "1", features = ["derive"] }
+serde_json = "1"
+png = "0.18.1"
+pollster = "1.0.1"
