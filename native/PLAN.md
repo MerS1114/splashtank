@@ -10,7 +10,7 @@ In the browser a dense bake is held in memory (about 28 MB a frame for a 6M poin
 
 - Rust with wgpu. wgpu is the library Firefox uses for WebGPU, so it runs the same WGSL compute shaders the page already uses (`src/flip/wgsl-*.js`), on DX12, Vulkan or Metal. The solver is ported, not rewritten.
 - egui for the interface (panels, buttons, timeline), winit for the window.
-- Built with the GNU toolchain, so no Visual Studio is needed. The result is one .exe that needs no installer.
+- Built with Rust's MSVC toolchain and the Visual Studio Build Tools (the GNU toolchain's dlltool cannot build the Windows crates without a full MinGW). The result is one .exe that needs no installer.
 - The old `native/splash.cpp` (a CPU baker for an older format) stays where it is; nothing here depends on it.
 
 ## Layout
@@ -18,9 +18,10 @@ In the browser a dense bake is held in memory (about 28 MB a frame for a 6M poin
 All under `native/`, a Cargo workspace:
 
 - `format/` (library): scene files and cache files. Reads and writes the same SPLC version 2 layout as `writeCacheParts` / `parseCache2` in `src/shared.js`, including compact frames (flag 8), per-frame boxes (flag 32), whitewater (flag 2), deep water (flag 4) and Bake whitewater frames (flag 16). Scene files are kept as JSON values, so fields the native side does not know survive a load and save.
-- `app/` (the program): window, viewer, playback, later the bake controls.
-- Later `sim/` (library): the FLIP solver on wgpu, and a headless baker (`splashtank bake scene.json out.splc`) that needs no window.
-- `tools/export-wgsl.js`: a Node script that loads `src/flip/wgsl-*.js` and writes the joined shader text (`flipWGSL()`) to `native/sim/shaders/`. The page's files stay the one source of the shaders; a check fails the native build when the export is out of date.
+- `app/` (the program): window, viewer, playback, the command-line modes (`--info`, `--picture`, `--bake`), later the bake controls.
+- `sim/` (library): the FLIP solver on wgpu (`gpu.rs` pipelines, `flip.rs` FlipSim, `runner.rs` SceneRunner, `scene.rs` bake settings from a scene file, `sdf.rs` collision shapes, `bake.rs` the streaming bake).
+- `tools/export-wgsl.js`: a Node script that loads `src/flip/wgsl-*.js` and writes the joined shader text (`flipWGSL()`) and the binding table (`FLIP_L`) to `native/sim/shaders/`. The page's files stay the one source of the shaders; a test fails when the export is out of date. wgpu's shader compiler needs two patches, made when loading: no `enable subgroups;` line, and `subgroupElect()` written with `subgroupBroadcastFirst`.
+- `tools/compare.js` with the page test `tests/native-compare.js`: the same scene baked by both, frame by frame.
 
 ## Sharing the file formats
 
@@ -38,7 +39,7 @@ Reading a cache:
 
 Writing a cache during a bake:
 
-- Each finished frame is copied from the GPU to a few reusable staging buffers, packed, and handed to a writer thread that appends it to the file. Only a few frames are ever in memory.
+- Each finished frame is read back from the GPU and handed to a packer thread (measurements, compact positions, buried water) and then a writer thread that appends it to the file, while the GPU runs the next frame. At most two frames wait at each, so only a few frames are ever in memory.
 - The JSON block at the start holds per-frame measurements that grow during the bake. Space is reserved for it and padded with spaces (JSON allows trailing spaces, and the page's reader accepts them); if it outgrows the space, the file is rewritten once at the end.
 - The frame count is written as "as many as there are" while baking and corrected at the end. The page's reader already stops at the end of the file, so a bake cut short by a crash still opens, with every frame that was finished.
 
@@ -50,9 +51,9 @@ GPU limits:
 
 ## Phases
 
-1. Viewer (this session). Opens a page-made .splc and plays it: water, deep water and whitewater points coloured by speed, the tank box, the scene's objects posed from each frame, orbit camera, play, pause, frame stepping and scrubbing. Opens a page-made scene .json and shows its tank, objects and starting water. Done when Mer's 418 MB, 4M point, 18 frame cache and her scene play on this PC.
-2. Solver port, core FLIP: shader export, wgpu device with full limits, the FlipSim buffers, binding table and stages from `src/flip/sim.js`, the parameter block, colliders (buildSDF ported to Rust), keyframes and SceneRunner. Headless bakes that stream to disk. Checked against the page with the same measures the tests use (water volume, mean height, the crown and dam break numbers), since two different GPU APIs will not give bit-identical results.
-3. The rest of the solver: narrow band and ocean (nbSeed and the waves; these are what Mer's big scenes need), multigrid, APIC, whitewater, air field, drips, Bake whitewater and the Detail pass.
+1. Viewer (done). Opens a page-made .splc and plays it: water, deep water and whitewater points coloured by speed, the tank box, the scene's objects posed from each frame, orbit camera, play, pause, frame stepping and scrubbing. Opens a page-made scene .json and shows its tank, objects and starting water. Done when Mer's 418 MB, 4M point, 18 frame cache and her scene play on this PC.
+2. Solver port, core FLIP (done): shader export, wgpu device with full limits, the FlipSim buffers, binding table and stages from `src/flip/sim.js`, the parameter block, colliders (buildSDF ported to Rust), keyframes and SceneRunner. Headless bakes that stream to disk. Checked against the page with the same measures (bakeDiag per frame), since two different GPU APIs will not give bit-identical results. Results: a dam break with a keyframed ball, 312k and 2.5M particles, matched the page frame by frame (water centre within 0.006-0.011 units, height spread within 2%, same substeps); the 3 s, 2.5M particle bake took 28.7 s natively against 76.7 s in the page on the same card (37 s before packing ran alongside the GPU), with memory flat at about 0.5 GB while its cache file grew to 1.1 GB. The scene file has no live spacing, so `--bake` takes `--spacing`.
+3. The rest of the solver: narrow band and ocean (nbSeed and the waves; these are what Mer's big scenes need), whitewater, air field, drips, deep water look points, Bake whitewater and the Detail pass. (Multigrid, APIC, separation, fast drops and Accurate mode came with phase 2.)
 4. Big-scene work: point caps from the GPU's limits, split particle buffers if a scene needs them, bakes that resume after a crash, playback of bakes bigger than video memory.
 Throughout: the native program should look and handle like the page (Mer asked after trying phase 1): the same mouse and key controls in the viewport, the same water, deep water and whitewater look (blending between frames, look-only extras, Surface drawing), the same panel layout and Blender-style theme. Pictures from `--picture` are compared against the page's test screenshots.
 
@@ -60,6 +61,5 @@ Throughout: the native program should look and handle like the page (Mer asked a
 
 ## Things to know
 
-- At work Mer cannot install software. The .exe needs no installer, but the work computer's rules may still block programs downloaded from the internet. The web page stays the tool there.
-- Both of Mer's GPUs are supported by wgpu: the Intel UHD 730 through DX12 or Vulkan, the home NVIDIA card (RTX 3060 Ti, 8 GB) through Vulkan or DX12. Speed numbers from one card describe that card only.
+- Built and tuned for Mer's home PC only (NVIDIA RTX 3060 Ti, 8 GB, Vulkan), Mer's call: it is not meant for the work computer, where the web page stays the tool. Use what this card offers (subgroups, 2 GB storage bindings, the 9-buffer APIC kernel) without fallbacks for smaller GPUs.
 - Native work lives on its own branch (`native/desktop-app`), not on the testing page's branch or main. The branch name does not start with `claude/`, so pushing it does not replace the testing page.

@@ -1,0 +1,13 @@
+[package]
+name = "splash-sim"
+version = "0.1.0"
+edition = "2021"
+description = "SplashTank's FLIP solver on wgpu, running the page's own WGSL shaders"
+
+[dependencies]
+splash-format = { path = "../format" }
+wgpu = "30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+serde_json = "1"
+rayon = "1"

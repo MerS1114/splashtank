@@ -329,11 +329,11 @@ fn geometry(doc: &Doc, f: usize, look: &Look) -> (Vec<Vert>, Vec<Vert>) {
         let w: Vec<Vec3> = m.v.iter().map(|v| pos + r * (Vec3::from(*v) * s)).collect();
         if o.water {
             let c = [0.25, 0.6, 1.0, 1.0];
-            for t in &m.f { for k in 0..3 { line(&mut lines, w[t[k] as usize], w[t[(k + 1) % 3] as usize], c); } }
+            for f in &m.f { for k in 0..f.len() { line(&mut lines, w[f[k] as usize], w[f[(k + 1) % f.len()] as usize], c); } }
             continue;
         }
         let c = [0.78, 0.74, 0.68, 1.0];
-        for t in &m.f {
+        for t in &m.tris() {
             let (a, b, cc) = (w[t[0] as usize], w[t[1] as usize], w[t[2] as usize]);
             let n: [f32; 3] = (b - a).cross(cc - a).normalize_or_zero().into();
             for p in [a, b, cc] { tris.push(Vert { p: p.into(), n, c }); }

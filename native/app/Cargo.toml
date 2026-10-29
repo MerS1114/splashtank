@@ -6,6 +6,7 @@ description = "SplashTank native: plays bake caches and opens scene files made b
 
 [dependencies]
 splash-format = { path = "../format" }
+splash-sim = { path = "../sim" }
 eframe = { version = "0.37", default-features = false, features = ["wgpu", "default_fonts"] }
 rfd = "0.17"
 glam = "0.34"

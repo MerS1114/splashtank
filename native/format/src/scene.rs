@@ -8,7 +8,17 @@ use std::path::Path;
 #[derive(Clone, Debug)]
 pub struct Mesh {
     pub v: Vec<[f32; 3]>,
-    pub f: Vec<[u32; 3]>,
+    /// faces: three or more corners (cubes and cylinders have quads and caps)
+    pub f: Vec<Vec<u32>>,
+}
+
+impl Mesh {
+    /// Triangles, fanned out from each face's first corner (meshTris in shared.js).
+    pub fn tris(&self) -> Vec<[u32; 3]> {
+        let mut t = Vec::new();
+        for f in &self.f { for k in 1..f.len().saturating_sub(1) { t.push([f[0], f[k], f[k + 1]]); } }
+        t
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -78,9 +88,8 @@ fn obj(o: &Value) -> Obj {
             Some([a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32, a.get(2)?.as_f64()? as f32])
         }).collect::<Vec<_>>();
         let f = m.get("f")?.as_array()?.iter().filter_map(|t| {
-            let a = t.as_array()?;
-            Some([a.first()?.as_u64()? as u32, a.get(1)?.as_u64()? as u32, a.get(2)?.as_u64()? as u32])
-        }).filter(|t| t.iter().all(|&k| (k as usize) < v.len())).collect::<Vec<_>>();
+            t.as_array()?.iter().map(|k| k.as_u64().map(|k| k as u32)).collect::<Option<Vec<u32>>>()
+        }).filter(|t| t.len() >= 3 && t.iter().all(|&k| (k as usize) < v.len())).collect::<Vec<_>>();
         Some(Mesh { v, f })
     });
     Obj {

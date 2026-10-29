@@ -3,9 +3,12 @@
 //!   splashtank [file.splc | scene.json ...]                    the window
 //!   splashtank --info file.splc                                what a cache holds, frame by frame
 //!   splashtank --picture out.png file [--frame n] [--size WxH] draws one frame without a window
+//!   splashtank --bake in.json|in.splc out.splc [--spacing 0.04] [--seconds s] [--detail 1|1.5|2] [--max-points n] [--accurate]
+//!       bakes without a window, streaming frames to out.splc. From a page cache: its scene and settings, baked again natively.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod bake_cli;
 mod gpu;
 mod gui;
 mod render;
@@ -49,9 +52,25 @@ fn info(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The release build is a window program; the command-line modes print to the terminal they were started from.
+#[cfg(windows)]
+fn attach_console() {
+    #[link(name = "kernel32")]
+    extern "system" { fn AttachConsole(pid: u32) -> i32; }
+    // SAFETY: plain Win32 call; ATTACH_PARENT_PROCESS = -1. Failing (no parent console) only means nothing is printed.
+    unsafe { AttachConsole(u32::MAX); }
+}
+#[cfg(not(windows))]
+fn attach_console() {}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
+    if args.iter().any(|a| a.starts_with("--")) { attach_console(); }
+    if args.iter().any(|a| a == "--bake") {
+        if let Err(e) = bake_cli::run(&args) { eprintln!("{e}"); std::process::exit(1); }
+        return;
+    }
     if let Some(p) = flag("--info") {
         if let Err(e) = info(Path::new(&p)) { eprintln!("{e}"); std::process::exit(1); }
         return;
