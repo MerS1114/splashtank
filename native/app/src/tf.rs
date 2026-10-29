@@ -342,7 +342,7 @@ pub fn draw_gizmo(painter: &egui::Painter, g: &Giz, v: &View, tool: Tool, hover:
 
 // ---------- adding objects ----------
 
-fn mesh_cube(hx: f64, hy: f64, hz: f64) -> Value {
+pub fn mesh_cube(hx: f64, hy: f64, hz: f64) -> Value {
     let mut v = Vec::new();
     for z in [-1.0, 1.0] { for y in [-1.0, 1.0] { for x in [-1.0, 1.0] { v.push(json!([x * hx, y * hy, z * hz])); } } }
     json!({ "v": v, "f": [[0, 4, 6, 2], [1, 3, 7, 5], [0, 1, 5, 4], [2, 6, 7, 3], [0, 2, 3, 1], [4, 5, 7, 6]] })

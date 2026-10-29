@@ -127,6 +127,26 @@ pub fn tank(ui: &mut egui::Ui, j: &mut Value) -> bool {
         set(j, &["box", "size"], json!({ "w": f[1] - f[0], "h": f[3] - f[2], "d": f[5] - f[4] }));
     }
     ui.label(format!("The tank is {:.2} x {:.2} x {:.2}.", f[1] - f[0], f[3] - f[2], f[5] - f[4]));
+    // the page's Fill tank: a water box across the whole tank up to a height
+    ui.horizontal(|ui| {
+        let id = ui.make_persistent_id("fillh");
+        let mut fh: f64 = ui.data_mut(|d| *d.get_temp_mut_or(id, (f[3] - f[2]).min(1.0 / 0.4) * 0.4));
+        ui.label("Fill tank").on_hover_text("Adds a water volume across the whole tank, up to this height above the floor.");
+        ui.add(egui::DragValue::new(&mut fh).range(0.05..=(f[3] - f[2])).speed(0.01).max_decimals(2));
+        ui.data_mut(|d| d.insert_temp(id, fh));
+        if ui.button("to height").clicked() {
+            let objs = j["objs"].as_array().cloned().unwrap_or_default();
+            let id = objs.iter().filter_map(|o| o["id"].as_u64()).max().unwrap_or(0) + 1;
+            let (hx, hy, hz) = ((f[1] - f[0]) / 2.0 - 0.02, fh / 2.0, (f[5] - f[4]) / 2.0 - 0.02);
+            let (x, y, z) = ((f[0] + f[1]) / 2.0, f[2] + fh / 2.0, (f[4] + f[5]) / 2.0);
+            let mut o = crate::tf::new_object(j, "cube", true);
+            o["id"] = json!(id); o["name"] = json!("Tank water");
+            for (k, v) in [("x", x), ("y", y), ("z", z), ("px", x), ("py", y), ("pz", z), ("hx", hx), ("hy", hy), ("hz", hz)] { o[k] = json!(v); }
+            o["mesh"] = crate::tf::mesh_cube(hx, hy, hz);
+            if let Some(a) = j["objs"].as_array_mut() { a.push(o); }
+            changed = true;
+        }
+    });
     let area = [(1.0, "Tank only"), (1.5, "1.5 x tank"), (2.0, "2 x tank"), (3.0, "3 x tank"), (4.0, "4 x tank")];
     for (key, name, tip) in [("wwArea", "Whitewater area", "Spray, mist and foam may fly on past the tank walls, up to this many times the tank's width and depth (the dashed box). The water itself stays in the tank."),
                              ("wwAreaUp", "Spray height", "How high spray may fly above the tank floor, in tank heights.")] {
@@ -220,6 +240,19 @@ mod tests {
         let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tools/export-settings.js");
         let Ok(out) = std::process::Command::new("node").arg(&script).arg("--check").output() else { eprintln!("node not found, skipped"); return; };
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// Every starting scene from the page opens, and the native solver can bake it.
+    #[test]
+    fn starting_scenes_open() {
+        let all: serde_json::Value = serde_json::from_str(include_str!("scenes.json")).unwrap();
+        let names = all["order"].as_array().unwrap();
+        assert!(names.len() >= 6);
+        for n in names {
+            let j = all["scenes"][n.as_str().unwrap()].clone();
+            splash_format::Scene::from_json(j.clone()).unwrap_or_else(|e| panic!("{n}: {e}"));
+            splash_sim::scene::desc_from_scene(&j, &Default::default()).unwrap_or_else(|e| panic!("{n}: {e}"));
+        }
     }
 
     /// Editing a value writes it where the page reads it, and leaves the rest of the file alone.

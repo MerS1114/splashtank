@@ -49,6 +49,12 @@ fn title() -> String {
     }
 }
 
+/// The page's starting scenes, as scene files (scenes.json, made by native/tools/export-scenes.js from the page).
+fn scenes() -> &'static Value {
+    static S: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    S.get_or_init(|| serde_json::from_str(include_str!("scenes.json")).expect("scenes.json"))
+}
+
 /// The page's Blender-style dark theme (the colours in src/head.html).
 fn theme(ctx: &egui::Context) {
     let hex = |v: u32| egui::Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8);
@@ -103,6 +109,8 @@ struct App {
     hover: Option<tf::Part>,
     add_at: Option<egui::Pos2>,
     box_from: Option<egui::Pos2>,
+    /// the New scene menu is open
+    new_menu: bool,
     /// the click that finished a move is only that (it does not also select)
     swallow: bool,
     r: Renderer,
@@ -149,7 +157,7 @@ impl App {
         App {
             doc: Doc::default(), tab: Tab::Bake, scene_path: None, dirty: false, sel: None, r: Renderer::new(&rs.device), target: None,
             sel_set: Vec::new(), tool: Tool::Select, tf: None, tf_text: String::new(), scene_view: false, undo: Vec::new(), redo: Vec::new(), stable: None, burst: false,
-            changed_now: false, hover: None, add_at: None, box_from: None, swallow: false,
+            changed_now: false, hover: None, add_at: None, box_from: None, new_menu: false, swallow: false,
             cam: Orbit { target: glam::Vec3::new(0.0, 0.7, 0.0), theta: 0.8, phi: 1.0, r: 6.2, ortho: false }, goal: None,
             t: 0.0, playing: false, looping: true, speed: 1.0, look: Look::default(),
             msg: "Open a bake cache (.splc) or a scene file (.json), or drop one on the window.".into(),
@@ -176,7 +184,7 @@ impl App {
         };
         let Some(p) = path else { return; };
         match s.save(&p) {
-            Ok(()) => { self.msg = format!("Saved the scene as {}", p.display()); self.scene_path = Some(p); self.dirty = false; }
+            Ok(()) => { self.msg = format!("Saved the scene as {}", p.display()); self.bake.saved_as(&p); self.scene_path = Some(p); self.dirty = false; }
             Err(e) => self.msg = format!("Could not save {}: {e}", p.display()),
         }
     }
@@ -191,6 +199,36 @@ impl App {
             self.doc.scene = Some(splash_format::Scene::from_json(j).unwrap_or(s));
         }
         self.dirty = true;
+    }
+
+    /// New scene: an empty tank, or one of the page's starting scenes (scenes.json, made by native/tools/export-scenes.js from the page).
+    fn new_scene(&mut self, name: &str) {
+        let all = scenes();
+        let mut j = if name == "Empty tank" {
+            // the page's default tank and settings (Wave tank is built from them) with nothing in it
+            let mut j = all["scenes"]["Wave tank"].clone();
+            j["objs"] = serde_json::json!([]); j["fills"] = serde_json::json!([]); j["events"] = serde_json::json!([]);
+            j
+        } else { all["scenes"][name].clone() };
+        if j.is_null() { return; }
+        j["saved"] = Value::Null;
+        if let Some(o) = j.as_object_mut() { o.remove("saved"); }
+        let Ok(s) = splash_format::Scene::from_json(j.clone()) else { self.msg = format!("Could not make {name}."); return; };
+        self.doc.scene = Some(s);
+        self.doc.cache = None;
+        self.doc.gen += 1;
+        self.path = None;
+        self.scene_path = None;
+        self.dirty = false;
+        self.sel = None; self.sel_set.clear();
+        self.scene_view = false;
+        self.undo.clear(); self.redo.clear(); self.burst = false;
+        self.stable = Some(j.clone());
+        self.t = 0.0; self.playing = false;
+        self.bake.source_scene(name, &j);
+        if let Some(b) = self.doc.tank() { self.cam = Orbit::frame(&b); self.goal = None; }
+        self.tab = Tab::Objects;
+        self.msg = format!("New scene: {name}. Add objects with Shift+A or Add, fill the tank in the Tank tab, and save it with Save scene.");
     }
 
     fn open(&mut self, path: &Path) {
@@ -542,6 +580,22 @@ impl App {
 
     fn top(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            let nb = ui.button("New scene").on_hover_text("Start a new scene: an empty tank, or one of the page's starting scenes");
+            if nb.clicked() { self.new_menu = !self.new_menu; }
+            if self.new_menu {
+                let mut pick = None;
+                let r = egui::Area::new(ui.scope_id().with("newmenu")).fixed_pos(nb.rect.left_bottom() + egui::vec2(0.0, 4.0)).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        if ui.button("Empty tank").clicked() { pick = Some("Empty tank".to_string()); }
+                        ui.separator();
+                        for n in scenes()["order"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                            if ui.button(n).clicked() { pick = Some(n.to_string()); }
+                        }
+                    });
+                });
+                if let Some(n) = pick { self.new_menu = false; if self.may_discard() { self.new_scene(&n); } }
+                else if ui.input(|i| i.pointer.any_pressed()) && !r.response.contains_pointer() && !nb.contains_pointer() { self.new_menu = false; }
+            }
             if ui.button("Open…").on_hover_text("Open a bake cache (.splc) or a scene file (.json) saved by the web page").clicked() && self.may_discard() {
                 if let Some(p) = rfd::FileDialog::new().add_filter("SplashTank files", &["splc", "json"]).add_filter("Bake cache", &["splc"])
                     .add_filter("Scene", &["json"]).pick_file() { self.open(&p); }

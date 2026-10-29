@@ -149,11 +149,22 @@ impl BakeUi {
             }
             self.check_resume(p);
         } else if let Ok(v) = bake_cli::read_json(p) {
-            let bk = &v["bake"];
-            self.seconds = bk["dur"].as_f64().unwrap_or(5.0) as f32;
-            self.quality = bk["detail"].as_f64().unwrap_or(1.0) as f32;
-            self.accurate = bk["accuracy"].as_str() == Some("accurate");
+            self.settings_of(&v);
         }
+    }
+    /// The scene was saved to p: it is now where bakes default to (settings in the panel stay as they are).
+    pub fn saved_as(&mut self, p: &Path) { if self.src.as_ref().is_none_or(|s| !s.extension().is_some_and(|e| e.eq_ignore_ascii_case("splc"))) { self.src = Some(p.to_owned()); } }
+    /// A new scene (not a file yet): its bake settings, and its name for the panel and the default file name.
+    pub fn source_scene(&mut self, name: &str, v: &serde_json::Value) {
+        self.src = Some(PathBuf::from(format!("{name}.json")));
+        self.resumable = None;
+        self.settings_of(v);
+    }
+    fn settings_of(&mut self, v: &serde_json::Value) {
+        let bk = &v["bake"];
+        self.seconds = bk["dur"].as_f64().unwrap_or(5.0) as f32;
+        self.quality = bk["detail"].as_f64().unwrap_or(1.0) as f32;
+        self.accurate = bk["accuracy"].as_str() == Some("accurate");
     }
 
     /// Looks for a checkpoint next to the cache at out (a bake that stopped before its end).
@@ -186,7 +197,9 @@ impl BakeUi {
             ui.label("This cache holds no scene, so it cannot be baked again.");
             return None;
         };
-        ui.label(format!("The scene from {}, as edited here", src.file_name().unwrap_or_default().to_string_lossy()));
+        // a new scene has only a name (no folder) until it is saved
+        if src.parent().is_some_and(|p| p.as_os_str().is_empty()) { ui.label(format!("The new scene {}, as edited here", src.file_stem().unwrap_or_default().to_string_lossy())); }
+        else { ui.label(format!("The scene from {}, as edited here", src.file_name().unwrap_or_default().to_string_lossy())); }
         ui.add_enabled_ui(!busy, |ui| {
             egui::Grid::new("bakeset").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
                 ui.label("Spacing").on_hover_text("The live particle spacing (the page's Simulation > Spacing). The bake's spacing is this divided by Quality.");
