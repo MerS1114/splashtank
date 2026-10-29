@@ -4,6 +4,7 @@
 
 use crate::flip::{layout, FlipSim, Rng, StepPar};
 use crate::gpu::Gpu;
+use crate::{nb, ww};
 use crate::runner::Runner;
 use crate::scene::{obj_speed, sample, Desc, Fill, Obj};
 use crate::sdf;
@@ -24,7 +25,14 @@ pub struct Packed {
     pub spd: Vec<u8>,
     pub fm: Option<Vec<u8>>,
     pub buried: u32,
+    /// whitewater: count, positions (u32 compact or 3 x u16, across the whitewater area), codes
+    pub ww: Option<(u32, Vec<u8>, Vec<u32>)>,
+    /// deep water: count, positions, speeds (u16 compact or u8)
+    pub deep: Option<(u32, Vec<u8>, Vec<u8>)>,
 }
+
+/// A frame's whitewater (16-bit across the whitewater area, codes) and deep water (16-bit across the box, speed bytes) before packing.
+pub struct Extra { pub ww: Option<(usize, Vec<u16>, Vec<u32>)>, pub deep: Option<(usize, Vec<u16>, Vec<u8>)> }
 
 /// Bits per axis for compact frames across box b at spacing d, or None when a step would be over a quarter of the spacing (compactBits).
 pub fn compact_bits(b: &Box3, d: f32) -> Option<[u8; 3]> {
@@ -91,7 +99,7 @@ fn mark_interior(p32: &[u32], sf: &mut [u16], q: [u8; 3], bb: &Box3, d: f32) -> 
 
 /// Particles read back from the sim (x y z, speed + 64 x level in w) to a cache frame: 16-bit positions across the sim box first, as
 /// packFrameBuf does, then compact across the box (q) or across the box around this frame's water (compactFrameBox), buried water marked.
-pub fn pack_frame(buf: &[f32], n: usize, b: &Box3, q: Option<[u8; 3]>, d: f32, vs: f32, objs: Vec<f32>) -> Packed {
+pub fn pack_frame(buf: &[f32], n: usize, b: &Box3, q: Option<[u8; 3]>, d: f32, vs: f32, objs: Vec<f32>, ex: Extra) -> Packed {
     let ks = 16.0 * vs;
     let mut last: i64 = -1;
     for i in 0..n { if buf[i * 4 + 1] > -1e5 { last = i as i64; } }
@@ -113,28 +121,46 @@ pub fn pack_frame(buf: &[f32], n: usize, b: &Box3, q: Option<[u8; 3]>, d: f32, v
         *s = if sp > 191.0 { 191 } else { sp.max(0.0) as u8 };
         if lv > 0.0 { *f = (lv * 17.0) as u8; }
     });
+    pack16(pos, spd, fm, n, b, q, d, objs, ex)
+}
+
+/// A frame already 16-bit across box b (positions, speed bytes with 255 for none, white-water levels times 17) to the cache layout:
+/// compact across b (q), or across the box around this frame's water (compactFrameBox), or left 16-bit; buried water marked at spacing d.
+pub fn pack16(pos: Vec<u16>, spd: Vec<u8>, fm: Vec<u8>, n: usize, b: &Box3, q: Option<[u8; 3]>, d: f32, objs: Vec<f32>, ex: Extra) -> Packed {
+    let e = b.size();
     let any_foam = fm.par_iter().any(|&f| f > 0);
     let to_sf = |spd: &[u8], fm: &[u8]| -> Vec<u16> { spd.par_iter().zip(fm).map(|(&s, &f)| s as u16 | (((f as f32 / 17.0).round() as u16) << 8)).collect() };
+    // whitewater keeps its 16-bit positions across the whitewater area; only the bits change (compactFrame)
+    let ww_c = |q: [u8; 3]| ex.ww.as_ref().map(|(ns, p, pk)| (*ns as u32, bytemuck::cast_slice(&pack_pos32(p, *ns, q)).to_vec(), pk.clone()));
+    let deep_c = |dp: &[u16], nd: usize, ds: &[u8], q: [u8; 3]| {
+        let sf: Vec<u16> = ds.iter().map(|&s| s as u16).collect();
+        (nd as u32, bytemuck::cast_slice(&pack_pos32(dp, nd, q)).to_vec(), bytemuck::cast_slice(&sf).to_vec())
+    };
     if let Some(q) = q {
         let p32 = pack_pos32(&pos, n, q);
         let mut sf = to_sf(&spd, &fm);
         let buried = mark_interior(&p32, &mut sf, q, b, d);
-        return Packed { q: Some(q), own_box: None, objs, n: n as u32, pos: bytemuck::cast_slice(&p32).to_vec(), spd: bytemuck::cast_slice(&sf).to_vec(), fm: None, buried };
+        let deep = ex.deep.as_ref().map(|(nd, dp, ds)| deep_c(dp, *nd, ds, q));
+        return Packed { q: Some(q), own_box: None, objs, n: n as u32, pos: bytemuck::cast_slice(&p32).to_vec(), spd: bytemuck::cast_slice(&sf).to_vec(), fm: None, buried, ww: ww_c(q), deep };
     }
-    // a tank too big for compact frames: the box around this frame's water, re-measured, with its own bits (compactFrameBox)
+    // a tank too big for compact frames: the box around this frame's water and deep water, re-measured, with its own bits (compactFrameBox)
     let (mut lo, mut hi) = ([65535u32; 3], [0u32; 3]);
     for i in 0..n { if spd[i] == 255 { continue; } for c in 0..3 { let v = pos[i * 3 + c] as u32; lo[c] = lo[c].min(v); hi[c] = hi[c].max(v); } }
+    if let Some((nd, dp, ds)) = &ex.deep { for i in 0..*nd { if ds[i] == 255 { continue; } for c in 0..3 { let v = dp[i * 3 + c] as u32; lo[c] = lo[c].min(v); hi[c] = hi[c].max(v); } } }
     for c in 0..3 { if hi[c] < lo[c] { lo[c] = 0; hi[c] = 1; } else { lo[c] = lo[c].saturating_sub(1); hi[c] = 65535.min((hi[c] + 1).max(lo[c] + 1)); } }
     let fb = Box3 { x0: b.x0 + lo[0] as f32 / 65535.0 * e[0], x1: b.x0 + hi[0] as f32 / 65535.0 * e[0], y0: b.y0 + lo[1] as f32 / 65535.0 * e[1],
         y1: b.y0 + hi[1] as f32 / 65535.0 * e[1], z0: b.z0 + lo[2] as f32 / 65535.0 * e[2], z1: b.z0 + hi[2] as f32 / 65535.0 * e[2] };
     if let Some(fq) = compact_bits(&fb, d) {
-        let re: Vec<u16> = pos.iter().enumerate().map(|(i, &v)| { let c = i % 3; (((v as f32 - lo[c] as f32) * 65535.0 / (hi[c] - lo[c]) as f32).round()).clamp(0.0, 65535.0) as u16 }).collect();
-        let p32 = pack_pos32(&re, n, fq);
+        let re = |p: &[u16]| -> Vec<u16> { p.par_iter().enumerate().map(|(i, &v)| { let c = i % 3; (((v as f32 - lo[c] as f32) * 65535.0 / (hi[c] - lo[c]) as f32).round()).clamp(0.0, 65535.0) as u16 }).collect() };
+        let p32 = pack_pos32(&re(&pos), n, fq);
         let mut sf = to_sf(&spd, &fm);
         let buried = mark_interior(&p32, &mut sf, fq, &fb, d);
-        return Packed { q: Some(fq), own_box: Some(fb), objs, n: n as u32, pos: bytemuck::cast_slice(&p32).to_vec(), spd: bytemuck::cast_slice(&sf).to_vec(), fm: None, buried };
+        let deep = ex.deep.as_ref().map(|(nd, dp, ds)| deep_c(&re(dp), *nd, ds, fq));
+        return Packed { q: Some(fq), own_box: Some(fb), objs, n: n as u32, pos: bytemuck::cast_slice(&p32).to_vec(), spd: bytemuck::cast_slice(&sf).to_vec(), fm: None, buried, ww: ww_c(fq), deep };
     }
-    Packed { q: None, own_box: None, objs, n: n as u32, pos: bytemuck::cast_slice(&pos).to_vec(), spd, fm: any_foam.then_some(fm), buried: 0 }
+    let ww = ex.ww.map(|(ns, p, pk)| (ns as u32, bytemuck::cast_slice(&p).to_vec(), pk));
+    let deep = ex.deep.map(|(nd, p, s)| (nd as u32, bytemuck::cast_slice(&p).to_vec(), s));
+    Packed { q: None, own_box: None, objs, n: n as u32, pos: bytemuck::cast_slice(&pos).to_vec(), spd, fm: any_foam.then_some(fm), buried: 0, ww, deep }
 }
 
 /// Per-frame measurements for the bake report, as bakeDiag: where the water is, how fast, how much left or went bad.
@@ -192,6 +218,10 @@ fn poses(states: &[Obj]) -> Vec<f32> {
     states.iter().flat_map(|o| [o.x, o.y, o.z, o.rx, o.yaw, o.rz]).collect()
 }
 
+/// What the GPU handed back besides the water: every whitewater slot used (count, positions with life, velocities with kind) and the
+/// deep water points.
+pub struct Raw { pub spray: Option<(usize, Vec<f32>, Vec<f32>)>, pub deep: Option<Vec<f32>> }
+
 pub struct Progress { pub f: u32, pub frames: u32, pub n: u32, pub elapsed: f32, pub sub: u32, pub frame_ms: f32 }
 
 /// Bakes desc into a cache file at out. progress is told about every frame; returning false stops the bake (the frames so far stay
@@ -199,7 +229,19 @@ pub struct Progress { pub f: u32, pub frames: u32, pub n: u32, pub elapsed: f32,
 pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, mut progress: impl FnMut(&Progress) -> bool) -> Result<(), String> {
     let lay = layout(desc.d, desc.cell_ratio, desc.size);
     let lim = (gpu.device.limits().max_storage_buffer_binding_size as u64 / if desc.apic { 48 } else { 16 }) as u32;
-    let max_n = desc.max_n.min(lim);
+    let mut max_n = desc.max_n.min(lim);
+    // narrow band: the starting band must fit, or the seed stops partway across the tank and the water there drains away. Max points is
+    // raised to the starting water plus room for impacts to refill the band from (up to what one GPU buffer holds)
+    let nb_band = if desc.nb.is_some() || desc.ocean.is_some() { Some(desc.nb.unwrap_or(3.0)) } else { None };
+    let ocean_w = desc.ocean.map(|oc| nb::waves(&oc, desc.g as f64, oc.level - lay.b.y0 as f64)).unwrap_or_default();
+    let oc = desc.ocean.as_ref().map(|c| (c, &ocean_w[..]));
+    let mut need = 0u64;
+    if let Some(band) = nb_band {
+        let s = nb::seed(&lay, &desc.fills, band, oc, 0.0, &mut |_, _| true);
+        need = s.seeded + nb::spares(s.seeded);
+        if need > lim as u64 { return Err(format!("The starting water needs {:.1}M points, more than one GPU buffer holds here ({:.1}M). Use less detail, a coarser spacing or a thinner narrow band.", need as f64 / 1e6, lim as f64 / 1e6)); }
+        if need as f64 * 1.15 > max_n as f64 { max_n = lim.min((need as f64 * 1.3).ceil() as u32); }
+    }
     let mut sim = FlipSim::new(gpu, lay, desc.open, max_n);
     sim.opt.apic = desc.apic; sim.opt.sort = desc.sort; sim.opt.p2g_win = desc.p2g_win; sim.opt.ballistic = desc.ballistic; sim.opt.settle = desc.settle;
     sim.opt.mg = desc.mg; sim.opt.sep = desc.sep;
@@ -207,13 +249,28 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, mut progress: impl FnMut(&Progres
     const ACC_TOL: f32 = 0.001;
     let mut iters = desc.iters;
     if acc { sim.opt.sep_iters = 16; }
+    if desc.spr.is_some() && desc.spray_cap > 0 { sim.set_spray_cap(gpu, desc.spray_cap); }
+    if desc.nb_look { sim.set_deep_look(gpu, true); }
     let mut runner = Runner::new(0x5eed);
     let mut rng = Rng::new(0xf111);
-    for f in &desc.fills {
-        match f {
-            Fill::Box { x0, x1, y0, y1, z0, z1 } => sim.fill_box(gpu, &mut rng, [*x0, *x1, *y0, *y1, *z0, *z1]),
-            Fill::Sphere { x, y, z, r, vy } => sim.fill_sphere(gpu, &mut rng, [*x, *y, *z], *r, [0.0, *vy, 0.0]),
-            Fill::Vol { .. } => fill_volume(gpu, &mut sim, &mut rng, f),
+    if let Some(band) = nb_band {
+        let j = (0.01 * lay.d as f64 / 0.12) as f32;
+        let s = {
+            let sim = &mut sim;
+            let rng = &mut rng;
+            nb::seed(&lay, &desc.fills, band, oc, 0.0, &mut |p, v| sim.add(gpu, [p[0] + (rng.f() - 0.5) * j, p[1] + (rng.f() - 0.5) * j, p[2] + (rng.f() - 0.5) * j], v))
+        };
+        // spare slots, parked off the map, for the solver to refill the band with
+        let spare = ((sim.cap - sim.n) as u64).min(nb::spares(s.seeded));
+        for _ in 0..spare { sim.add(gpu, [0.0, -1e6, 0.0], [0.0; 3]); }
+        sim.nb_fills = s.prims; sim.nb_vols = s.vols; sim.nb_init = 1; sim.nb_band = Some(band); sim.ocean = desc.ocean; sim.ocean_w = ocean_w.clone();
+    } else {
+        for f in &desc.fills {
+            match f {
+                Fill::Box { x0, x1, y0, y1, z0, z1 } => sim.fill_box(gpu, &mut rng, [*x0, *x1, *y0, *y1, *z0, *z1]),
+                Fill::Sphere { x, y, z, r, vy } => sim.fill_sphere(gpu, &mut rng, [*x, *y, *z], *r, [0.0, *vy as f32, 0.0]),
+                Fill::Vol { .. } => fill_volume(gpu, &mut sim, &mut rng, f),
+            }
         }
     }
     let (fps, frames) = (desc.fps, desc.frames);
@@ -229,22 +286,28 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, mut progress: impl FnMut(&Progres
 
     // the cache header: what the page writes (writeCacheParts), with room reserved for the per-frame measurements
     let q = compact_bits(&lay.b, desc.d);
+    // whitewater positions are across the whitewater area
+    let ab = desc.spr.map(|s| crate::flip::ww_area_box(&lay.b, s.area[0], s.area[1])).unwrap_or(lay.b);
+    let sb = if sim.spray_cap > 0 { ab.to_json() } else { Value::Null };
     let mut meta = json!({ "d": desc.d, "fps": fps, "ids": desc.objs.iter().map(|o| o.id).collect::<Vec<_>>(), "b": lay.b.to_json(),
         "org": { "x": desc.org[0], "y": desc.org[1], "z": desc.org[2] }, "maxN": max_n, "seconds": 0, "engine": "flip", "scene": desc.scene, "desc": desc.light,
-        "diag": [], "stableIds": true, "scale": desc.scale, "spdMs": true, "q": q.map(|q| q.to_vec()), "sb": Value::Null });
+        "diag": [], "stableIds": true, "scale": desc.scale, "spdMs": true, "q": q.map(|q| q.to_vec()), "sb": sb });
     let writer = CacheWriter::create(out, &meta, 64 * 1024 + frames as usize * 1200).map_err(|e| format!("Could not write {}: {e}", out.display()))?;
     // Two threads behind the bake: a packer (measurements, compact positions, buried water) and a writer that appends each frame to the
     // file. The GPU runs the next frame's steps meanwhile. At most two frames wait at each, so a slow disk holds the bake back instead of
     // filling memory.
     let (b, d, vs) = (lay.b, desc.d, desc.scale);
     let vmax_w = desc.vmax_w;
-    let (tx, rx) = mpsc::sync_channel::<(Vec<f32>, usize, Vec<f32>, Value)>(2);
+    let foam_life = desc.spr.map_or(3.0, |s| s.foam_life);
+    let (tx, rx) = mpsc::sync_channel::<(Vec<f32>, usize, Vec<f32>, Value, Raw)>(2);
     let (ptx, prx) = mpsc::sync_channel::<(Packed, Value)>(2);
     let pt = std::thread::spawn(move || {
-        for (buf, n, objs, dg) in rx {
+        for (buf, n, objs, dg, raw) in rx {
             let tp = Instant::now();
             let mut m = diag(&buf, n, &b, vmax_w);
-            let p = pack_frame(&buf, n, &b, q, d, vs, objs);
+            let ww = raw.spray.map(|(ns, p, v)| { let (k, pos, pk, alive) = ww::pack_spray_frame(&p, &v, ns, &ab, 200_000, foam_life); m["sprayPoints"] = json!(alive); (k, pos, pk) });
+            let deep = raw.deep.map(|a| { let (k, pos, spd) = ww::pack_deep(&a, a.len() / 4, &b, vs); m["deepPoints"] = json!(k); (k, pos, spd) });
+            let p = pack_frame(&buf, n, &b, q, d, vs, objs, Extra { ww, deep });
             m["buried"] = json!(p.buried);
             if let (Some(o), Value::Object(t)) = (m.as_object_mut(), dg) { for (k, v) in t { o.insert(k, v); } }
             if let Some(t) = m.get_mut("timing") { t["pack"] = json!(tp.elapsed().as_secs_f32() * 1000.0); }
@@ -255,7 +318,8 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, mut progress: impl FnMut(&Progres
         let mut w = writer;
         let mut diags = Vec::new();
         for (p, dg) in prx {
-            w.append(&FrameOut { q: p.q, own_box: p.own_box, ww_baked: false, objs: &p.objs, n: p.n, pos: &p.pos, spd: &p.spd, fm: p.fm.as_deref(), ww: None, deep: None })
+            w.append(&FrameOut { q: p.q, own_box: p.own_box, ww_baked: false, objs: &p.objs, n: p.n, pos: &p.pos, spd: &p.spd, fm: p.fm.as_deref(),
+                ww: p.ww.as_ref().map(|(n, pos, pk)| (*n, &pos[..], &pk[..])), deep: p.deep.as_ref().map(|(n, pos, s)| (*n, &pos[..], &s[..])) })
                 .map_err(|e| format!("Writing the cache failed: {e}"))?;
             diags.push(dg);
         }
@@ -266,7 +330,10 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, mut progress: impl FnMut(&Progres
     if sim.n > 0 { sim.prime(gpu, desc.g); }
     let mut buf = Vec::new();
     let mut n = sim.readback(gpu, &mut buf);
-    let _ = tx.send((std::mem::take(&mut buf), n as usize, poses(&sample_all(0.0)), json!({ "f": 0, "n": n, "sub": 0, "blockPool": sim.scap, "pointCap": max_n })));
+    let _ = tx.send((std::mem::take(&mut buf), n as usize, poses(&sample_all(0.0)), json!({ "f": 0, "n": n, "sub": 0, "blockPool": sim.scap, "pointCap": max_n, "startNeed": need }),
+        Raw { spray: None, deep: None }));
+    let par_of = |iters: u32, t: f32| StepPar { g: desc.g, iters, flip: desc.flip, apic_flip: desc.apic_flip, comp: desc.comp, vmax: desc.vmax_w, vs: desc.scale, tear: desc.tear, time: t,
+        wind: desc.wind, drag: desc.drag, gust: desc.gust, foam_sens: desc.foam_sens, foam_tau: desc.foam_tau, spr: desc.spr, air: desc.air, drip: desc.drip };
     let mut stopped = !progress(&Progress { f: 0, frames, n, elapsed: 0.0, sub: 0, frame_ms: 0.0 });
     let mut f = 1;
     while f <= frames && !stopped {
@@ -278,13 +345,13 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, mut progress: impl FnMut(&Progres
         for s in 0..sub {
             let t = (f - 1) as f32 * dtf + (s + 1) as f32 * dt;
             while ei < ev.len() && ev[ei].t <= t { let e = ev[ei]; ei += 1; sim.fill_sphere(gpu, &mut rng, [e.x, e.y, e.z], e.r, [0.0, -1.0, 0.0]); }
-            let par = StepPar { g: desc.g, iters, flip: desc.flip, apic_flip: desc.apic_flip, comp: desc.comp, vmax: desc.vmax_w, vs: desc.scale, tear: desc.tear, time: t };
-            runner.step(gpu, &mut sim, dt, &sample_all(t), &par, desc.col_max, desc.scale);
+            runner.step(gpu, &mut sim, dt, &sample_all(t), &par_of(iters, t), desc.col_max, desc.scale);
         }
         let t_sub = tf0.elapsed().as_secs_f32();
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         let t_gpu = tf0.elapsed().as_secs_f32();
         n = sim.readback(gpu, &mut buf);
+        let raw = Raw { spray: sim.read_spray(gpu), deep: if desc.nb_look { sim.read_deep(gpu) } else { None } };
         let t_read = tf0.elapsed().as_secs_f32();
         sim.wait_stats(gpu);
         let mut mv: f32 = 0.0;
@@ -306,7 +373,7 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, mut progress: impl FnMut(&Progres
         // where the frame's time went (ms): sending the steps, the GPU finishing them, reading the particles back; packing runs alongside
         dg["timing"] = json!({ "send": t_sub * 1000.0, "gpu": (t_gpu - t_sub) * 1000.0, "read": (t_read - t_gpu) * 1000.0 });
         dg["ms"] = json!(frame_ms); dg["elapsed"] = json!(t0.elapsed().as_secs_f32());
-        if tx.send((std::mem::take(&mut buf), n as usize, poses(&states), dg)).is_err() { break; }
+        if tx.send((std::mem::take(&mut buf), n as usize, poses(&states), dg, raw)).is_err() { break; }
         stopped = !progress(&Progress { f, frames, n, elapsed: t0.elapsed().as_secs_f32(), sub, frame_ms });
         f += 1;
     }
@@ -316,6 +383,113 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, mut progress: impl FnMut(&Progres
     meta["seconds"] = json!(t0.elapsed().as_secs_f64());
     meta["diag"] = Value::Array(diags);
     meta["maxN"] = json!(max_n);
+    if stopped { meta["cancelled"] = json!(true); }
+    w.finish(&meta).map_err(|e| format!("Finishing the cache failed: {e}"))?;
+    Ok(())
+}
+
+/// Whitewater made afterwards from a finished water bake (Bake whitewater, runWhitewaterPass): the water is not simulated again. For each
+/// baked frame the particles are loaded with the velocity worked out from where they are in the next frame (a bake keeps every particle
+/// in its place), deep water points are loaded as still water so the grid knows the water is there, and the whitewater stages run over
+/// the frame in substeps while the particles move on towards the next frame. Writes a copy of the cache at out with the water as it was
+/// and each frame's whitewater replaced. desc: the scene (colliders, whitewater settings).
+pub fn whitewater_pass(gpu: &Gpu, c: &splash_format::Cache, desc: &Desc, out: &Path, mut progress: impl FnMut(&Progress) -> bool) -> Result<(), String> {
+    use splash_format::cache::decode_point;
+    let (fr, nf, fps) = (&c.frames, c.frames.len(), c.info.fps);
+    let spr = desc.spr.ok_or("Whitewater is off in this scene (Whitewater > Enabled).")?;
+    if nf < 2 || desc.spray_cap == 0 { return Err("Nothing to do: the bake needs at least two frames and room for whitewater.".into()); }
+    let dtf = 1.0 / fps;
+    let cd = c.info.meta.get("desc").cloned().unwrap_or(Value::Null);
+    let ratio = cd.get("cellRatio").and_then(Value::as_f64).map_or(desc.cell_ratio, |v| v as f32);
+    let size = cd.get("size").and_then(Value::as_array).filter(|a| a.len() == 3).map(|a| [0, 1, 2].map(|k| a[k].as_f64().unwrap_or(1.0) as f32)).unwrap_or(desc.size);
+    let open = cd.get("open").and_then(Value::as_u64).map_or(desc.open, |v| v as u32);
+    // a deep cell holds as many particles as a full water cell
+    let copies = (ratio.powi(3).round() as usize).clamp(1, 8);
+    let max_d = fr.iter().map(|f| f.deep.as_ref().map_or(0, |d| d.n as usize)).max().unwrap_or(0);
+    let max_w = fr.iter().map(|f| f.water.n as usize).max().unwrap_or(0);
+    let lay = layout(c.info.d, ratio, size);
+    let mut sim = FlipSim::new(gpu, lay, open, (max_w + max_d * copies + 16) as u32);
+    sim.opt.sort = false;
+    sim.ww_only = true;
+    sim.set_spray_cap(gpu, desc.spray_cap);
+    let mut runner = Runner::new(0x5eed);
+    let h = sim.h();
+    let scale = desc.scale;
+    let spd_k = if c.info.spd_ms { 1.0 / 16.0 / c.info.scale } else { 1.0 / 16.0 };
+    let jit = h * 0.25;
+    let meshes: Vec<&Obj> = desc.objs.iter().filter(|o| !o.emitter).collect();
+    let par = |t: f32| StepPar { g: desc.g, iters: 1, flip: 0.95, apic_flip: 0.0, comp: 6.0, vmax: desc.vmax_w, vs: scale, tear: 0.0, time: t,
+        wind: desc.wind, drag: desc.drag, gust: desc.gust, foam_sens: desc.foam_sens, foam_tau: desc.foam_tau, spr: Some(spr), air: desc.air, drip: desc.drip };
+    let ab = crate::flip::ww_area_box(&lay.b, spr.area[0], spr.area[1]);
+    let mut meta = c.info.meta.clone();
+    meta["sb"] = ab.to_json();
+    let mut w = CacheWriter::create(out, &meta, 64 * 1024 + meta.to_string().len()).map_err(|e| format!("Could not write {}: {e}", out.display()))?;
+    let bytes = c.bytes();
+    // a frame copied as it is, with new whitewater (16-bit across the whitewater area; compact with the frame's bits)
+    let write = |w: &mut CacheWriter, f: usize, ww: Option<(usize, Vec<u16>, Vec<u32>)>| -> Result<(), String> {
+        let x = &fr[f];
+        let fq = x.q;
+        let ww: Option<(u32, Vec<u8>, Vec<u32>)> = ww.filter(|s| s.0 > 0).map(|(n, p, pk)| match fq {
+            Some(q) => (n as u32, bytemuck::cast_slice(&pack_pos32(&p, n, q)).to_vec(), pk),
+            None => (n as u32, bytemuck::cast_slice(&p).to_vec(), pk),
+        });
+        let objs = c.objs(f);
+        w.append(&FrameOut { q: x.q, own_box: x.own_box, ww_baked: true, objs: &objs, n: x.water.n, pos: c.slice(&x.water.pos), spd: c.slice(&x.water.spd),
+            fm: x.water.fm.as_ref().map(|r| c.slice(r)), ww: ww.as_ref().map(|(n, p, pk)| (*n, &p[..], &pk[..])),
+            deep: x.deep.as_ref().map(|d| (d.n, c.slice(&d.pos), c.slice(&d.spd))) }).map_err(|e| format!("Writing the cache failed: {e}"))
+    };
+    write(&mut w, 0, None)?;
+    let t0 = Instant::now();
+    let (mut ps, mut vs) = (Vec::new(), Vec::new());
+    let mut stopped = false;
+    for f in 1..nf {
+        let tf0 = Instant::now();
+        let (a, bf) = (&fr[f - 1], &fr[f]);
+        let (ba, bb) = (c.frame_box(f - 1), c.frame_box(f));
+        ps.clear(); vs.clear();
+        let mut vmax: f32 = 0.0;
+        for i in 0..a.water.n as usize {
+            let (pa, sa, la) = decode_point(bytes, &a.water, a.q, &ba, i);
+            if sa == 255 { ps.extend_from_slice(&[0.0, -1e6, 0.0, 0.0]); vs.extend_from_slice(&[0.0; 4]); continue; }
+            let mut v = [0f32; 3];
+            if i < bf.water.n as usize {
+                let (pb, sb, _) = decode_point(bytes, &bf.water, bf.q, &bb, i);
+                if sb != 255 {
+                    v = [(pb[0] - pa[0]) * fps, (pb[1] - pa[1]) * fps, (pb[2] - pa[2]) * fps];
+                    // a slot the narrow band gave to another particle jumps further than either speed allows: no velocity for that frame
+                    let u = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                    let s = sa.max(sb) as f32 * spd_k;
+                    if sa.max(sb) < 191 && u > 2.0 * s + 2.0 * h * fps { v = [0.0; 3]; }
+                }
+            }
+            ps.extend_from_slice(&[pa[0], pa[1], pa[2], 0.0]);
+            // the white-water level the bake gave it (impacts, churn)
+            vs.extend_from_slice(&[v[0], v[1], v[2], la as f32 / 15.0]);
+            vmax = vmax.max(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        }
+        if let Some(dp) = &a.deep {
+            for i in 0..dp.n as usize {
+                let (pd, sd, _) = decode_point(bytes, dp, a.q, &ba, i);
+                if sd == 255 { continue; }
+                for m in 0..copies {
+                    let o = |bit: usize| if m & bit != 0 { jit } else { -jit };
+                    ps.extend_from_slice(&[pd[0] + o(1), pd[1] + o(2), pd[2] + o(4), 0.0]);
+                    vs.extend_from_slice(&[0.0; 4]);
+                }
+            }
+        }
+        sim.load(gpu, &ps, &vs);
+        let sub = ((dtf * vmax.sqrt() / (1.5 * h)).ceil() as u32).clamp(2, 8);
+        let dt = dtf / sub as f32;
+        for s in 0..sub {
+            let t = (f - 1) as f32 * dtf + (s + 1) as f32 * dt;
+            let states: Vec<Obj> = meshes.iter().map(|o| sample(o, t)).collect();
+            runner.step(gpu, &mut sim, dt, &states, &par(t), desc.col_max, scale);
+        }
+        let ww = sim.read_spray(gpu).map(|(n, p, v)| { let (k, pos, pk, _) = ww::pack_spray_frame(&p, &v, n, &ab, 200_000, spr.foam_life); (k, pos, pk) });
+        write(&mut w, f, ww)?;
+        if !progress(&Progress { f: f as u32, frames: nf as u32 - 1, n: sim.n, elapsed: t0.elapsed().as_secs_f32(), sub, frame_ms: tf0.elapsed().as_secs_f32() * 1000.0 }) { stopped = true; break; }
+    }
     if stopped { meta["cancelled"] = json!(true); }
     w.finish(&meta).map_err(|e| format!("Finishing the cache failed: {e}"))?;
     Ok(())

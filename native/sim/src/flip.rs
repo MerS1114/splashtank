@@ -1,9 +1,9 @@
 //! The FLIP solver: a port of the FlipSim class in src/flip/sim.js (buffers, parameter block, stages, block pool growth, readbacks),
-//! running the page's own kernels. So far the water itself: blocks, transfer (FLIP or APIC), pressure (red-black SOR or multigrid),
-//! separation, fast drops, colliders and emitters. Narrow band, ocean, whitewater, the air field and drips come in the next phase; their
-//! parameter words are written with those parts off.
+//! running the page's own kernels: blocks, transfer (FLIP or APIC), pressure (red-black SOR or multigrid), separation, fast drops,
+//! colliders, narrow band and ocean, whitewater, the air field and drips, and the deep water points of the narrow band look.
 
 use crate::gpu::Gpu;
+use crate::nb::NbFill;
 use crate::scene::Col;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -18,6 +18,23 @@ const STOR: wgpu::BufferUsages = wgpu::BufferUsages::STORAGE.union(wgpu::BufferU
 #[derive(Clone, Copy, Debug)]
 pub struct Layout { pub d: f32, pub ratio: f32, pub h: f32, pub n: [u32; 3], pub b: splash_format::Box3, pub size: [f32; 3] }
 
+impl Layout {
+    /// The spacing, cell size and box as the page's 64-bit JS numbers have them (bakeRes rounds the spacing to 4 decimals). Lattice fills
+    /// use these: in 32 bits a lattice point exactly on a sphere's surface or a box edge can land on the other side of it.
+    pub fn d64(&self) -> f64 { (self.d as f64 * 1e4).round() / 1e4 }
+    pub fn h64(&self) -> f64 { (self.ratio as f64 * 100.0).round() / 100.0 * self.d64() }
+    pub fn size64(&self) -> [f64; 3] { let h = self.h64(); self.n.map(|v| v as f64 * h) }
+    /// x0 x1 y0 y1 z0 z1, for a tank centred on x and z (layout, not layout_at)
+    pub fn b64(&self) -> [f64; 6] { let s = self.size64(); [-s[0] / 2.0, s[0] / 2.0, 0.0, s[1], -s[2] / 2.0, s[2] / 2.0] }
+}
+
+/// A grid whose box starts at org instead (the detail pass simulates only a region of the tank).
+pub fn layout_at(d: f32, ratio: f32, size: [f32; 3], org: [f32; 3]) -> Layout {
+    let mut l = layout(d, ratio, size);
+    l.b = splash_format::Box3 { x0: org[0], x1: org[0] + l.size[0], y0: org[1], y1: org[1] + l.size[1], z0: org[2], z1: org[2] + l.size[2] };
+    l
+}
+
 pub fn layout(d: f32, ratio: f32, size: [f32; 3]) -> Layout {
     let ratio = ratio.clamp(1.4, 4.0);
     let h = ratio * d;
@@ -29,9 +46,54 @@ pub fn layout(d: f32, ratio: f32, size: [f32; 3]) -> Layout {
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Stats { pub sc: u32, pub ovf: u32, pub fluid: u32, pub settled: u32, pub free: u32, pub need: u32, pub vmax: f32, pub seen: bool }
 
-/// Per-step settings (the page's simPar with the parts the native solver runs).
+/// The ocean in solver units (oceanCfg): wave height and length, direction and spread in degrees, still water level above the box
+/// floor and the boundary layer's width.
 #[derive(Clone, Copy, Debug)]
-pub struct StepPar { pub g: f32, pub iters: u32, pub flip: f32, pub apic_flip: f32, pub comp: f32, pub vmax: f32, pub vs: f32, pub tear: f32, pub time: f32 }
+pub struct Ocean { pub height: f64, pub length: f64, pub dir: f64, pub spread: f64, pub seed: i32, pub level: f64, pub layer: f64 }
+
+/// Whitewater settings (simPar().spr with its ww part); area is the whitewater area's widening and raising (wwArea).
+#[derive(Clone, Copy, Debug)]
+pub struct Spr {
+    pub rate: f32, pub min: f32, pub life: f32, pub mist: f32, pub drag: f32, pub mdrag: f32,
+    pub foam_life: f32, pub rise: f32, pub crest: f32, pub impact: f32, pub spin: f32, pub edge: f32, pub erode: f32, pub land: f32, pub trail: f32,
+    pub area: [f32; 2],
+}
+/// The air field (simPar().air).
+#[derive(Clone, Copy, Debug)]
+pub struct Air { pub couple: f32, pub decay: f32, pub real: bool, pub feel: bool, pub size: f32, pub oct: f32, pub speed: f32, pub swirl: f32, pub iters: u32, pub blur: f32 }
+/// Dripping off wet colliders (simPar().drip).
+#[derive(Clone, Copy, Debug)]
+pub struct Drip { pub rate: f32, pub dry: f32 }
+
+/// Per-step settings (the page's simPar). Narrow band and ocean are the sim's own (set when the starting water is seeded).
+#[derive(Clone, Copy, Debug)]
+pub struct StepPar {
+    pub g: f32, pub iters: u32, pub flip: f32, pub apic_flip: f32, pub comp: f32, pub vmax: f32, pub vs: f32, pub tear: f32, pub time: f32,
+    pub wind: [f32; 3], pub drag: f32, pub gust: f32, pub foam_sens: f32, pub foam_tau: f32,
+    pub spr: Option<Spr>, pub air: Option<Air>, pub drip: Option<Drip>,
+}
+impl StepPar {
+    /// Gravity and iterations only (prime's steps).
+    pub fn bare(g: f32, iters: u32) -> StepPar {
+        StepPar { g, iters, flip: 0.95, apic_flip: 0.8, comp: 0.0, vmax: 14.0, vs: 1.0, tear: 0.0, time: 0.0, wind: [0.0; 3], drag: 0.0, gust: 0.0, foam_sens: 1.0, foam_tau: 1.2,
+            spr: None, air: None, drip: None }
+    }
+}
+
+/// Deep water points drawn at most (narrow band look only); matches DEEPMAX in the shader.
+pub const DEEPMAX: u32 = 200_000;
+const DISP_MAX: u32 = 300_000;
+
+#[derive(Clone, Copy, Debug)]
+pub struct AirDims { pub n: [u32; 3], pub cells: u32, pub h: f32 }
+
+/// The whitewater area: the tank widened k times about its centre and raised to up times its height, floor kept (wwAreaBox).
+pub fn ww_area_box(b: &splash_format::Box3, k: f32, up: f32) -> splash_format::Box3 {
+    let (k, up) = (k.max(1.0), up.max(1.0));
+    let (cx, cz) = ((b.x0 + b.x1) / 2.0, (b.z0 + b.z1) / 2.0);
+    let (hx, hz) = ((b.x1 - b.x0) / 2.0 * k, (b.z1 - b.z0) / 2.0 * k);
+    splash_format::Box3 { x0: cx - hx, x1: cx + hx, y0: b.y0, y1: b.y0 + (b.y1 - b.y0) * up, z0: cz - hz, z1: cz + hz }
+}
 
 /// Solver options (sim.opt).
 #[derive(Clone, Copy, Debug)]
@@ -87,6 +149,39 @@ pub struct FlipSim {
     pub ovf_total: u64,
     stage: Option<wgpu::Buffer>,
     pub grew: u32,
+    /// the whitewater pass over a finished bake (Bake whitewater): the loaded particles only build the grid, the whitewater stages run
+    pub ww_only: bool,
+    // narrow band and ocean
+    vel_g_on: bool,
+    /// the next step starts the depth field from the starting shapes (1: a restart)
+    pub nb_init: u32,
+    pub nb_fills: Vec<NbFill>,
+    pub nb_vols: Vec<Col>,
+    /// band depth in cells, when narrow band is on
+    pub nb_band: Option<f32>,
+    pub ocean: Option<Ocean>,
+    pub ocean_w: Vec<f32>,
+    nb_on: bool,
+    init_step: u32,
+    // whitewater, air, drips, deep water look
+    pub spray_cap: u32,
+    spr_disp_max: u32,
+    pub deep_on: bool,
+    pub air_dims: Option<AirDims>,
+    ndrip: u32,
+    drip_sig: Vec<u32>,
+    drip_cache: HashMap<u32, Vec<f32>>,
+    air_real: bool,
+    air_feel: bool,
+    air_iters: u32,
+    air_on_step: bool,
+    drip_on_step: bool,
+    spr_on_step: bool,
+    /// the whitewater area of the last step
+    pub ab: splash_format::Box3,
+    sctl_stage: Option<wgpu::Buffer>,
+    sstage: Option<wgpu::Buffer>,
+    dstage: Option<wgpu::Buffer>,
 }
 
 fn sizes(n: u32) -> u64 { (n as u64).max(1) }
@@ -122,7 +217,11 @@ impl FlipSim {
             l, rest: l.ratio.powi(3), open, max_n, cap: max_n, n: 0, opt: Opt::default(), ntiles, t, scap, scap_max, lcap: 0, buf,
             groups: HashMap::new(), groups_dirty: true, pu: vec![0; (gpu.params_bytes / 4) as usize], cf: vec![0.0; 32 * 32], cf_prev: None, solid_dirty: true,
             sdf_sig: 0, sdf_cap: 16, run_start: 0, run_pos: Vec::new(), run_vel: Vec::new(), tm: 0.0, seed: 0, sort_tick: 0, sort_moved: 0.0, sorted_ever: false,
-            last_dt: 0.0, mg_size: 0, mg_dense: Vec::new(), mg_top: 0, only_tiles: false, stats_ring, stats: None, ovf_total: 0, stage: None, grew: 0,
+            last_dt: 0.0, mg_size: 0, mg_dense: Vec::new(), mg_top: 0, only_tiles: false, stats_ring, stats: None, ovf_total: 0, stage: None, grew: 0, ww_only: false,
+            vel_g_on: false, nb_init: 0, nb_fills: Vec::new(), nb_vols: Vec::new(), nb_band: None, ocean: None, ocean_w: Vec::new(), nb_on: false, init_step: 0,
+            spray_cap: 0, spr_disp_max: 0, deep_on: false, air_dims: None, ndrip: 0, drip_sig: vec![u32::MAX], drip_cache: HashMap::new(),
+            air_real: false, air_feel: false, air_iters: 20, air_on_step: false, drip_on_step: false, spr_on_step: false, ab: l.b,
+            sctl_stage: None, sstage: None, dstage: None,
         };
         // slot k starts as particle k (written in chunks: 44M ids are 176 MB)
         let q = &gpu.queue;
@@ -157,9 +256,11 @@ impl FlipSim {
     fn make_slot_buffers(&mut self, gpu: &Gpu, n: u32) {
         let c = n as u64 * SLOT_CELLS;
         for k in [6, 7, 8, 9, 39, 41] { self.buf.insert(k, Self::mk(gpu, c * 4)); }
-        self.buf.insert(3, Self::mk(gpu, c * 12)); self.buf.insert(5, Self::mk(gpu, c * 12)); self.buf.insert(31, Self::mk(gpu, 16));
+        self.buf.insert(3, Self::mk(gpu, c * 12)); self.buf.insert(5, Self::mk(gpu, c * 12));
+        self.buf.insert(31, Self::mk(gpu, if self.vel_g_on { c * 12 } else { 16 }));
         for k in [18, 19, 20] { self.buf.insert(k, Self::mk(gpu, n as u64 * 4)); }
-        self.lcap = (c as u32).min(self.max_n);
+        // fluid cell lists: without narrow band a water cell holds at least one particle; with it, deep water cells hold none
+        self.lcap = if self.vel_g_on { c as u32 } else { (c as u32).min(self.max_n) };
         self.buf.insert(13, Self::mk(gpu, self.lcap as u64 * 8));
         self.groups_dirty = true;
     }
@@ -179,8 +280,9 @@ impl FlipSim {
         let n = self.scap_max.min(want.max(self.scap + 1));
         if n <= self.scap { return false; }
         let old = self.scap;
-        let keep: Vec<(u32, wgpu::Buffer, u64)> = [(6, 2048), (7, 2048), (8, 2048), (9, 2048), (39, 2048), (41, 2048), (3, 6144), (5, 6144), (18, 4), (19, 4), (20, 4)]
-            .iter().map(|&(k, per)| (k, self.buf.remove(&k).unwrap(), per)).collect();
+        let mut list = vec![(6, 2048), (7, 2048), (8, 2048), (9, 2048), (39, 2048), (41, 2048), (3, 6144), (5, 6144), (18, 4), (19, 4), (20, 4)];
+        if self.vel_g_on { list.push((31, 6144)); }
+        let keep: Vec<(u32, wgpu::Buffer, u64)> = list.iter().map(|&(k, per)| (k, self.buf.remove(&k).unwrap(), per)).collect();
         self.make_slot_buffers(gpu, n);
         self.scap = n;
         gpu.queue.write_buffer(&self.buf[&25], 0, bytemuck::cast_slice(&[old, n - old, 0, 0]));
@@ -205,10 +307,86 @@ impl FlipSim {
         if s.seen { return; }
         s.seen = true;
         let want = s.sc + s.ovf;
+        let (need, free) = (s.need, s.free);
         if s.ovf > 0 || want as f32 > 0.8 * self.scap as f32 {
             let w = ((self.scap as f32 * 1.5).ceil() as u32).max((want as f32 * 1.4).ceil() as u32 + 8);
             self.grow(gpu, w);
         }
+        // narrow band: the band is refilled from free particle slots. An impact into deep water asks for far more than the spares seeded at
+        // the start, so park more slots (up to the cap) when the cells asking would use over half of what is free
+        if self.nb_band.is_some() && self.n < self.cap {
+            let need = need as u64 * (0.85 * self.rest).round() as u64;
+            if need as f64 > 0.5 * free as f64 {
+                let k = ((self.cap - self.n) as u64).min((2 * need).saturating_sub(free as u64).max((0.1 * self.n as f64).ceil() as u64));
+                for _ in 0..k { self.add(gpu, [0.0, -1e6, 0.0], [0.0; 3]); }
+            }
+        }
+    }
+
+    /// The first narrow band step: room for the kept grid velocity and longer cell lists (enableNB).
+    fn enable_nb(&mut self, gpu: &Gpu) {
+        if self.vel_g_on { return; }
+        self.vel_g_on = true;
+        let c = self.scap as u64 * SLOT_CELLS;
+        self.buf.insert(31, Self::mk(gpu, c * 12));
+        self.lcap = c as u32;
+        self.buf.insert(13, Self::mk(gpu, self.lcap as u64 * 8));
+        self.groups_dirty = true;
+    }
+
+    /// Room for n whitewater points (0 turns whitewater off): positions, velocities, extra state, and the counters with the free list of
+    /// dead slots (setSprayCap).
+    pub fn set_spray_cap(&mut self, gpu: &Gpu, n: u32) {
+        let n = n.min((gpu.device.limits().max_storage_buffer_binding_size / 16) as u32);
+        if n == self.spray_cap { return; }
+        self.spray_cap = n;
+        self.spr_disp_max = n.min(200_000);
+        for k in [28, 29, 33] { self.buf.insert(k, Self::mk(gpu, n.max(1) as u64 * 16)); }
+        self.buf.insert(30, Self::mk(gpu, (16 + n as u64) * 4));
+        self.sstage = None;
+        self.disp_alloc(gpu);
+    }
+
+    /// Deep water points (narrow band look only) go into the display buffer after the water sample and the whitewater (dispAlloc).
+    pub fn set_deep_look(&mut self, gpu: &Gpu, on: bool) {
+        if on == self.deep_on { return; }
+        self.deep_on = on;
+        self.disp_alloc(gpu);
+    }
+    fn disp_alloc(&mut self, gpu: &Gpu) {
+        let dm = if self.deep_on { DEEPMAX } else { 0 };
+        self.buf.insert(15, Self::mk(gpu, (self.max_n.min(DISP_MAX + 1) + self.spr_disp_max + dm) as u64 * 16 + 16));
+        self.groups_dirty = true;
+    }
+
+    /// The air field's grid: cells a few solver cells wide, at most about 260 thousand of them (airAlloc).
+    fn air_alloc(&mut self, gpu: &Gpu) {
+        if self.air_dims.is_some() { return; }
+        let ncell = (self.l.n[0] * self.l.n[1] * self.l.n[2]) as f64;
+        let r = 2u32.max((ncell / 260000.0).cbrt().ceil() as u32);
+        let n = self.l.n.map(|v| v.div_ceil(r) + 1);
+        let cells = n[0] * n[1] * n[2];
+        for k in [32, 35, 34] { self.buf.insert(k, Self::mk(gpu, cells as u64 * 16)); }
+        self.air_dims = Some(AirDims { n, cells, h: self.l.h * r as f32 });
+        self.groups_dirty = true;
+    }
+
+    /// Drip samples over each collider's surface, rebuilt when the set of colliders changes (dripUpdate).
+    fn drip_update(&mut self, gpu: &Gpu, cols: &[Col]) {
+        let sig: Vec<u32> = cols.iter().map(|c| c.sdf.id).collect();
+        if sig == self.drip_sig { return; }
+        self.drip_sig = sig;
+        let mut all = Vec::new();
+        for (k, c) in cols.iter().enumerate() {
+            let base = self.drip_cache.entry(c.sdf.id).or_insert_with(|| crate::ww::drip_samples(&c.sdf, self.l.h, 0));
+            let mut a = base.clone();
+            for i in (3..a.len()).step_by(8) { a[i] = k as f32; }
+            all.extend_from_slice(&a);
+        }
+        self.ndrip = (all.len() / 8) as u32;
+        if all.is_empty() { all.resize(8, 0.0); }
+        if self.buf[&36].size() < all.len() as u64 * 4 { self.buf.insert(36, Self::mk(gpu, all.len() as u64 * 4)); self.groups_dirty = true; }
+        gpu.queue.write_buffer(&self.buf[&36], 0, bytemuck::cast_slice(&all));
     }
 
     /// Collects stats that arrived and starts another read when a staging buffer is free.
@@ -256,6 +434,27 @@ impl FlipSim {
         self.run_vel.extend_from_slice(&[v[0], v[1], v[2], 0.0]);
         true
     }
+    /// Replaces every particle with these (x y z w each, 4 floats; Bake whitewater loads each baked frame like this).
+    pub fn load(&mut self, gpu: &Gpu, pos: &[f32], vel: &[f32]) {
+        self.run_pos.clear(); self.run_vel.clear();
+        self.n = ((pos.len() / 4) as u32).min(self.max_n);
+        let b = self.n as usize * 16;
+        gpu.queue.write_buffer(&self.buf[&1], 0, &bytemuck::cast_slice(pos)[..b]);
+        gpu.queue.write_buffer(&self.buf[&2], 0, &bytemuck::cast_slice(vel)[..b]);
+        // uploaded particles start with no APIC gradient
+        if self.buf[&42].size() >= self.n as u64 * 48 && self.n > 0 { gpu.queue.write_buffer(&self.buf[&42], 0, &vec![0u8; self.n as usize * 48]); }
+    }
+
+    /// Particle velocities (x y z w each), in slot order (the detail pass keeps its own copy of the particles).
+    pub fn read_vel(&mut self, gpu: &Gpu, dst: &mut Vec<f32>) {
+        let bytes = sizes(self.n) * 16;
+        let mut st = self.stage.take();
+        let v = Self::read_into(gpu, &self.buf[&2], 0, bytes, &mut st, None);
+        self.stage = st;
+        dst.clear();
+        dst.extend_from_slice(&bytemuck::cast_slice::<u8, f32>(&v)[..self.n as usize * 4]);
+    }
+
     /// Uploads the particles added since the last flush; they start with no APIC gradient.
     pub fn flush_run(&mut self, gpu: &Gpu) {
         if self.run_pos.is_empty() { return; }
@@ -272,10 +471,9 @@ impl FlipSim {
 
     /// Water on a jittered lattice at the particle spacing (FluidSim.fillBox). The lattice is stepped in f64 like the page's JS
     /// numbers: in f32 the last row at a box edge came out on the other side of it (318,000 particles against the page's 312,000).
-    pub fn fill_box(&mut self, gpu: &Gpu, rng: &mut Rng, b: [f32; 6]) {
-        let d = self.l.d as f64;
+    pub fn fill_box(&mut self, gpu: &Gpu, rng: &mut Rng, b: [f64; 6]) {
+        let d = self.l.d64();
         let j = (0.01 * d / 0.12) as f32;
-        let b = b.map(|v| v as f64);
         let mut y = b[2] + d / 2.0;
         while y < b[3] {
             let mut x = b[0] + d / 2.0;
@@ -290,17 +488,16 @@ impl FlipSim {
             y += d;
         }
     }
-    pub fn fill_sphere(&mut self, gpu: &Gpu, rng: &mut Rng, c: [f32; 3], r: f32, v: [f32; 3]) {
-        let d = self.l.d as f64;
+    pub fn fill_sphere(&mut self, gpu: &Gpu, rng: &mut Rng, c: [f64; 3], r: f64, v: [f32; 3]) {
+        let d = self.l.d64();
         let j = (0.01 * d / 0.12) as f32;
-        let r = r as f64;
         let mut y = -r;
         while y <= r {
             let mut x = -r;
             while x <= r {
                 let mut z = -r;
                 while z <= r {
-                    if x * x + y * y + z * z <= r * r && !self.add(gpu, [c[0] + x as f32 + (rng.f() - 0.5) * j, c[1] + y as f32 + (rng.f() - 0.5) * j, c[2] + z as f32 + (rng.f() - 0.5) * j], v) { return; }
+                    if x * x + y * y + z * z <= r * r && !self.add(gpu, [(c[0] + x) as f32 + (rng.f() - 0.5) * j, (c[1] + y) as f32 + (rng.f() - 0.5) * j, (c[2] + z) as f32 + (rng.f() - 0.5) * j], v) { return; }
                     z += d;
                 }
                 x += d;
@@ -376,15 +573,24 @@ impl FlipSim {
         let n = self.n;
         if n == 0 { return; }
         self.collect_stats(gpu);
-        if !self.only_tiles { self.maybe_grow(gpu); }
+        if !self.only_tiles { self.maybe_grow(gpu); self.flush_run(gpu); }   // it may park new particle slots
+        let n = self.n;
         let (h, b) = (self.l.h, self.l.b);
-        let nc = self.pack_colliders(gpu, cols);
+        let nb_on = self.nb_band.is_some() || self.ocean.is_some();
+        self.nb_on = nb_on;
+        if nb_on { self.enable_nb(gpu); }
+        let init = if nb_on { self.nb_init } else { 0 };
+        self.init_step = init;
+        // the first narrow band step also gets the water volumes, as colliders after the real ones
+        let ntot = if init > 0 && !self.nb_vols.is_empty() { let all: Vec<Col> = cols.iter().cloned().chain(self.nb_vols.iter().cloned()).collect(); self.pack_colliders(gpu, &all) } else { self.pack_colliders(gpu, cols) };
+        let nc = cols.len().min(ntot);
+        let nfv = ntot - nc;
         {
             let n32 = nc * 32;
             let same = matches!(&self.cf_prev, Some((pn, ps, a)) if *pn == nc && *ps == self.sdf_sig && a[..] == self.cf[..n32]);
             if !same { self.solid_dirty = true; self.cf_prev = Some((nc, self.sdf_sig, self.cf[..n32].to_vec())); }
         }
-        let apic = self.opt.apic;
+        let apic = self.opt.apic && !self.ww_only;
         if apic && self.buf[&42].size() < self.max_n as u64 * 48 { self.buf.insert(42, Self::mk(gpu, self.max_n as u64 * 48)); self.groups_dirty = true; }
         let fr = if apic { if gpu.pipes.contains_key("g2pAo") { o.apic_flip } else { 0.0 } } else { o.flip };
         let flip = fr.clamp(0.0, 1.0).powf(dt * 60.0);
@@ -393,31 +599,76 @@ impl FlipSim {
         let u = &mut self.pu;
         u[0] = n; u[1] = self.l.n[0]; u[2] = self.l.n[1]; u[3] = self.l.n[2]; u[4] = nc as u32; u[5] = self.open; u[6] = 0; u[7] = self.l.n[0] * self.l.n[1] * self.l.n[2];
         let omega = if self.opt.mg { 1.4 } else { self.omega() };
+        let or1 = |v: f32| if v != 0.0 { v } else { 1.0 };
         let f = [dt, h, 1.0 / h, o.g, flip, self.rest, o.comp, omega, b.x0, b.y0, b.z0, o.vmax, 0.3 * self.l.d, 65536.0, b.x1, b.y1, b.z1, 0.3 * h,
-            0.0, 0.0, 0.0, 0.0, 1.2, 1.0, 0.0, self.tm, 0.0, 0.0, stride as f32, 0.0];
+            o.wind[0], o.wind[1], o.wind[2], o.drag, if o.foam_tau != 0.0 { o.foam_tau } else { 1.2 }, or1(o.foam_sens), o.gust, self.tm, 0.0, 0.0, stride as f32, 0.0];
         if !self.only_tiles { self.tm += dt; }
         for (k, v) in f.iter().enumerate() { self.set_f(8 + k, *v); }
         let bb = 8 + f.len();
         let u = &mut self.pu;
         u[bb] = self.lcap; u[bb + 1] = self.t[0]; u[bb + 2] = self.t[1]; u[bb + 3] = self.t[2]; u[bb + 4] = self.scap;
-        self.set_f(bb + 5, o.tear); self.set_f(bb + 6, 0.0); self.set_f(bb + 7, 1.0); self.set_f(bb + 8, 1.0); self.set_f(bb + 9, 0.0);
-        self.set_f(bb + 10, 1.0); self.set_f(bb + 11, 4.0); self.set_f(bb + 12, o.vs);
-        self.pu[bb + 13] = 0; self.pu[bb + 14] = if stride <= 1 { n } else { n.div_ceil(stride) }; self.pu[bb + 15] = 0;
+        let sp = if self.spray_cap > 0 { o.spr } else { None };
+        self.set_f(bb + 5, o.tear);
+        self.set_f(bb + 6, sp.map_or(0.0, |s| s.rate)); self.set_f(bb + 7, sp.map_or(1.0, |s| s.min.max(0.05))); self.set_f(bb + 8, sp.map_or(1.0, |s| s.life));
+        self.set_f(bb + 9, sp.map_or(0.0, |s| s.mist)); self.set_f(bb + 10, sp.map_or(1.0, |s| s.drag)); self.set_f(bb + 11, sp.map_or(4.0, |s| s.mdrag));
+        self.set_f(bb + 12, o.vs);
+        let ndisp = if stride <= 1 { n } else { n.div_ceil(stride) };
+        self.pu[bb + 13] = self.spray_cap; self.pu[bb + 14] = ndisp; self.pu[bb + 15] = self.spr_disp_max;
         if !self.only_tiles { self.seed = self.seed.wrapping_add(1); }
         self.pu[bb + 16] = self.seed;
-        // narrow band and ocean off (words 55-67)
-        self.set_f(56, 3.0); self.set_f(59, o.time); self.set_f(63, b.y0); self.set_f(66, 1.0);
-        // whitewater, air, drips off (68-83, 440-447), with the page's defaults
-        self.set_f(68, 3.0); self.set_f(69, 0.3); self.set_f(70, 1.0); self.set_f(71, 0.5); self.set_f(75, 1.0);
-        self.pu[76] = 1; self.pu[77] = 1; self.pu[78] = 1; self.set_f(81, 1.0); self.set_f(83, 0.5);
-        self.set_f(441, 3.0); self.set_f(447, 20.0);
-        for (k, v) in [b.x0, b.y0, b.z0, 0.0, b.x1, b.y1, b.z1, 0.0].iter().enumerate() { self.set_f(408 + k, *v); }
-        self.set_f(404, (70f32).to_radians().cos()); self.set_f(405, 0.25); self.set_f(406, 1.0); self.set_f(407, 1.0);
-        self.set_f(416, if self.opt.ballistic { 1.0 } else { 0.0 });
+        self.spr_on_step = sp.is_some();
+        // narrow band and ocean (word 55 on, then the starting-water shapes at 84 and the wave list at 148)
+        self.pu[55] = nb_on as u32; self.set_f(56, self.nb_band.unwrap_or(3.0).max(2.0)); self.pu[57] = self.ocean.is_some() as u32;
+        let oc = self.ocean;
+        let nw = if oc.is_some() { self.ocean_w.len() / 8 } else { 0 };
+        if nw > 0 { for (k, v) in self.ocean_w.clone().iter().enumerate() { self.set_f(148 + k, *v); } }
+        self.pu[58] = nw as u32; self.set_f(59, o.time);
+        self.set_f(60, oc.map_or(0.0, |c| c.level as f32)); self.set_f(61, oc.map_or(0.0, |c| c.layer as f32));
+        self.set_f(62, if nb_on && self.deep_on { (ndisp + self.spr_disp_max) as f32 } else { 0.0 });
+        self.set_f(63, b.y0); self.pu[64] = init;
+        let fl: Vec<NbFill> = if init > 0 { self.nb_fills.iter().take(8).copied().collect() } else { Vec::new() };
+        self.pu[65] = fl.len() as u32;
+        self.set_f(66, oc.map_or(1.0, |c| (c.level as f32 - b.y0).max(1e-3))); self.pu[67] = nfv as u32;
+        for (k, f) in fl.iter().enumerate() {
+            let w = match f { NbFill::Box(e) => [1.0, e[0], e[1], e[2], e[3], e[4], e[5], 0.0], NbFill::Sphere(s) => [2.0, s[0], s[1], s[2], s[3], 0.0, 0.0, 0.0] };
+            for (i, v) in w.iter().enumerate() { self.set_f(84 + k * 8 + i, *v); }
+        }
+        if init > 0 && !self.only_tiles { self.nb_init = 0; self.nb_fills.clear(); self.nb_vols.clear(); }
+        // whitewater, air field and drips (words 68-83, 404-415, 440-447)
+        let airo = if sp.is_some() { o.air } else { None };
+        let dr = if sp.is_some() { o.drip } else { None };
+        if airo.is_some() { self.air_alloc(gpu); }
+        let ad = self.air_dims;
+        let (ww_life, ww_rise) = o.spr.map_or((3.0, 0.3), |s| (if s.foam_life != 0.0 { s.foam_life } else { 3.0 }, if s.rise != 0.0 { s.rise } else { 0.3 }));
+        self.set_f(68, ww_life); self.set_f(69, ww_rise); self.set_f(70, o.spr.map_or(1.0, |s| s.crest)); self.set_f(71, o.spr.map_or(0.5, |s| s.impact));
+        self.pu[72] = (airo.is_some() && ad.is_some()) as u32; self.set_f(73, airo.map_or(0.0, |a| a.couple)); self.set_f(74, airo.map_or(0.0, |a| a.decay));
+        self.set_f(75, ad.map_or(1.0, |a| a.h));
+        let dims = ad.map_or([1; 3], |a| a.n);
+        self.pu[76] = dims[0]; self.pu[77] = dims[1]; self.pu[78] = dims[2];
+        if dr.is_some() { self.drip_update(gpu, &cols[..nc]); }
+        self.pu[79] = if dr.is_some() { self.ndrip } else { 0 };
+        self.set_f(80, dr.map_or(0.0, |d| d.rate)); self.set_f(81, dr.map_or(1.0, |d| d.dry)); self.set_f(82, airo.map_or(0.0, |a| a.blur));
+        // real air flow (airUpdate .. airProj) and the water feeling it (airDragW); turbulence size in solver units, octaves, change, swirl
+        self.air_real = airo.is_some_and(|a| a.real) && ad.is_some();
+        self.air_feel = self.air_real && airo.is_some_and(|a| a.feel);
+        self.air_iters = airo.map_or(20, |a| if a.iters > 0 { a.iters } else { 20 });
+        self.set_f(440, airo.map_or(0.0, |a| a.size)); self.set_f(441, airo.map_or(3.0, |a| if a.oct != 0.0 { a.oct } else { 3.0 }));
+        self.set_f(442, airo.map_or(0.0, |a| a.speed)); self.set_f(443, if self.air_real { airo.map_or(0.0, |a| a.swirl) } else { 0.0 });
+        self.set_f(444, self.air_real as u32 as f32); self.set_f(445, self.air_feel as u32 as f32); self.set_f(446, o.drag); self.set_f(447, self.air_iters as f32);
+        let area = o.spr.map_or([1.0, 1.0], |s| s.area);
+        self.ab = ww_area_box(&b, area[0], area[1]);
+        let ab = self.ab;
+        for (k, v) in [ab.x0, ab.y0, ab.z0, 0.0, ab.x1, ab.y1, ab.z1, 0.0].iter().enumerate() { self.set_f(408 + k, *v); }
+        self.set_f(83, o.spr.map_or(0.5, |s| s.spin));
+        self.set_f(404, o.spr.map_or(70.0, |s| s.edge).to_radians().cos()); self.set_f(405, o.spr.map_or(0.25, |s| s.erode));
+        self.set_f(406, o.spr.map_or(1.0, |s| s.land)); self.set_f(407, o.spr.map_or(1.0, |s| s.trail));
+        self.air_on_step = airo.is_some() && ad.is_some();
+        self.drip_on_step = dr.is_some() && self.ndrip > 0;
+        self.set_f(416, if self.opt.ballistic && !self.ww_only { 1.0 } else { 0.0 });
         self.set_f(417, if self.opt.settle { self.opt.settle_tol } else { 0.0 });
-        self.set_f(418, if self.opt.sep > 0.0 { 1.0 - (-self.opt.sep * dt).exp() } else { 0.0 });
+        self.set_f(418, if self.opt.sep > 0.0 && !self.ww_only { 1.0 - (-self.opt.sep * dt).exp() } else { 0.0 });
         self.set_f(421, if apic { 1.0 } else { 0.0 });
-        if self.opt.mg {
+        if self.opt.mg && !self.ww_only {
             self.mg_top = self.mg_plan(gpu);
             for (k, q) in self.mg_dense.clone().iter().enumerate() { self.pu[424 + 4 * k..428 + 4 * k].copy_from_slice(q); }
             self.set_f(420, 1.0);
@@ -449,7 +700,7 @@ impl FlipSim {
             ps.set_bind_group(0, &g[name], &[]);
             ps.dispatch_workgroups_indirect(args, off);
         };
-        let apic = self.opt.apic;
+        let apic = self.opt.apic && !self.ww_only;
         let sort_on = self.opt.sort && !apic;
         if sort_on && !self.only_tiles {
             self.sort_tick += 1;
@@ -461,17 +712,67 @@ impl FlipSim {
                 dispatch(ps, "sortScatter", n); dispatch(ps, "sortCopy", n);
             }
         }
+        let (nb, init) = (self.nb_on, self.init_step);
         // blocks
         dispatch(ps, "tileNeedClear", self.ntiles); dispatch(ps, "tileMark", n);
+        if nb && init != 1 { indirect(ps, "tileMarkPhi", 64); }   // last step's blocks that hold water by depth (before the counters reset)
+        if init > 0 { dispatch(ps, "tileMarkFill", self.ntiles); }
         dispatch(ps, "tileReset", 1);
         dispatch(ps, "tileFree", self.ntiles); dispatch(ps, "argsNew", 1); indirect(ps, "tileAlloc", 32); dispatch(ps, "tileFix", 1);
         indirect(ps, "initNew", 48); dispatch(ps, "slotListBuild", self.ntiles); dispatch(ps, "argsSlots", 1);
+        if init > 0 { indirect(ps, "phiInitAll", 64); }
         if self.only_tiles { return; }
         indirect(ps, "clearSlots", 80);
         dispatch(ps, if self.opt.p2g_win && !apic { "p2gWin" } else { "p2g" }, n);
+        if nb { indirect(ps, "nbPhi", 64); indirect(ps, "nbJacA", 64); indirect(ps, "nbJacB", 64); indirect(ps, "nbJacA", 64); }
         if self.solid_dirty { indirect(ps, "solidBuild", 64); self.solid_dirty = false; }
         indirect(ps, "classify", 64);
+        if nb { indirect(ps, "nbVel", 64); }
         indirect(ps, "normFaces", 64);
+        if !self.ww_only { self.water_stages(gpu, ps, n, iters); }
+        // the air field first, so the whitewater moves with this step's air
+        if self.air_on_step {
+            let na = self.air_dims.unwrap().cells;
+            dispatch(ps, "wwArgs", 1);
+            dispatch(ps, "airClear", na); dispatch(ps, "airSplatW", n); indirect(ps, "airSplatS", 112); dispatch(ps, "airUpdate", na);
+            if self.air_real {
+                dispatch(ps, "airDiv", na);
+                for _ in 0..self.air_iters { dispatch(ps, "airRed", na); dispatch(ps, "airBlack", na); }
+                dispatch(ps, "airProj", na);
+            }
+            dispatch(ps, "airCopy", na);
+            if self.air_feel { dispatch(ps, "airDragW", n); }   // the water feels this step's air
+        }
+        // whitewater: sampling the water at each point, moving the points, and making new ones from the water
+        if self.spray_cap > 0 {
+            dispatch(ps, "wwArgs", 1); indirect(ps, "wwSample", 112);
+            indirect(ps, "sprayStep", 112);
+            if self.spr_on_step { dispatch(ps, "sprayEmit", n); if f32::from_bits(self.pu[83]) > 0.0 { dispatch(ps, "spinEmit", n); } }
+            if self.drip_on_step { dispatch(ps, "dripStep", self.ndrip); }
+        }
+        if nb {
+            dispatch(ps, "nbKill", n); dispatch(ps, "nbReset", 1); dispatch(ps, "nbDead", n); indirect(ps, "nbDeficit", 64); dispatch(ps, "nbArgs", 1); indirect(ps, "nbSpawn", 96);
+        }
+        if self.ww_only { dispatch(ps, "wwAdvect", n); }   // the particles move on towards the next baked frame
+    }
+
+    /// The water's own solve: divergence, pressure, projection, grid to particles, fast drops and separation (left out by the
+    /// whitewater-only pass, which moves the baked particles along their own velocity instead).
+    fn water_stages(&self, gpu: &Gpu, ps: &mut wgpu::ComputePass, n: u32, iters: u32) {
+        let g = &self.groups;
+        let args = &self.buf[&14];
+        let dispatch = |ps: &mut wgpu::ComputePass, name: &str, items: u32| {
+            let groups = items.div_ceil(256);
+            ps.set_pipeline(&gpu.pipes[name].pipeline);
+            ps.set_bind_group(0, &g[name], &[]);
+            ps.dispatch_workgroups(groups.min(65535), groups.div_ceil(65535), 1);
+        };
+        let indirect = |ps: &mut wgpu::ComputePass, name: &str, off: u64| {
+            ps.set_pipeline(&gpu.pipes[name].pipeline);
+            ps.set_bind_group(0, &g[name], &[]);
+            ps.dispatch_workgroups_indirect(args, off);
+        };
+        let (apic, nb) = (self.opt.apic, self.nb_on);
         indirect(ps, "divergence", 64);
         indirect(ps, "settleMark", 64);
         dispatch(ps, "listClear", 1);
@@ -495,6 +796,7 @@ impl FlipSim {
             sweep(ps, 2);
         }
         indirect(ps, "project", 64);
+        if nb { indirect(ps, "saveVel", 64); }
         if self.opt.extrap { indirect(ps, "extrap", 64); }
         dispatch(ps, if apic { if gpu.pipes.contains_key("g2pAo") { "g2pAo" } else { "g2pA" } } else if self.opt.p2g_win { "g2pWin" } else { "g2p" }, n);
         if self.opt.ballistic { dispatch(ps, "ballistic", n); }
@@ -507,7 +809,7 @@ impl FlipSim {
 
     /// Runs only the block allocation until the starting water fits the pool (prime).
     pub fn prime(&mut self, gpu: &Gpu, g: f32) {
-        let par = StepPar { g, iters: 1, flip: 0.95, apic_flip: 0.8, comp: 0.0, vmax: 14.0, vs: 1.0, tear: 0.0, time: 0.0 };
+        let par = StepPar::bare(g, 1);
         for _ in 0..8 {
             self.only_tiles = true;
             self.step(gpu, 1.0 / 60.0, &par, &[]);
@@ -555,6 +857,53 @@ impl FlipSim {
         st.unmap();
         self.collect_stats(gpu);
         n
+    }
+
+    /// Copies bytes from buffer k at off into a reused staging buffer and maps it.
+    fn read_into(gpu: &Gpu, src: &wgpu::Buffer, off: u64, bytes: u64, stage: &mut Option<wgpu::Buffer>, enc: Option<wgpu::CommandEncoder>) -> Vec<u8> {
+        if stage.as_ref().map(|s| s.size() < bytes).unwrap_or(true) {
+            *stage = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("stage"), size: bytes.max(16).div_ceil(4) * 4,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+        }
+        let st = stage.as_ref().unwrap();
+        let mut enc = enc.unwrap_or_else(|| gpu.device.create_command_encoder(&Default::default()));
+        enc.copy_buffer_to_buffer(src, off, st, 0, bytes);
+        gpu.queue.submit([enc.finish()]);
+        st.slice(..bytes).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let v = st.slice(..bytes).get_mapped_range().unwrap().to_vec();
+        st.unmap();
+        v
+    }
+
+    /// Every whitewater slot handed out so far (until the ring wraps the rest were never used): positions with life in w, then
+    /// velocities with kind in w (readSpray).
+    pub fn read_spray(&mut self, gpu: &Gpu) -> Option<(usize, Vec<f32>, Vec<f32>)> {
+        if self.spray_cap == 0 { return None; }
+        let used = { let a = Self::read_into(gpu, &self.buf[&30], 0, 16, &mut self.sctl_stage, None); u32::from_le_bytes([a[0], a[1], a[2], a[3]]) };
+        let n = used.min(self.spray_cap).max(1) as u64;
+        let p: Vec<f32> = bytemuck::cast_slice(&Self::read_into(gpu, &self.buf[&28], 0, n * 16, &mut self.sstage, None)).to_vec();
+        let v: Vec<f32> = bytemuck::cast_slice(&Self::read_into(gpu, &self.buf[&29], 0, n * 16, &mut self.sstage, None)).to_vec();
+        Some((n as usize, p, v))
+    }
+
+    /// The deep water points of the last step (narrow band look; x y z, 4096 + speed), the empty ones dropped (readDeep).
+    pub fn read_deep(&mut self, gpu: &Gpu) -> Option<Vec<f32>> {
+        if !self.deep_on || !self.nb_on || !self.vel_g_on || self.n == 0 { return None; }
+        let off = f32::from_bits(self.pu[62]).round() as u64 * 16;
+        let bytes = DEEPMAX as u64 * 16;
+        if off + bytes > self.buf[&15].size() { return None; }
+        self.make_groups(gpu);
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        {
+            let mut ps = enc.begin_compute_pass(&Default::default());
+            let g3 = DEEPMAX.div_ceil(256);
+            ps.set_pipeline(&gpu.pipes["deepClear"].pipeline); ps.set_bind_group(0, &self.groups["deepClear"], &[]); ps.dispatch_workgroups(g3.min(65535), g3.div_ceil(65535), 1);
+            ps.set_pipeline(&gpu.pipes["deepPick"].pipeline); ps.set_bind_group(0, &self.groups["deepPick"], &[]); ps.dispatch_workgroups_indirect(&self.buf[&14], 64);
+            ps.set_pipeline(&gpu.pipes["deepFin"].pipeline); ps.set_bind_group(0, &self.groups["deepFin"], &[]); ps.dispatch_workgroups(1, 1, 1);
+        }
+        let a: Vec<f32> = bytemuck::cast_slice(&Self::read_into(gpu, &self.buf[&15], off, bytes, &mut self.dstage, Some(enc))).to_vec();
+        Some(a.chunks(4).filter(|q| q[1] >= -1e5).flatten().copied().collect())
     }
 
     fn read_buf(&self, gpu: &Gpu, k: u32, bytes: u64) -> Vec<u8> {

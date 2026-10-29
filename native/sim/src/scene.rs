@@ -2,6 +2,7 @@
 //! water. Ports of buildDesc / bakeRes / simPar / resolveFills / volRec / snap (src/app), and keyPose, sampleObjState, objSpeed and
 //! SceneRunner (src/shared.js). Settings missing from a scene file take the page's defaults (S in src/app/00-state.js).
 
+use crate::flip::{Air, Drip, Ocean, Spr};
 use crate::sdf::{self, Sdf};
 use serde_json::Value;
 use std::sync::Arc;
@@ -55,13 +56,13 @@ pub struct Obj {
 /// Starting water: a box, a sphere, or a water volume object (its distance grid and pose).
 #[derive(Clone)]
 pub enum Fill {
-    Box { x0: f32, x1: f32, y0: f32, y1: f32, z0: f32, z1: f32 },
-    Sphere { x: f32, y: f32, z: f32, r: f32, vy: f32 },
+    Box { x0: f64, x1: f64, y0: f64, y1: f64, z0: f64, z1: f64 },
+    Sphere { x: f64, y: f64, z: f64, r: f64, vy: f64 },
     Vol { sdf: Arc<Sdf>, pos: [f32; 3], r: [f32; 9], s: Option<[f32; 3]>, lo: [f32; 3], hi: [f32; 3] },
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Event { pub t: f32, pub x: f32, pub y: f32, pub z: f32, pub r: f32 }
+pub struct Event { pub t: f32, pub x: f64, pub y: f64, pub z: f64, pub r: f64 }
 
 /// What the page's buildDesc makes: everything a bake needs. Only what the native solver uses so far is here.
 #[derive(Clone)]
@@ -72,7 +73,16 @@ pub struct Desc {
     pub detail: f32, pub col_max: f32, pub vmax_w: f32, pub scale: f32, pub tear: f32,
     pub size: [f32; 3], pub open: u32, pub org: [f32; 3],
     pub fills: Vec<Fill>, pub events: Vec<Event>, pub objs: Vec<Obj>,
-    /// parts of the scene the native solver does not run yet (narrow band, ocean, whitewater, air, drips): said once, then left out
+    pub wind: [f32; 3], pub drag: f32, pub gust: f32, pub foam_sens: f32, pub foam_tau: f32,
+    /// narrow band depth in cells (bakeNb: the live band kept in metres), when on
+    pub nb: Option<f32>,
+    pub ocean: Option<Ocean>,
+    pub spr: Option<Spr>, pub air: Option<Air>, pub drip: Option<Drip>,
+    /// the most whitewater points alive at once (0: whitewater off)
+    pub spray_cap: u32,
+    /// narrow band look: the grid-only deep water saved as points too
+    pub nb_look: bool,
+    /// parts of the scene the native solver does not run yet: said once, then left out
     pub left_out: Vec<String>,
     /// the scene file, kept for the cache header (the page reloads it from there)
     pub scene: Value,
@@ -111,6 +121,9 @@ pub fn desc_from_scene(scene: &Value, o: &BakeOpts) -> Result<Desc, String> {
     let mn = bx.get("min").cloned().unwrap_or(Value::Null);
     let min = [num(&mn, "x", -size[0] as f64 / 2.0) as f32, num(&mn, "y", 0.0) as f32, num(&mn, "z", -size[2] as f64 / 2.0) as f32];
     // S.org: the middle of the tank's floor
+    // the page fits the tank to whole cells of the live grid, its low corner kept (makeSim); a scene saved at this spacing is already fitted
+    let live = crate::flip::layout(o.spacing, num(&sv, "cellRatio", 2.0) as f32, size);
+    let (size, size64) = (live.size, live.size64());
     let org = [min[0] + size[0] / 2.0, min[1], min[2] + size[2] / 2.0];
     let op = bx.get("open").cloned().unwrap_or(Value::Null);
     let open = ["x0", "x1", "y0", "y1", "z0", "z1"].iter().enumerate().map(|(k, n)| (flag(&op, n, false) as u32) << k).sum();
@@ -134,12 +147,36 @@ pub fn desc_from_scene(scene: &Value, o: &BakeOpts) -> Result<Desc, String> {
     let sep = num(&sv, "sep", 10.0) as f32;
     let accurate = o.accurate.unwrap_or(bk.get("accuracy").and_then(Value::as_str) == Some("accurate"));
 
-    let mut left_out = Vec::new();
-    let ocean_on = scene.pointer("/ocean/on").and_then(Value::as_bool).unwrap_or(false);
-    if flag(&sv, "nbOn", false) || ocean_on { left_out.push("narrow band".to_string()); }
-    if ocean_on { left_out.push("ocean".into()); }
-    if flag(&sv, "sprOn", true) { left_out.push("whitewater".into()); }
-    if flag(&sv, "airOn", true) { left_out.push("air field".into()); }
+    let left_out = Vec::new();
+    // narrow band and ocean (nbCfg, bakeNb, oceanCfg): a band of 10 cells or more is full depth
+    let ov = scene.get("ocean").cloned().unwrap_or(Value::Null);
+    let ocean = flag(&ov, "on", false).then(|| Ocean {
+        height: num(&ov, "height", 2.0) / scale as f64, length: num(&ov, "length", 30.0) / scale as f64, dir: num(&ov, "dir", 0.0), spread: num(&ov, "spread", 25.0),
+        seed: num(&ov, "seed", 1.0) as i32, level: num(&ov, "level", 0.5) * size[1] as f64, layer: num(&ov, "layer", 0.15) * size[0].min(size[2]) as f64 });
+    let nb_active = flag(&sv, "nbOn", false) || ocean.is_some();
+    let nb = nb_active.then(|| {
+        let band = num(&sv, "nbBand", 3.0);
+        if band >= 10.0 { 1e4f32 } else { ((band * o.spacing as f64 / d as f64 * 10.0).round() / 10.0) as f32 }
+    });
+    // whitewater, air field and drips (simPar)
+    let spr_on = flag(&sv, "sprOn", true);
+    let spr = spr_on.then(|| Spr {
+        rate: 12.0 * num(&sv, "sprAmt", 2.0) as f32, min: num(&sv, "sprMin", 2.5) as f32, life: num(&sv, "sprLife", 1.2) as f32, mist: num(&sv, "sprMist", 0.3) as f32,
+        drag: num(&sv, "sprDrag", 1.0) as f32, mdrag: num(&sv, "mistDrag", 5.0) as f32,
+        foam_life: num(&sv, "wwFoamLife", 8.0) as f32, rise: num(&sv, "wwRise", 0.4) as f32 * k, crest: num(&sv, "wwCrest", 1.0) as f32, impact: num(&sv, "wwImpact", 0.25) as f32,
+        spin: num(&sv, "wwSpin", 0.5) as f32, edge: num(&sv, "wwEdge", 70.0) as f32, erode: num(&sv, "wwErode", 0.25) as f32, land: num(&sv, "wwLand", 1.0) as f32,
+        trail: num(&sv, "wwTrail", 1.0) as f32,
+        area: [(num(&sv, "wwArea", 2.0) as f32).max(1.0), (num(&sv, "wwAreaUp", 2.0) as f32).max(1.0)] });
+    let air = flag(&sv, "airOn", true).then(|| Air {
+        couple: num(&sv, "airCouple", 3.0) as f32, decay: num(&sv, "airDecay", 0.6) as f32, real: flag(&sv, "airReal", true), feel: flag(&sv, "airFeel", true),
+        size: num(&sv, "turbSize", 3.0) as f32 * k, oct: num(&sv, "turbOct", 3.0) as f32, speed: num(&sv, "turbSpeed", 0.4) as f32, swirl: num(&sv, "airSwirl", 0.5) as f32,
+        iters: 20, blur: 0.35 });
+    let drip = (spr_on && flag(&sv, "dripOn", true)).then(|| Drip { rate: num(&sv, "dripRate", 2.0) as f32, dry: num(&sv, "dripDry", 3.0) as f32 });
+    let spray_cap = if spr_on { num(&sv, "sprCap", 600000.0) as u32 } else { 0 };
+    let nb_look = flag(&sv, "nbLook", false) && nb_active;
+    let wv = sv.get("wind").cloned().unwrap_or(Value::Null);
+    let (ws, waz) = (num(&wv, "speed", 0.0) as f32, (num(&wv, "az", 0.0) as f32).to_radians());
+    let wind = [ws * waz.cos() * k, num(&wv, "up", 0.0) as f32 * k, ws * waz.sin() * k];
 
     // objects: meshes get their distance grids (rebuildSDF: cell 0.025, margin 0.16, in the mesh's own unscaled coordinates)
     let smooth = scene.pointer("/timeline/smooth").and_then(Value::as_bool).unwrap_or(true);
@@ -193,25 +230,25 @@ pub fn desc_from_scene(scene: &Value, o: &BakeOpts) -> Result<Desc, String> {
         objs.push(ob);
     }
     // box fills are shares of the tank's width and depth (resolveFills)
-    let (w, dd) = (size[0], size[2]);
+    let (w, dd) = (size64[0], size64[2]);
     let mut box_fills = Vec::new();
     for f in scene.get("fills").and_then(Value::as_array).cloned().unwrap_or_default() {
         match f.get("t").and_then(Value::as_str) {
             Some("box") => {
-                let y1 = (num(&f, "y1", 0.0) as f32).min(size[1]);
-                let y0 = num(&f, "y0", 0.0) as f32;
+                let y1 = num(&f, "y1", 0.0).min(size64[1]);
+                let y0 = num(&f, "y0", 0.0);
                 if y1 - y0 > 0.01 {
-                    let fx = |k: &str| num(&f, k, 0.0) as f32;
+                    let fx = |k: &str| num(&f, k, 0.0);
                     box_fills.push(Fill::Box { x0: -w / 2.0 + fx("fx0") * w, x1: -w / 2.0 + fx("fx1") * w, y0, y1, z0: -dd / 2.0 + fx("fz0") * dd, z1: -dd / 2.0 + fx("fz1") * dd });
                 }
             }
-            Some("sphere") | None => box_fills.push(Fill::Sphere { x: num(&f, "x", 0.0) as f32, y: num(&f, "y", 0.0) as f32, z: num(&f, "z", 0.0) as f32, r: num(&f, "r", 0.0) as f32, vy: num(&f, "vy", 0.0) as f32 }),
+            Some("sphere") | None => box_fills.push(Fill::Sphere { x: num(&f, "x", 0.0), y: num(&f, "y", 0.0), z: num(&f, "z", 0.0), r: num(&f, "r", 0.0), vy: num(&f, "vy", 0.0) }),
             _ => {}
         }
     }
     box_fills.extend(fills);
     let events = scene.get("events").and_then(Value::as_array).map(|a| a.iter().map(|e| Event {
-        t: num(e, "t", 0.0) as f32, x: num(e, "x", 0.0) as f32, y: num(e, "y", 0.0) as f32, z: num(e, "z", 0.0) as f32, r: num(e, "r", 0.38) as f32 }).collect()).unwrap_or_default();
+        t: num(e, "t", 0.0) as f32, x: num(e, "x", 0.0), y: num(e, "y", 0.0), z: num(e, "z", 0.0), r: num(e, "r", 0.38) }).collect()).unwrap_or_default();
 
     let g = num(&sv, "g", 9.8) as f32 * k;
     let iters = num(&sv, "iters", 30.0) as u32;
@@ -222,13 +259,25 @@ pub fn desc_from_scene(scene: &Value, o: &BakeOpts) -> Result<Desc, String> {
         cell_ratio, sort: true, p2g_win: false, ballistic: true, settle: false, mg: true,
         detail, col_max: num(&sv, "colMax", 100.0) as f32 * k, vmax_w: num(&sv, "vmaxW", 50.0) as f32 * k, scale,
         tear: num(&sv, "tear", 0.5) as f32 * 0.5 * cell_ratio.powi(3),
-        size, open, org, fills: box_fills, events, objs, left_out, scene: scene.clone(), light: Value::Null,
+        size, open, org, fills: box_fills, events, objs,
+        wind, drag: num(&sv, "airDrag", 0.3) as f32 * k, gust: num(&sv, "gust", 1.0) as f32 * k, foam_sens: num(&sv, "foamSens", 1.0) as f32 * k, foam_tau: num(&sv, "foamTau", 1.2) as f32,
+        nb, ocean, spr, air, drip, spray_cap, nb_look,
+        left_out, scene: scene.clone(), light: Value::Null,
     };
     dsc.light = serde_json::json!({
         "d": dsc.d, "maxN": dsc.max_n, "fps": dsc.fps, "substeps": dsc.substeps, "frames": dsc.frames, "g": dsc.g, "iters": dsc.iters,
         "flip": dsc.flip, "apicFlip": dsc.apic_flip, "comp": dsc.comp, "sep": dsc.sep, "apic": dsc.apic, "accurate": dsc.accurate, "cellRatio": dsc.cell_ratio,
         "sortP": dsc.sort, "p2gWin": dsc.p2g_win, "ballistic": dsc.ballistic, "settle": dsc.settle, "mg": dsc.mg, "maxSub": dsc.max_sub, "detail": dsc.detail,
         "colMax": dsc.col_max, "vmaxW": dsc.vmax_w, "scale": dsc.scale, "tear": dsc.tear, "size": dsc.size, "open": dsc.open,
+        "wind": dsc.wind, "drag": dsc.drag, "gust": dsc.gust, "foamSens": dsc.foam_sens, "foamTau": dsc.foam_tau,
+        "nb": dsc.nb.map(|b| serde_json::json!({ "on": true, "band": b })),
+        "ocean": dsc.ocean.map(|c| serde_json::json!({ "on": true, "height": c.height, "length": c.length, "dir": c.dir, "spread": c.spread, "seed": c.seed, "level": c.level, "layer": c.layer })),
+        "spr": dsc.spr.map(|s| serde_json::json!({ "rate": s.rate, "min": s.min, "life": s.life, "mist": s.mist, "drag": s.drag, "mdrag": s.mdrag,
+            "ww": { "foamLife": s.foam_life, "rise": s.rise, "crest": s.crest, "impact": s.impact, "spin": s.spin, "edge": s.edge, "erode": s.erode, "land": s.land, "trail": s.trail,
+                "area": { "k": s.area[0], "up": s.area[1] } } })),
+        "air": dsc.air.map(|a| serde_json::json!({ "on": true, "couple": a.couple, "decay": a.decay, "real": a.real, "feel": a.feel, "size": a.size, "oct": a.oct, "speed": a.speed, "swirl": a.swirl, "iters": a.iters })),
+        "drip": dsc.drip.map(|d| serde_json::json!({ "on": true, "rate": d.rate, "dry": d.dry })),
+        "sprayCap": dsc.spray_cap, "nbLook": dsc.nb_look,
         "native": { "spacing": o.spacing, "leftOut": dsc.left_out },
     });
     Ok(dsc)

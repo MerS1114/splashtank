@@ -1,10 +1,15 @@
-//! SplashTank native, phase 1: opens bake caches (.splc) and scene files (.json) made by the web page and plays them back.
+//! SplashTank native: opens bake caches (.splc) and scene files (.json) made by the web page and plays them back, and bakes them.
 //!
 //!   splashtank [file.splc | scene.json ...]                    the window
 //!   splashtank --info file.splc                                what a cache holds, frame by frame
 //!   splashtank --picture out.png file [--frame n] [--size WxH] draws one frame without a window
 //!   splashtank --bake in.json|in.splc out.splc [--spacing 0.04] [--seconds s] [--detail 1|1.5|2] [--max-points n] [--accurate]
 //!       bakes without a window, streaming frames to out.splc. From a page cache: its scene and settings, baked again natively.
+//!       --water-only leaves whitewater, air and drips out (the page's Bake water).
+//!   splashtank --bake-whitewater in.splc out.splc [--scene scene.json]
+//!       whitewater made from a finished bake's water (Bake whitewater), with the cache's scene or the one given.
+//!   splashtank --detail-pass in.splc out.splc [--region cx,cy,cz,sx,sy,sz] [--k 2|3] [--pull 0.15] [--scene scene.json]
+//!       a finer sim over a region of a finished bake (Detail); the region as shares of the tank, by default 0.5,0.5,0.5,0.4,1,0.4.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -67,7 +72,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     if args.iter().any(|a| a.starts_with("--")) { attach_console(); }
-    if args.iter().any(|a| a == "--bake") {
+    if args.iter().any(|a| a == "--bake" || a == "--bake-whitewater" || a == "--detail-pass") {
         if let Err(e) = bake_cli::run(&args) { eprintln!("{e}"); std::process::exit(1); }
         return;
     }
