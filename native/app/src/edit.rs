@@ -161,6 +161,13 @@ pub fn tank(ui: &mut egui::Ui, j: &mut Value) -> bool {
     changed
 }
 
+thread_local! {
+    /// The key group of the Objects tab row under the mouse (I over a row keys only that group, as the page does).
+    static HOVER: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+pub fn hover_group() -> Option<&'static str> { HOVER.with(|h| h.get()) }
+fn hovered(r: &egui::Response, g: &'static str) { if r.contains_pointer() { HOVER.with(|h| h.set(Some(g))); } }
+
 /// A field's name coloured as Blender does: yellow where its group has a key on the frame shown, green where it is animated.
 fn klabel(ui: &mut egui::Ui, text: &str, (now, anim): (bool, bool), tip: &str) {
     let c = if now { egui::Color32::from_rgb(0xe9, 0xc8, 0x4a) } else if anim { egui::Color32::from_rgb(0x6c, 0xc0, 0x4a) } else { egui::Color32::from_gray(0xa0) };
@@ -172,18 +179,21 @@ fn klabel(ui: &mut egui::Ui, text: &str, (now, anim): (bool, bool), tip: &str) {
 #[allow(clippy::too_many_arguments)]
 fn vec3(ui: &mut egui::Ui, o: &mut Value, name: &str, keys: [&str; 3], d: f64, scale: f64, speed: f64, tip: &str, ks: (bool, bool)) -> bool {
     let mut changed = false;
-    ui.horizontal(|ui| {
+    let g = match keys[0] { "x" => "loc", "rx" => "rot", _ => "scale" };
+    let r = ui.horizontal(|ui| {
         klabel(ui, name, ks, tip);
         for k in keys {
             let mut v = o[k].as_f64().unwrap_or(d) * scale;
             if ui.add(egui::DragValue::new(&mut v).speed(speed).max_decimals(3)).changed() { o[k] = json!(v / scale); changed = true; }
         }
     });
+    hovered(&r.response, g);
     changed
 }
 
 /// The Objects tab: the outliner and the selected object's settings (the page's object panel).
 pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>, t: f64, hidden: &mut Vec<u64>) -> bool {
+    HOVER.with(|h| h.set(None));
     let mut changed = false;
     let Some(list) = j.get_mut("objs").and_then(Value::as_array_mut) else { return false; };
     if list.is_empty() { ui.label("No objects."); return false; }
@@ -229,7 +239,8 @@ pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>, t: f64
         ui.horizontal(|ui| { ui.label("Spin"); if ui.add(egui::Slider::new(&mut spin, -6.0..=6.0).step_by(0.1).suffix("/s")).changed() { o["spin"] = json!(spin); changed = true; } });
     } else {
         let mut on = o["on"].as_bool().unwrap_or(true);
-        ui.horizontal(|ui| { if ui.checkbox(&mut on, "").changed() { o["on"] = json!(on); changed = true; } klabel(ui, "Emitting", ko, ""); });
+        let r = ui.horizontal(|ui| { if ui.checkbox(&mut on, "").changed() { o["on"] = json!(on); changed = true; } klabel(ui, "Emitting", ko, ""); });
+        hovered(&r.response, "on");
         let mut mode = o["mode"].as_str().unwrap_or("smooth").to_owned();
         ui.horizontal(|ui| {
             ui.label("Emission");
@@ -242,7 +253,10 @@ pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>, t: f64
                 if k == "density" && !random { continue; }
                 let mut v = num(o, k, d);
                 klabel(ui, name, match k { "speed" => kv, "radius" => kd, "az" | "el" => ka, _ => (false, false) }, "");
-                if ui.add(egui::Slider::new(&mut v, lo..=hi).step_by(step).suffix(suffix)).changed() { o[k] = json!(v); changed = true; }
+                let g: Option<&'static str> = match k { "speed" => Some("speed"), "radius" => Some("radius"), "az" | "el" => Some("aim"), _ => None };
+                let sr = ui.add(egui::Slider::new(&mut v, lo..=hi).step_by(step).suffix(suffix));
+                if sr.changed() { o[k] = json!(v); changed = true; }
+                if let Some(g) = g { hovered(&sr, g); }
                 ui.end_row();
             }
         });

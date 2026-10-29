@@ -116,6 +116,11 @@ struct App {
     splay: bool,
     /// Blender's record button: changing an object keys what changed
     auto_key: bool,
+    /// a key time picked on the timeline (Delete removes the keys there), and a key mark being dragged (from, to)
+    sel_key: Option<f64>,
+    key_drag: Option<(f64, f64)>,
+    /// Delete already removed a picked key this frame (so it does not also delete the selected objects)
+    key_del_now: bool,
     /// the live sim: on, its own worker (its own GPU device), the frames coming in, and whether the scene changed since it started
     live: bool,
     live_w: Worker,
@@ -178,7 +183,7 @@ impl App {
         App {
             doc: Doc::default(), tab: Tab::Bake, scene_path: None, dirty: false, sel: None, r: Renderer::new(&rs.device), target: None,
             sel_set: Vec::new(), tool: Tool::Select, tf: None, tf_text: String::new(), scene_view: false, undo: Vec::new(), redo: Vec::new(), stable: None, burst: false,
-            changed_now: false, hover: None, add_at: None, box_from: None, new_menu: false, edit: None, etf: None, orient_local: false, snap_on: false, snap_to: 0, handles: true, face_drag: None, st: 0.0, splay: false, auto_key: false,
+            changed_now: false, hover: None, add_at: None, box_from: None, new_menu: false, edit: None, etf: None, orient_local: false, snap_on: false, snap_to: 0, handles: true, face_drag: None, st: 0.0, splay: false, auto_key: false, sel_key: None, key_drag: None, key_del_now: false,
             live: false, live_w: Worker::new(ctx.clone()), live_rx: None, live_pending: Vec::new(), live_stale: false, swallow: false,
             cam: Orbit { target: glam::Vec3::new(0.0, 0.7, 0.0), theta: 0.8, phi: 1.0, r: 6.2, ortho: false }, goal: None,
             t: 0.0, playing: false, looping: true, speed: 1.0, look: Look::default(),
@@ -521,14 +526,56 @@ impl App {
     /// I: keys every group of the selected objects at the time shown; Alt+I takes their key on that frame off.
     fn key_selected(&mut self, remove: bool) {
         if self.sel_set.is_empty() { self.msg = "Click an object first.".into(); return; }
-        let (st, dur, sel) = (self.st, self.scene_dur(), self.sel_set.clone());
+        // over a row in the Objects tab, only that group of the object shown there (the page's I over a field)
+        let row = if self.tab == Tab::Objects { crate::edit::hover_group() } else { None };
+        let groups: Option<Vec<&str>> = row.map(|g| vec![g]);
+        let (st, dur) = (self.st, self.scene_dur());
+        let sel = match (row, self.sel) { (Some(_), Some(a)) => vec![a], _ => self.sel_set.clone() };
         let mut n = 0;
         if let Some(objs) = self.objs_mut() {
-            for i in sel { if let Some(o) = objs.get_mut(i) { if remove { if tf::clear_key(o, st, None) { n += 1; } } else { tf::add_key(o, st, None, dur); n += 1; } } }
+            for i in sel { if let Some(o) = objs.get_mut(i) { if remove { if tf::clear_key(o, st, groups.as_deref()) { n += 1; } } else { tf::add_key(o, st, groups.as_deref(), dur); n += 1; } } }
         }
+        if let (Some(g), true) = (row, n > 0) { self.msg = format!("{} ({g})", if remove { "Key taken off" } else { "Keyed" }); if !remove { self.edited(); self.apply_keys(); return; } }
         self.msg = match (remove, n) { (true, 0) => "No key on this frame.".into(), (true, _) => format!("Key taken off at {st:.2} s"), _ => format!("Keyed at {st:.2} s") };
         if n > 0 { self.edited(); self.apply_keys(); }
     }
+    /// The keys at time from (of the selected objects, or of all when none is selected) moved to time to; a key already there takes
+    /// their channels.
+    fn move_keys(&mut self, from: f64, to: f64) {
+        if (from - to).abs() < 1e-6 { return; }
+        let sel = self.sel_set.clone();
+        let half = 0.5 / tf::FPS_TL;
+        let Some(objs) = self.objs_mut() else { return; };
+        for (i, o) in objs.iter_mut().enumerate() {
+            if !sel.is_empty() && !sel.contains(&i) { continue; }
+            let Some(ks) = o["keys"].as_array_mut() else { continue; };
+            let Some(a) = ks.iter().position(|k| (k["t"].as_f64().unwrap_or(-1.0) - from).abs() < half) else { continue; };
+            let mut k = ks.remove(a);
+            k["t"] = serde_json::json!(to);
+            match ks.iter_mut().find(|q| (q["t"].as_f64().unwrap_or(-1.0) - to).abs() < half) {
+                Some(ex) => { if let (Some(e), Some(m)) = (ex.as_object_mut(), k.as_object()) { for (c, v) in m { if c != "t" { e.insert(c.clone(), v.clone()); } } } }
+                None => ks.push(k),
+            }
+            ks.sort_by(|p, q| p["t"].as_f64().unwrap_or(0.0).total_cmp(&q["t"].as_f64().unwrap_or(0.0)));
+        }
+        self.sel_key = Some(to);
+        self.msg = format!("Key moved from {from:.2} s to {to:.2} s");
+        self.edited();
+        self.apply_keys();
+    }
+    /// Delete with a key picked on the timeline: the keys at that time go.
+    fn delete_keys(&mut self) {
+        let Some(t) = self.sel_key.take() else { return; };
+        self.key_del_now = true;
+        let sel = self.sel_set.clone();
+        let mut n = 0;
+        if let Some(objs) = self.objs_mut() {
+            for (i, o) in objs.iter_mut().enumerate() { if (sel.is_empty() || sel.contains(&i)) && tf::clear_key(o, t, None) { n += 1; } }
+        }
+        self.msg = format!("Removed {n} key{} at {t:.2} s", if n == 1 { "" } else { "s" });
+        if n > 0 { self.edited(); self.apply_keys(); }
+    }
+
     /// The key times of the selected objects (of all objects when none is selected), for the timeline's marks and Up/Down.
     fn key_times(&self) -> Vec<f64> {
         let objs = self.objs();
@@ -585,12 +632,26 @@ impl App {
             let rr = r.rect;
             let hr = rr.height() / 2.5;
             let (x0, y) = (rr.left() + hr, rr.center().y);
-            for t in self.key_times() {
-                let x = x0 + (t / dur) as f32 * (sw - 2.0 * hr);
-                let p = egui::pos2(x, y);
-                let s = 5.0;
+            // a mark can be clicked (picks that time: Delete removes the keys there) and dragged to another frame
+            let span = sw - 2.0 * hr;
+            for (i, t) in self.key_times().into_iter().enumerate() {
+                let shown_t = match self.key_drag { Some((from, to)) if (from - t).abs() < 1e-6 => to, _ => t };
+                let p = egui::pos2(x0 + (shown_t / dur) as f32 * span, y);
+                let kr = ui.interact(egui::Rect::from_center_size(p, egui::vec2(12.0, 14.0)), ui.scope_id().with(("keymark", i)), egui::Sense::click_and_drag())
+                    .on_hover_text("A key: click to pick it (Delete removes it), drag to move it");
+                if kr.clicked() { self.sel_key = Some(t); self.splay = false; self.set_time(t); }
+                if kr.dragged() {
+                    if let Some(px) = kr.interact_pointer_pos() {
+                        let nt = (((px.x - x0) / span) as f64 * dur * tf::FPS_TL).round().clamp(0.0, dur * tf::FPS_TL) / tf::FPS_TL;
+                        self.key_drag = Some((t, nt));
+                    }
+                }
+                if kr.drag_stopped() { if let Some((from, to)) = self.key_drag.take() { self.move_keys(from, to); } }
+                let picked = self.sel_key.is_some_and(|k| (k - t).abs() < 1e-6) || self.key_drag.is_some_and(|d| (d.0 - t).abs() < 1e-6);
+                let s = if picked { 6.5 } else { 5.0 };
+                let fill = if picked { egui::Color32::WHITE } else { egui::Color32::from_rgb(0xe9, 0xc8, 0x4a) };
                 ui.painter().add(egui::Shape::convex_polygon(vec![p + egui::vec2(0.0, -s), p + egui::vec2(s, 0.0), p + egui::vec2(0.0, s), p + egui::vec2(-s, 0.0)],
-                    egui::Color32::from_rgb(0xe9, 0xc8, 0x4a), egui::Stroke::new(1.0, egui::Color32::from_gray(0x20))));
+                    fill, egui::Stroke::new(1.0, egui::Color32::from_gray(0x20))));
             }
             ui.label(format!("{:.2} s", self.st));
         });
@@ -798,6 +859,7 @@ impl App {
         else if k(egui::Key::A) && mods.shift { self.add_at = Some(m); }
         else if k(egui::Key::A) { if mods.alt { self.select(None, false); } else { self.sel_set = (0..self.objs().len()).collect(); self.sel = self.sel.or(self.sel_set.first().copied()); } }
         else if k(egui::Key::D) && mods.shift { self.duplicate(m); }
+        else if k(egui::Key::Delete) && (self.sel_key.is_some() || self.key_del_now) { if !self.key_del_now { self.delete_keys(); } }
         else if k(egui::Key::X) || k(egui::Key::Delete) { self.delete_selected(); }
     }
 
@@ -1089,6 +1151,7 @@ impl eframe::App for App {
         self.last = now;
         self.frame_ms = self.frame_ms * 0.9 + dt * 1000.0 * 0.1;
 
+        self.key_del_now = false;
         let dropped: Vec<PathBuf> = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
         if let Some(p) = dropped.last() { self.open(p); }
         let n = self.frames();
@@ -1111,6 +1174,8 @@ impl eframe::App for App {
                     if up { if let Some(t) = self.key_times().into_iter().find(|&t| t > self.st + 1e-6) { self.splay = false; self.set_time(t); } }
                     if down { if let Some(t) = self.key_times().into_iter().rev().find(|&t| t < self.st - 1e-6) { self.splay = false; self.set_time(t); } }
                     if ki && !ctrl && self.edit.is_none() { self.key_selected(alt); }
+                    // Delete with a key picked on the timeline, wherever the mouse is
+                    if ui.input(|i| i.key_pressed(egui::Key::Delete)) && self.sel_key.is_some() && self.edit.is_none() { self.delete_keys(); }
                 }
             } else {
             if space && n > 0 { self.bake.follow = false; self.playing = !self.playing; }
