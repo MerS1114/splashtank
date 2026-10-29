@@ -124,6 +124,38 @@ mod tests {
         assert!(!std::env::temp_dir().join("never-written.splc").exists());
     }
 
+    /// Tall cells (native only): deep narrow-band water at rest stays at rest with a fraction of the blocks, and a ball of water dropped in
+    /// makes the tall cells give room back and ends with the water where the regular solver has it (centre height within a fifth of a cell; a tall solve left unconverged lost 0.018).
+    #[test]
+    fn tall_cells_match() {
+        let gpu = crate::gpu::Gpu::new().unwrap();
+        let bake = |tall: bool, drop: bool| {
+            let ev = if drop { serde_json::json!([{ "t": 0.05, "x": 0.0, "y": 2.1, "z": 0.0, "r": 0.25 }]) } else { serde_json::json!([]) };
+            let scene = serde_json::json!({ "app": "SplashTank", "version": 2, "box": { "min": { "x": -1, "y": 0, "z": -1 }, "size": { "w": 2, "h": 2.4, "d": 2 } },
+                "solver": { "iters": 30, "cap": 4000000, "nbOn": true, "nbBand": 3, "sprOn": false, "airOn": false, "tallCells": tall }, "bake": { "dur": 1.5, "fps": 24 },
+                "fills": [{ "t": "box", "fx0": 0, "fx1": 1, "y0": 0, "y1": 1.6, "fz0": 0, "fz1": 1 }], "objs": [], "events": ev });
+            let desc = crate::scene::desc_from_scene(&scene, &crate::scene::BakeOpts { spacing: 0.02, ..Default::default() }).unwrap();
+            let out = std::env::temp_dir().join(format!("splash-tall-{tall}-{drop}.splc"));
+            crate::bake::run(&gpu, &desc, &out, &Default::default(), |_| true).unwrap();
+            let c = splash_format::Cache::open(&out).unwrap();
+            c.info.meta["diag"].as_array().unwrap().clone()
+        };
+        let mean = |d: &[serde_json::Value], k: &str| d.iter().map(|x| x[k].as_f64().unwrap_or(0.0)).sum::<f64>() / d.len() as f64;
+        let cy = |d: &[serde_json::Value]| d.iter().map(|x| x["center"][1].as_f64().unwrap()).sum::<f64>() / d.len() as f64;
+        for drop in [false, true] {
+            let (a, b) = (bake(false, drop), bake(true, drop));
+            for d in &b { assert_eq!(d["nonFinite"], 0); }
+            assert!(b[1]["tallRow"].as_u64().unwrap() > 0, "tall cells in use");
+            let (ta, tb) = (&a[12..], &b[12..]);
+            let gap = (cy(ta) - cy(tb)).abs();
+            assert!(gap < 0.008, "drop {drop}: water centre {} against {} (cell 0.04)", cy(ta), cy(tb));
+            if !drop {
+                assert!(mean(tb, "blocksUsed") < 0.8 * mean(ta, "blocksUsed"), "fewer blocks: {} against {}", mean(tb, "blocksUsed"), mean(ta, "blocksUsed"));
+                assert_eq!(b.last().unwrap()["tallRow"], b[1]["tallRow"], "still water keeps its tall cells");
+            }
+        }
+    }
+
     /// A bake stopped partway (its checkpoint kept) carries on with --resume to the same water as one that ran straight through.
     #[test]
     fn resume_matches() {

@@ -266,6 +266,39 @@ pub fn read_checkpoint(path: &Path) -> Result<(Value, std::io::BufReader<std::fs
     Ok((v, std::io::BufReader::with_capacity(8 << 20, f)))
 }
 
+/// Tall cells: the row (a multiple of 8, 0 for none) below which deep water can be one cell a column, from the shallowest the water
+/// starts (an ocean's still level less its wave height, or water that covers the whole floor) less the band and a margin, and from the
+/// lowest any object comes over the bake (the room near it stays ordinary cells). margin: cells kept between row T and anything else.
+/// Also returns the water's surface height in cells (what the tall cells' starting pressure is worked out from).
+pub fn tall_row(desc: &Desc, lay: &crate::flip::Layout, band: f32, margin: u32) -> (u32, f32) {
+    let (h, b) = (lay.h as f64, lay.b);
+    let mut depth: Option<f64> = desc.ocean.map(|oc| oc.level - b.y0 as f64 - oc.height);
+    for f in &desc.fills {
+        let cover = |x0: f64, x1: f64, z0: f64, z1: f64| x0 <= b.x0 as f64 + 2.0 * h && x1 >= b.x1 as f64 - 2.0 * h && z0 <= b.z0 as f64 + 2.0 * h && z1 >= b.z1 as f64 - 2.0 * h;
+        let d = match f {
+            Fill::Box { x0, x1, y0, y1, z0, z1 } if cover(*x0, *x1, *z0, *z1) && *y0 <= b.y0 as f64 + h => Some(y1 - b.y0 as f64),
+            Fill::Vol { lo, hi, .. } if cover(lo[0] as f64, hi[0] as f64, lo[2] as f64, hi[2] as f64) && lo[1] as f64 <= b.y0 as f64 + 2.0 * h => Some(hi[1] as f64 - b.y0 as f64),
+            _ => None,
+        };
+        if let Some(d) = d { depth = Some(depth.map_or(d, |x: f64| x.max(d))); }
+    }
+    let Some(depth) = depth else { return (0, 0.0); };
+    let surf = (desc.ocean.map_or(depth, |oc| oc.level - b.y0 as f64) / h) as f32;
+    let mut cells = depth / h - band as f64 - margin as f64 - 2.0;
+    // objects and sources: the lowest they reach (an object's grid's half diagonal below its centre, a source's stream radius, at any
+    // frame); water dropped in (events) from its lowest point. Particles added below row T would be lost to the tall cells.
+    for o in desc.objs.iter().filter(|o| o.emitter || (!o.water && o.sdf.is_some())) {
+        for f in 0..=desc.frames {
+            let s = sample(o, f as f32 / desc.fps);
+            let ext = match &o.sdf { Some(sd) if !o.emitter => 0.5 * sd.cell * *sd.dims.iter().max().unwrap() as f32 * 3f32.sqrt() * s.sx.max(s.sy).max(s.sz), _ => s.radius.max(0.1) };
+            cells = cells.min(((s.y - ext) as f64 - b.y0 as f64) / h - margin as f64);
+        }
+    }
+    for e in &desc.events { cells = cells.min((e.y - e.r - b.y0 as f64) / h - margin as f64); }
+    let t = ((cells / 8.0).floor() * 8.0).max(0.0) as u32;
+    (if t < 8 { 0 } else { t }, surf)
+}
+
 /// The free video memory in MB, from the NVIDIA driver's nvidia-smi (this program is built for Mer's NVIDIA card); None if it cannot say.
 pub fn free_vram_mb() -> Option<u64> {
     let o = std::process::Command::new("nvidia-smi").args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"]).output().ok()?;
@@ -328,6 +361,13 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, ro: &RunOpts, mut progress: impl 
         if est > mb << 20 { return Err(format!("This bake needs about {:.1} GB of video memory and {:.1} GB is free. Lower Max points or Max whitewater, or use a coarser spacing.", est as f64 / 1e9, mb as f64 / 1024.0)); }
     }
     let mut sim = FlipSim::new(gpu, lay, desc.open, max_n);
+    if let (true, Some(band)) = (desc.tall, nb_band) {
+        let (t, surf) = tall_row(desc, &sim.l, band, 8);
+        // the tall cells start at the pressure of the water above them (at rest: gravity x h a cell), else the first steps see air below
+        let margin = 8;
+        if t > 0 { sim.enable_tall(gpu, t, margin, desc.g * sim.l.h * (surf - t as f32 + 0.5)); ro.say(&format!("Tall cells: the deep water below {:.2} (row {t}) is one cell a column", sim.l.b.y0 + t as f32 * sim.l.h)); }
+        else { ro.say("Tall cells: the water is not deep enough under its band for them here"); }
+    }
     sim.opt.apic = desc.apic; sim.opt.sort = desc.sort; sim.opt.p2g_win = desc.p2g_win; sim.opt.ballistic = desc.ballistic; sim.opt.settle = desc.settle;
     sim.opt.mg = desc.mg; sim.opt.sep = desc.sep;
     let acc = desc.accurate;
@@ -486,6 +526,7 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, ro: &RunOpts, mut progress: impl 
         vmax = mv.max(1.0);
         let mut dg = json!({ "f": f, "n": n, "t": f as f32 / fps, "sub": sub, "objectSpeed": obj_v, "fastestParticle": st.vmax, "fluidCells": st.fluid, "blocksUsed": st.sc,
             "blockPool": sim.scap, "blocksNoRoom": sim.ovf_total - ovf0, "iters": iters, "gpuMB": sim.mem_bytes() >> 20 });
+        if sim.tall_t0 > 0 { dg["tallRow"] = json!(sim.tall_now(gpu)); }
         if acc {
             // the pressure left unsolved after the frame's last substep steers the next frame's iterations
             let r = sim.pres_residual(gpu);

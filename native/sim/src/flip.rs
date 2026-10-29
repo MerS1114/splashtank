@@ -151,6 +151,8 @@ pub struct FlipSim {
     pub grew: u32,
     /// the whitewater pass over a finished bake (Bake whitewater): the loaded particles only build the grid, the whitewater stages run
     pub ww_only: bool,
+    /// tall cells (native only, tall.wgsl): the row they started below (0: off); the GPU lowers it when the water needs the room
+    pub tall_t0: u32,
     // narrow band and ocean
     vel_g_on: bool,
     /// the next step starts the depth field from the starting shapes (1: a restart)
@@ -204,6 +206,7 @@ impl FlipSim {
         buf.insert(32, mk(16)); buf.insert(35, mk(16)); buf.insert(34, mk(16)); buf.insert(36, mk(32));
         buf.insert(16, mk(ntiles as u64 * 4)); buf.insert(17, mk(ntiles as u64 * 4)); buf.insert(21, mk(ntiles as u64 * 8));
         buf.insert(40, mk(16));
+        buf.insert(43, mk(32));   // tall cells: off (T = 0) until enable_tall
         buf.insert(10, mk(32 * 128)); buf.insert(22, mk(65536 * 4)); buf.insert(23, mk(16)); buf.insert(24, mk(16));
         buf.insert(12, dev.create_buffer(&wgpu::BufferDescriptor { label: Some("ctl"), size: 64, usage: STOR, mapped_at_creation: false }));
         buf.insert(25, mk(16));
@@ -217,7 +220,7 @@ impl FlipSim {
             l, rest: l.ratio.powi(3), open, max_n, cap: max_n, n: 0, opt: Opt::default(), ntiles, t, scap, scap_max, lcap: 0, buf,
             groups: HashMap::new(), groups_dirty: true, pu: vec![0; (gpu.params_bytes / 4) as usize], cf: vec![0.0; 32 * 32], cf_prev: None, solid_dirty: true,
             sdf_sig: 0, sdf_cap: 16, run_start: 0, run_pos: Vec::new(), run_vel: Vec::new(), tm: 0.0, seed: 0, sort_tick: 0, sort_moved: 0.0, sorted_ever: false,
-            last_dt: 0.0, mg_size: 0, mg_dense: Vec::new(), mg_top: 0, only_tiles: false, stats_ring, stats: None, ovf_total: 0, stage: None, grew: 0, ww_only: false,
+            last_dt: 0.0, mg_size: 0, mg_dense: Vec::new(), mg_top: 0, only_tiles: false, stats_ring, stats: None, ovf_total: 0, stage: None, grew: 0, ww_only: false, tall_t0: 0,
             vel_g_on: false, nb_init: 0, nb_fills: Vec::new(), nb_vols: Vec::new(), nb_band: None, ocean: None, ocean_w: Vec::new(), nb_on: false, init_step: 0,
             spray_cap: 0, spr_disp_max: 0, deep_on: false, air_dims: None, ndrip: 0, drip_sig: vec![u32::MAX], drip_cache: HashMap::new(),
             air_real: false, air_feel: false, air_iters: 20, air_on_step: false, drip_on_step: false, spr_on_step: false, ab: l.b,
@@ -422,6 +425,32 @@ impl FlipSim {
     }
 
     /// The first narrow band step: room for the kept grid velocity and longer cell lists (enableNB).
+    /// Tall cells below row t (a multiple of 8; narrow band only): deep water there is one cell a column. margin: how close (cells) the
+    /// surface, particles or anything not deep water may come to row t before a block row goes back to ordinary cells.
+    /// p0: every tall cell's starting pressure.
+    pub fn enable_tall(&mut self, gpu: &Gpu, t: u32, margin: u32, p0: f32) {
+        let (nx, nz) = (self.l.n[0] as u64, self.l.n[2] as u64);
+        let words = 8 + 2 * nx * nz + (nx + 1) * nz + nx * (nz + 1);
+        let b = Self::mk(gpu, words * 4);
+        gpu.queue.write_buffer(&b, 0, bytemuck::cast_slice(&[t as f32, t as f32, 0.0, margin as f32]));
+        gpu.queue.write_buffer(&b, 32, bytemuck::cast_slice(&vec![p0; (nx * nz) as usize]));
+        self.buf.insert(43, b);
+        self.tall_t0 = t;
+        self.groups_dirty = true;
+    }
+    /// Where the tall cells start now (the GPU lowers it as the water comes near), read back from the GPU.
+    pub fn tall_now(&self, gpu: &Gpu) -> u32 {
+        if self.tall_t0 == 0 { return 0; }
+        let st = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 16, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        enc.copy_buffer_to_buffer(&self.buf[&43], 0, &st, 0, 16);
+        gpu.queue.submit([enc.finish()]);
+        st.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let v: Vec<f32> = { let m = st.slice(..).get_mapped_range().unwrap(); bytemuck::cast_slice(&m).to_vec() };
+        v[0] as u32
+    }
+
     fn enable_nb(&mut self, gpu: &Gpu) {
         if self.vel_g_on { return; }
         self.vel_g_on = true;
@@ -811,6 +840,8 @@ impl FlipSim {
             }
         }
         let (nb, init) = (self.nb_on, self.init_step);
+        let tall = self.tall_t0 > 0 && nb && !self.ww_only;
+        if tall { dispatch(ps, "tallStep", 1); }
         // blocks
         dispatch(ps, "tileNeedClear", self.ntiles); dispatch(ps, "tileMark", n);
         if nb && init != 1 { indirect(ps, "tileMarkPhi", 64); }   // last step's blocks that hold water by depth (before the counters reset)
@@ -818,6 +849,7 @@ impl FlipSim {
         dispatch(ps, "tileReset", 1);
         dispatch(ps, "tileFree", self.ntiles); dispatch(ps, "argsNew", 1); indirect(ps, "tileAlloc", 32); dispatch(ps, "tileFix", 1);
         indirect(ps, "initNew", 48); dispatch(ps, "slotListBuild", self.ntiles); dispatch(ps, "argsSlots", 1);
+        if tall { indirect(ps, "tallFill", 64); }   // a block row given back by the tall cells: ordinary deep water again
         if init > 0 { indirect(ps, "phiInitAll", 64); }
         if self.only_tiles { return; }
         indirect(ps, "clearSlots", 80);
@@ -849,6 +881,7 @@ impl FlipSim {
             if self.drip_on_step { dispatch(ps, "dripStep", self.ndrip); }
         }
         if nb {
+            if tall { indirect(ps, "tallCheck", 64); }
             dispatch(ps, "nbKill", n); dispatch(ps, "nbReset", 1); dispatch(ps, "nbDead", n); indirect(ps, "nbDeficit", 64); dispatch(ps, "nbArgs", 1); indirect(ps, "nbSpawn", 96);
         }
         if self.ww_only { dispatch(ps, "wwAdvect", n); }   // the particles move on towards the next baked frame
@@ -872,12 +905,19 @@ impl FlipSim {
         };
         let (apic, nb) = (self.opt.apic, self.nb_on);
         indirect(ps, "divergence", 64);
+        let tall = self.tall_t0 > 0 && nb;
+        let ncol = self.l.n[0] * self.l.n[2];
+        if tall { dispatch(ps, "tallDiv", ncol); }
         indirect(ps, "settleMark", 64);
         dispatch(ps, "listClear", 1);
         indirect(ps, if gpu.sg && gpu.pipes.contains_key("buildListSG") { "buildListSG" } else { "buildList" }, 64);
         dispatch(ps, "listArgs", 1);
         // pressure: red-black sweeps, or multigrid V-cycles (about one per 10 iterations asked for) between sweeps
-        let sweep = |ps: &mut wgpu::ComputePass, k: u32| { for _ in 0..k { indirect(ps, "rbRed", 0); indirect(ps, "rbBlack", 16); } };
+        // the tall cells are relaxed with the ordinary ones, twice per sweep (their sideways coupling is their height in cells strong)
+        let sweep = |ps: &mut wgpu::ComputePass, k: u32| { for _ in 0..k {
+            indirect(ps, "rbRed", 0); indirect(ps, "rbBlack", 16);
+            if tall { for _ in 0..16 { dispatch(ps, "tallRed", ncol); dispatch(ps, "tallBlack", ncol); } }
+        } };
         if !self.opt.mg || self.mg_top == 0 { sweep(ps, iters); } else {
             let (top, dz) = (self.mg_top, &self.mg_dense);
             let lv = |ps: &mut wgpu::ComputePass, nm: &str, l: u32| {
@@ -894,6 +934,7 @@ impl FlipSim {
             sweep(ps, 2);
         }
         indirect(ps, "project", 64);
+        if tall { dispatch(ps, "tallProj", (self.l.n[0] + 1) * (self.l.n[2] + 1)); }
         if nb { indirect(ps, "saveVel", 64); }
         if self.opt.extrap { indirect(ps, "extrap", 64); }
         dispatch(ps, if apic { if gpu.pipes.contains_key("g2pAo") { "g2pAo" } else { "g2pA" } } else if self.opt.p2g_win { "g2pWin" } else { "g2p" }, n);
@@ -998,6 +1039,10 @@ impl FlipSim {
             let g3 = DEEPMAX.div_ceil(256);
             ps.set_pipeline(&gpu.pipes["deepClear"].pipeline); ps.set_bind_group(0, &self.groups["deepClear"], &[]); ps.dispatch_workgroups(g3.min(65535), g3.div_ceil(65535), 1);
             ps.set_pipeline(&gpu.pipes["deepPick"].pipeline); ps.set_bind_group(0, &self.groups["deepPick"], &[]); ps.dispatch_workgroups_indirect(&self.buf[&14], 64);
+            if self.tall_t0 > 0 {
+                let gt = (self.l.n[0] * self.l.n[2] * self.tall_t0).div_ceil(256);
+                ps.set_pipeline(&gpu.pipes["tallPick"].pipeline); ps.set_bind_group(0, &self.groups["tallPick"], &[]); ps.dispatch_workgroups(gt.min(65535), gt.div_ceil(65535), 1);
+            }
             ps.set_pipeline(&gpu.pipes["deepFin"].pipeline); ps.set_bind_group(0, &self.groups["deepFin"], &[]); ps.dispatch_workgroups(1, 1, 1);
         }
         let a: Vec<f32> = bytemuck::cast_slice(&Self::read_into(gpu, &self.buf[&15], off, bytes, &mut self.dstage, Some(enc))).to_vec();

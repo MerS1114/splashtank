@@ -64,6 +64,12 @@ const skip = new Set(['visc', 'cap', 'dragSpeed']);
 out.rows = out.rows.filter((r) => !skip.has(r.key) && r.label !== 'Iterations').filter((r) => r.key.startsWith('ocean.') || saved.has(r.key.split('.')[0])).map((r) => Object.assign(r, { path: where(r.key), def: defOf(r.key) }));
 // the Enabled box of the narrow band is S.nbOn || S.ocean.on: it is nbOn
 for (const r of out.rows) if (r.key === 'nbOn') r.label = 'Enabled';
+// native only: tall cells (native/sim/shaders/tall.wgsl), in Speed-ups
+{
+  const su = out.groups.findIndex((g) => g.id === 'speedups');
+  out.rows.push({ group: su, kind: 'check', label: 'Tall cells (native)', key: 'tallCells', path: ['solver', 'tallCells'], def: false,
+    tip: 'Native program only, narrow band only: deep water well under the band is kept as one tall cell per column instead of a cell every spacing, so deep lakes and oceans need a fraction of the grid (a deep ocean baked about 3 times faster). When the surface, particles, an object or a source comes near, that depth goes back to ordinary cells. Objects and sources low in the water keep ordinary cells near them from the start. The web page ignores this setting.' });
+}
 // whitewater looks (WW_LOOKS: Impact is the defaults)
 {
   const keys = vm.runInNewContext(panels.match(/const WW_KEYS = (\[[^\]]*\]);/)[1]);
