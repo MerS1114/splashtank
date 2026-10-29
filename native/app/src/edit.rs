@@ -162,7 +162,7 @@ pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>) -> boo
     if list.is_empty() { ui.label("No objects."); return false; }
     egui::ScrollArea::vertical().id_salt("outliner").max_height(180.0).show(ui, |ui| {
         for (k, o) in list.iter().enumerate() {
-            let kind = if o["kind"] == "emitter" { "source" } else if o["water"].as_bool() == Some(true) { "water" } else { o["shape"].as_str().unwrap_or("mesh") };
+            let kind = if crate::tf::is_emitter(o) { "source" } else if o["water"].as_bool() == Some(true) { "water" } else { o["shape"].as_str().unwrap_or("mesh") };
             let keys = o["keys"].as_array().map_or(0, Vec::len);
             let txt = format!("{}  ({kind}{})", o["name"].as_str().unwrap_or("?"), if keys > 0 { format!(", {keys} keys") } else { String::new() });
             if ui.selectable_label(*sel == Some(k), txt).clicked() { *sel = Some(k); }
@@ -170,14 +170,18 @@ pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>) -> boo
     });
     let Some(o) = sel.and_then(|k| list.get_mut(k)) else { return false; };
     ui.separator();
-    let emitter = o["kind"] == "emitter";
+    let emitter = crate::tf::is_emitter(o);
     let mut name = o["name"].as_str().unwrap_or("").to_owned();
     ui.horizontal(|ui| { ui.label("Name"); if ui.text_edit_singleline(&mut name).changed() { o["name"] = json!(name); changed = true; } });
     if o["keys"].as_array().is_some_and(|a| !a.is_empty()) {
         ui.colored_label(egui::Color32::from_rgb(0xe9, 0xa4, 0x3a), "This object has keys: while the scene plays, keyed values come from them, not from the fields here.");
     }
     let num = |o: &Value, k: &str, d: f64| o[k].as_f64().unwrap_or(d);
-    changed |= vec3(ui, o, "Location", ["x", "y", "z"], 0.0, 1.0, 0.01, "Where the object is, in scene units.");
+    if vec3(ui, o, "Location", ["x", "y", "z"], 0.0, 1.0, 0.01, "Where the object is, in scene units.") {
+        // the pose the page draws a stopped scene at goes with it
+        for (k, p) in [("x", "px"), ("y", "py"), ("z", "pz")] { o[p] = o[k].clone(); }
+        changed = true;
+    }
     if !emitter {
         changed |= vec3(ui, o, "Rotation", ["rx", "yaw", "rz"], 0.0, 180.0 / std::f64::consts::PI, 0.5, "Turned about X, Y and Z, in degrees.");
         changed |= vec3(ui, o, "Scale", ["sx", "sy", "sz"], 1.0, 1.0, 0.01, "A factor on the shape along its own axes.");

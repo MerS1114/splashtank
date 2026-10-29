@@ -21,6 +21,8 @@ pub struct Doc {
     pub scene: Option<Scene>,
     /// changes whenever a new cache is opened, so frames kept on the GPU from an older one are dropped
     pub gen: u64,
+    /// ids of the selected objects (drawn orange, as Blender does)
+    pub selected: Vec<u64>,
 }
 
 impl Doc {
@@ -120,11 +122,9 @@ pub struct Look {
     pub objects: bool,
     /// the Detail region (centre and size as shares of the tank), shown dashed while the Bake panel's Detail is open
     pub region: Option<([f32; 3], [f32; 3])>,
-    /// the object selected in the Objects tab (drawn orange, as Blender does)
-    pub selected: Option<u64>,
 }
 impl Default for Look {
-    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None, selected: None } }
+    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None } }
 }
 
 #[repr(C)]
@@ -371,7 +371,7 @@ impl Renderer {
 }
 
 /// R = Rz Ry Rx, as eulerMat in shared.js (the page poses meshes with three.js order 'ZYX', the same matrix).
-fn euler(rx: f32, ry: f32, rz: f32) -> Mat3 {
+pub fn euler(rx: f32, ry: f32, rz: f32) -> Mat3 {
     let (sx, cx) = rx.sin_cos();
     let (sy, cy) = ry.sin_cos();
     let (sz, cz) = rz.sin_cos();
@@ -440,6 +440,28 @@ fn geometry(doc: &Doc, a: usize, b: usize, w: f32, look: &Look) -> (Vec<Vert>, V
     }
     let Some(scene) = &doc.scene else { return (tris, lines); };
     if !look.objects { return (tris, lines); }
+    // sources (no shape): the page's green handle, a ring the size of the stream and an arrow where it points
+    if doc.cache.is_none() {
+        for o in scene.json["objs"].as_array().into_iter().flatten().filter(|o| crate::tf::is_emitter(o) && o["hidden"] != true) {
+            let id = o["id"].as_u64().unwrap_or(0);
+            let c = if doc.selected.contains(&id) { [1.0, 0.63, 0.16, 1.0] } else { [0x35 as f32 / 255.0, 0xd0 as f32 / 255.0, 0x7f as f32 / 255.0, 1.0] };
+            let p = crate::tf::pos(o);
+            let g = |k: &str, d: f64| o[k].as_f64().unwrap_or(d) as f32;
+            let (az, el) = (g("az", 0.0).to_radians(), g("el", -30.0).to_radians());
+            let dir = Vec3::new(el.cos() * az.cos(), el.sin(), el.cos() * az.sin());
+            let u = dir.cross(if dir.y.abs() > 0.95 { Vec3::X } else { Vec3::Y }).normalize();
+            let v = dir.cross(u);
+            let circle = |out: &mut Vec<Vert>, a: Vec3, b: Vec3, r: f32| for k in 0..24 {
+                let (t0, t1) = (k as f32 / 24.0 * std::f32::consts::TAU, (k + 1) as f32 / 24.0 * std::f32::consts::TAU);
+                line(out, p + (a * t0.cos() + b * t0.sin()) * r, p + (a * t1.cos() + b * t1.sin()) * r, c);
+            };
+            for (a, b) in [(Vec3::X, Vec3::Y), (Vec3::Y, Vec3::Z), (Vec3::Z, Vec3::X)] { circle(&mut lines, a, b, 0.11); }
+            circle(&mut lines, u, v, g("radius", 0.15));
+            let tip = p + dir * 0.6;
+            line(&mut lines, p, tip, c);
+            for s in [u, -u, v, -v] { line(&mut lines, tip, tip - dir * 0.13 + s * 0.06, c); }
+        }
+    }
     let cache = doc.cache.as_ref().filter(|c| a < c.frames.len() && b < c.frames.len());
     let poses = cache.map(|c| { let (pa, pb) = (c.poses(a), c.poses(b)); pa.iter().zip(&pb).map(|(x, y)| x + (y - x) * w).collect::<Vec<f32>>() });
     for o in &scene.objs {
@@ -456,7 +478,7 @@ fn geometry(doc: &Doc, a: usize, b: usize, w: f32, look: &Look) -> (Vec<Vert>, V
         let r = euler(rot[0], rot[1], rot[2]);
         let s = Vec3::from(o.scale);
         let w: Vec<Vec3> = m.v.iter().map(|v| pos + r * (Vec3::from(*v) * s)).collect();
-        let sel = look.selected == Some(o.id);
+        let sel = doc.selected.contains(&o.id);
         if o.water {
             let c = if sel { [1.0, 0.63, 0.16, 1.0] } else { [0.25, 0.6, 1.0, 1.0] };
             for f in &m.f { for k in 0..f.len() { line(&mut lines, w[f[k] as usize], w[f[(k + 1) % f.len()] as usize], c); } }

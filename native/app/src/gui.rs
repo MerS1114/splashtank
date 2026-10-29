@@ -6,6 +6,8 @@ use eframe::egui_wgpu::{self, WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
 use eframe::wgpu;
 use splash_format::Cache;
 use crate::bakeui::{Action, BakeUi, Worker};
+use crate::tf::{self, Kind, Tf, Tool};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
@@ -85,6 +87,24 @@ struct App {
     scene_path: Option<PathBuf>,
     dirty: bool,
     sel: Option<usize>,
+    /// every selected object (sel is the active one, shown in the Objects tab)
+    sel_set: Vec<usize>,
+    tool: Tool,
+    tf: Option<Tf>,
+    tf_text: String,
+    /// with a bake open: show the scene to edit instead of the bake
+    scene_view: bool,
+    /// undo: the scene before each change; stable is the scene at rest, burst says a change is going on (a drag, a G move)
+    undo: Vec<Value>,
+    redo: Vec<Value>,
+    stable: Option<Value>,
+    burst: bool,
+    changed_now: bool,
+    hover: Option<tf::Part>,
+    add_at: Option<egui::Pos2>,
+    box_from: Option<egui::Pos2>,
+    /// the click that finished a move is only that (it does not also select)
+    swallow: bool,
     r: Renderer,
     target: Option<Target>,
     cam: Orbit,
@@ -128,6 +148,8 @@ impl App {
         });
         App {
             doc: Doc::default(), tab: Tab::Bake, scene_path: None, dirty: false, sel: None, r: Renderer::new(&rs.device), target: None,
+            sel_set: Vec::new(), tool: Tool::Select, tf: None, tf_text: String::new(), scene_view: false, undo: Vec::new(), redo: Vec::new(), stable: None, burst: false,
+            changed_now: false, hover: None, add_at: None, box_from: None, swallow: false,
             cam: Orbit { target: glam::Vec3::new(0.0, 0.7, 0.0), theta: 0.8, phi: 1.0, r: 6.2, ortho: false }, goal: None,
             t: 0.0, playing: false, looping: true, speed: 1.0, look: Look::default(),
             msg: "Open a bake cache (.splc) or a scene file (.json), or drop one on the window.".into(),
@@ -161,6 +183,9 @@ impl App {
 
     /// After an edit to the scene's JSON: the parsed scene (tank, objects) is made again from it.
     fn edited(&mut self) {
+        // the first change of a burst saves the scene before it for undo
+        if !self.burst { if let Some(s) = self.stable.take() { self.undo.push(s); if self.undo.len() > 100 { self.undo.remove(0); } } self.redo.clear(); self.burst = true; }
+        self.changed_now = true;
         if let Some(s) = self.doc.scene.take() {
             let j = s.json.clone();
             self.doc.scene = Some(splash_format::Scene::from_json(j).unwrap_or(s));
@@ -181,7 +206,10 @@ impl App {
                 self.bake.source(path);
                 self.scene_path = is_json.then(|| path.to_owned());
                 self.dirty = false;
-                if !same { self.sel = None; }
+                if !same { self.sel = None; self.sel_set.clear(); }
+                self.scene_view = false;
+                self.undo.clear(); self.redo.clear(); self.burst = false;
+                self.stable = self.doc.scene.as_ref().map(|s| s.json.clone());
             }
             Err(e) => self.msg = e,
         }
@@ -257,6 +285,133 @@ impl App {
     }
 
     /// Home: the whole tank in view, from the angle the camera has now (frameAll)
+    /// The objects of the scene being edited, while the scene (not a bake) is shown.
+    fn editing(&self) -> bool { self.doc.scene.is_some() && (self.doc.cache.is_none() || self.scene_view) }
+    fn objs_mut(&mut self) -> Option<&mut Vec<Value>> { self.doc.scene.as_mut()?.json.get_mut("objs")?.as_array_mut() }
+    fn objs(&self) -> &[Value] { self.doc.scene.as_ref().and_then(|s| s.json["objs"].as_array()).map(|v| v.as_slice()).unwrap_or(&[]) }
+
+    fn select(&mut self, hit: Option<usize>, add: bool) {
+        match (hit, add) {
+            (Some(i), true) => { if let Some(k) = self.sel_set.iter().position(|&x| x == i) { self.sel_set.remove(k); self.sel = self.sel_set.last().copied(); } else { self.sel_set.push(i); self.sel = Some(i); } }
+            (Some(i), false) => { self.sel_set = vec![i]; self.sel = Some(i); }
+            (None, false) => { self.sel_set.clear(); self.sel = None; }
+            (None, true) => {}
+        }
+    }
+
+    fn start_tf(&mut self, kind: Kind, m: egui::Pos2, axis: Option<usize>, from_drag: bool) {
+        if self.doc.cache.is_some() { self.scene_view = true; }
+        if self.sel_set.is_empty() { self.msg = "Click an object first.".into(); return; }
+        let t = Tf::start(kind, self.objs(), self.sel_set.clone(), m, axis, from_drag);
+        if t.is_some() { self.edited(); }
+        self.tf = t;
+    }
+    fn end_tf(&mut self, keep: bool) {
+        let Some(t) = self.tf.take() else { return; };
+        if !keep {
+            if let Some(o) = self.objs_mut() { t.cancel(o); }
+            self.edited();
+        }
+        self.tf_text.clear();
+    }
+
+    fn undo_redo(&mut self, redo: bool) {
+        if self.tf.is_some() { return; }
+        let (from, to) = if redo { (&mut self.redo, &mut self.undo) } else { (&mut self.undo, &mut self.redo) };
+        let Some(j) = from.pop() else { self.msg = if redo { "Nothing to redo." } else { "Nothing to undo." }.into(); return; };
+        if let Some(s) = self.doc.scene.as_mut() { to.push(std::mem::replace(&mut s.json, j)); }
+        self.burst = false;
+        if let Some(s) = self.doc.scene.take() { let j = s.json.clone(); self.doc.scene = Some(splash_format::Scene::from_json(j).unwrap_or(s)); }
+        self.stable = self.doc.scene.as_ref().map(|s| s.json.clone());
+        let n = self.objs().len();
+        self.sel_set.retain(|&i| i < n);
+        self.sel = self.sel.filter(|&i| i < n);
+        self.dirty = true;
+        self.msg = if redo { "Redone" } else { "Undone" }.into();
+    }
+
+    fn add_object(&mut self, shape: &str, water: bool) {
+        let Some(j) = self.doc.scene.as_ref().map(|s| &s.json) else { return; };
+        let o = tf::new_object(j, shape, water);
+        self.msg = format!("Added {}", o["name"].as_str().unwrap_or(""));
+        if let Some(v) = self.objs_mut() { v.push(o); }
+        let i = self.objs().len() - 1;
+        self.select(Some(i), false);
+        if self.doc.cache.is_some() { self.scene_view = true; }
+        self.edited();
+    }
+    fn delete_selected(&mut self) {
+        if self.sel_set.is_empty() { return; }
+        let mut del = self.sel_set.clone();
+        del.sort_unstable();
+        if let Some(v) = self.objs_mut() { for &i in del.iter().rev() { if i < v.len() { v.remove(i); } } }
+        self.msg = format!("Deleted {} object{}", del.len(), if del.len() == 1 { "" } else { "s" });
+        self.select(None, false);
+        self.edited();
+    }
+    fn duplicate(&mut self, m: egui::Pos2) {
+        let Some(j) = self.doc.scene.as_ref().map(|s| &s.json) else { return; };
+        let fresh = tf::duplicate(j, &self.sel_set);
+        if fresh.is_empty() { return; }
+        let n0 = self.objs().len();
+        let k = fresh.len();
+        if let Some(v) = self.objs_mut() { v.extend(fresh); }
+        self.sel_set = (n0..n0 + k).collect();
+        self.sel = self.sel_set.last().copied();
+        self.edited();
+        // as in Blender, the copies follow the mouse until a click puts them down
+        self.start_tf(Kind::G, m, None, false);
+    }
+    /// F: the selection fills the view (the whole tank when nothing is selected)
+    fn focus_selected(&mut self) {
+        let pts: Vec<glam::Vec3> = self.sel_set.iter().filter_map(|&i| self.objs().get(i)).flat_map(|o| { let w = tf::world_points(o); if w.is_empty() { vec![tf::pos(o) - glam::Vec3::splat(0.2), tf::pos(o) + glam::Vec3::splat(0.2)] } else { w } }).collect();
+        if pts.is_empty() { self.frame_all(); return; }
+        let (lo, hi) = pts.iter().fold((glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN)), |(a, b), p| (a.min(*p), b.max(*p)));
+        let r = ((hi - lo).length() * 1.6).clamp(1.2, 40.0);
+        self.goal = Some(Goal { target: Some((lo + hi) * 0.5), r: Some(r), theta: None, phi: None });
+    }
+
+    /// The scene editing keys (the page's): G move, R rotate, S scale, Shift+A add, Shift+D duplicate, X or Delete delete, A select all
+    /// (Alt+A none), Ctrl+Z undo, Ctrl+Shift+Z or Ctrl+Y redo. While moving: X Y Z pick an axis (twice: the object's own; with Shift the
+    /// plane across it), numbers type an amount, Enter or a click finishes, Esc or a right click puts things back, Ctrl snaps.
+    fn edit_keys(&mut self, ui: &egui::Ui, m: egui::Pos2) {
+        let (ev, mods) = ui.input(|i| (i.events.clone(), i.modifiers));
+        if let Some(t) = self.tf.as_mut() {
+            for e in &ev {
+                match e {
+                    egui::Event::Text(s) => for c in s.chars() {
+                        match c {
+                            'x' | 'y' | 'z' => t.key_axis((c as u8 - b'x') as usize, false),
+                            'X' | 'Y' | 'Z' => t.key_axis((c as u8 - b'X') as usize, true),
+                            '0'..='9' | '.' => t.num.push(c),
+                            ',' => t.num.push('.'),
+                            '-' => { if t.num.starts_with('-') { t.num.remove(0); } else { t.num.insert(0, '-'); } }
+                            _ => {}
+                        }
+                    },
+                    egui::Event::Key { key: egui::Key::Backspace, pressed: true, .. } => { t.num.pop(); }
+                    _ => {}
+                }
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) { self.end_tf(false); }
+            else if ui.input(|i| i.key_pressed(egui::Key::Enter)) { self.end_tf(true); }
+            return;
+        }
+        let k = |key| ui.input(|i| i.key_pressed(key));
+        if mods.command {
+            if k(egui::Key::Z) { self.undo_redo(mods.shift); }
+            if k(egui::Key::Y) { self.undo_redo(true); }
+            return;
+        }
+        if k(egui::Key::G) { self.start_tf(Kind::G, m, None, false); }
+        else if k(egui::Key::R) { self.start_tf(Kind::R, m, None, false); }
+        else if k(egui::Key::S) { self.start_tf(Kind::S, m, None, false); }
+        else if k(egui::Key::A) && mods.shift { self.add_at = Some(m); }
+        else if k(egui::Key::A) { if mods.alt { self.select(None, false); } else { self.sel_set = (0..self.objs().len()).collect(); self.sel = self.sel.or(self.sel_set.first().copied()); } }
+        else if k(egui::Key::D) && mods.shift { self.duplicate(m); }
+        else if k(egui::Key::X) || k(egui::Key::Delete) { self.delete_selected(); }
+    }
+
     fn frame_all(&mut self) {
         if let Some(b) = self.doc.tank() { let mut o = self.cam; o.frame_keep_angles(&b); self.goal = Some(Goal { target: Some(o.target), r: Some(o.r), theta: None, phi: None }); }
     }
@@ -348,6 +503,43 @@ impl App {
         self.t = (self.t.floor() + k).rem_euclid(n as f64);
     }
 
+    /// The tools at the viewport's top left (the page's tool shelf: which gizmo handles show) and, with a bake open, Scene / Bake.
+    fn viewport_bar(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let r = egui::Rect::from_min_size(rect.min + egui::vec2(10.0, 8.0), egui::vec2(560.0, 28.0));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
+            ui.horizontal(|ui| {
+                if self.doc.cache.is_some() && self.doc.scene.is_some() {
+                    if ui.selectable_label(!self.scene_view, "Bake").on_hover_text("Show the bake").clicked() { self.scene_view = false; self.end_tf(false); }
+                    if ui.selectable_label(self.scene_view, "Scene").on_hover_text("Show the scene to edit its objects (the bake stays open)").clicked() { self.scene_view = true; }
+                    ui.separator();
+                }
+                if self.editing() {
+                    for (t, name, tip) in [(Tool::Select, "Select", "Click to select, drag for a box. G, R, S move, turn and scale."), (Tool::Move, "Move", "Arrows move along an axis, the ball moves freely."),
+                        (Tool::Rotate, "Rotate", "Rings turn about an axis."), (Tool::Scale, "Scale", "Cubes scale along an axis."), (Tool::Transform, "Transform", "All the handles.")] {
+                        if ui.selectable_label(self.tool == t, name).on_hover_text(tip).clicked() { self.tool = t; }
+                    }
+                    if ui.button("Add").on_hover_text("Add an object (Shift+A)").clicked() { self.add_at = Some(rect.min + egui::vec2(300.0, 40.0)); }
+                }
+            });
+        });
+    }
+
+    /// Shift+A: the page's add menu.
+    fn add_menu(&mut self, ui: &mut egui::Ui) {
+        let Some(at) = self.add_at else { return; };
+        let mut pick = None;
+        let r = egui::Area::new(ui.scope_id().with("addmenu")).fixed_pos(at).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(egui::RichText::new("Add").strong());
+                for (shape, water, name) in [("cube", false, "Cube"), ("sphere", false, "Sphere"), ("cylinder", false, "Cylinder"), ("cube", true, "Water box"), ("sphere", true, "Water ball"), ("emitter", false, "Source")] {
+                    if ui.button(name).clicked() { pick = Some((shape, water)); }
+                }
+            });
+        });
+        if let Some((s, w)) = pick { self.add_at = None; self.add_object(s, w); }
+        else if ui.input(|i| i.key_pressed(egui::Key::Escape)) || (ui.input(|i| i.pointer.any_pressed()) && !r.response.contains_pointer()) { self.add_at = None; }
+    }
+
     fn top(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if ui.button("Open…").on_hover_text("Open a bake cache (.splc) or a scene file (.json) saved by the web page").clicked() && self.may_discard() {
@@ -404,7 +596,12 @@ impl App {
                 let changed = match tab {
                     Tab::Sim => crate::edit::settings(ui, &mut s.json),
                     Tab::Tank => crate::edit::tank(ui, &mut s.json),
-                    _ => crate::edit::objects(ui, &mut s.json, &mut self.sel),
+                    _ => {
+                        let before = self.sel;
+                        let ch = crate::edit::objects(ui, &mut s.json, &mut self.sel);
+                        if self.sel != before { self.sel_set = self.sel.into_iter().collect(); }
+                        ch
+                    }
                 };
                 if changed { self.edited(); }
                 return;
@@ -482,11 +679,15 @@ impl eframe::App for App {
             if (left || right) && shift { self.bake.follow = false; }
             if left { if shift { self.playing = false; self.t = 0.0; } else { self.step(-1.0); } }
             if right { if shift { if n > 0 { self.playing = false; self.t = (n - 1) as f64; } } else { self.step(1.0); } }
-            if home || kf { self.frame_all(); }
-            if k1 { self.snap_view(if ctrl { "back" } else { "front" }); }
-            if k3 { self.snap_view(if ctrl { "left" } else { "right" }); }
-            if k7 { self.snap_view(if ctrl { "bottom" } else { "top" }); }
-            if k5 { self.cam.ortho = !self.cam.ortho; }
+            if home { self.frame_all(); }
+            if kf { if self.editing() { self.focus_selected(); } else { self.frame_all(); } }
+            // while moving, number keys type an amount instead
+            if self.tf.is_none() {
+                if k1 { self.snap_view(if ctrl { "back" } else { "front" }); }
+                if k3 { self.snap_view(if ctrl { "left" } else { "right" }); }
+                if k7 { self.snap_view(if ctrl { "bottom" } else { "top" }); }
+                if k5 { self.cam.ortho = !self.cam.ortho; }
+            }
         }
         if self.step_cam(dt) { ui.ctx().request_repaint(); }
         if let Some(out) = self.autobake.take() {
@@ -500,7 +701,11 @@ impl eframe::App for App {
         }
         self.poll_job();
         self.look.region = (self.bake.det_open && self.tab == Tab::Bake).then_some((self.bake.det.c, self.bake.det.s));
-        self.look.selected = if self.tab == Tab::Objects { self.sel.and_then(|k| self.doc.scene.as_ref()?.json["objs"].get(k)?["id"].as_u64()) } else { None };
+        self.doc.selected = if self.editing() { self.sel_set.iter().filter_map(|&k| self.objs().get(k)?["id"].as_u64()).collect() } else { Vec::new() };
+        if self.playing { self.scene_view = false; }
+        // a change that has ended (nothing changed this frame, no move going on): the scene now at rest is what undo goes back to
+        if self.burst && !self.changed_now && self.tf.is_none() { self.stable = self.doc.scene.as_ref().map(|s| s.json.clone()); self.burst = false; }
+        self.changed_now = false;
         // Ctrl+S saves the scene; closing the window with unsaved edits asks first
         if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) && self.doc.scene.is_some() { self.save_scene(false); }
         if ui.ctx().input(|i| i.viewport().close_requested()) && self.dirty && !self.may_discard() {
@@ -538,22 +743,78 @@ impl eframe::App for App {
             }
             let t = self.target.as_ref().unwrap();
             let mut enc = rs.device.create_command_encoder(&Default::default());
+            // the scene view leaves the bake out of the picture (it stays open)
+            let hidden = if self.scene_view { self.doc.cache.take() } else { None };
             self.r.draw(&rs.device, &rs.queue, &mut enc, &t.color.create_view(&Default::default()), size, &self.cam, &self.doc, f, fb, w, &self.look);
+            if hidden.is_some() { self.doc.cache = hidden; }
             rs.queue.submit([enc.finish()]);
             let resp = ui.add(egui::Image::new(egui::load::SizedTexture::new(t.id, avail)).sense(egui::Sense::click_and_drag()));
+            let rect = resp.rect;
+            let editing = self.editing();
+            let m = ui.input(|i| i.pointer.latest_pos()).unwrap_or(rect.center());
+            let (sh, ct, alt) = ui.input(|i| (i.modifiers.shift, i.modifiers.command, i.modifiers.alt));
+            let view = tf::View::new(&self.cam, rect);
+            if editing && !typing && self.add_at.is_none() && (resp.hovered() || self.tf.is_some()) { self.edit_keys(ui, m); }
+            let mut orbiting = !editing;
+            if editing {
+                if let Some(mut t) = self.tf.take() {
+                    // moving: follow the mouse; a click (or letting go of a handle) finishes, a right click puts things back
+                    if let Some(o) = self.objs_mut() { self.tf_text = t.apply(o, &view, m, ct); }
+                    self.tf = Some(t);
+                    self.edited();
+                    let (pressed, released, right) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.pointer.secondary_pressed()));
+                    let from_drag = self.tf.as_ref().is_some_and(|t| t.from_drag);
+                    if right { self.end_tf(false); self.swallow = true; } else if (from_drag && released) || (!from_drag && pressed) { self.end_tf(true); self.swallow = true; }
+                    ui.ctx().request_repaint();
+                } else {
+                    let giz = (self.tool != Tool::Select).then(|| tf::gizmo(self.objs(), &self.sel_set, &view)).flatten();
+                    self.hover = giz.as_ref().and_then(|g| resp.hover_pos().and_then(|p| tf::pick_gizmo(g, &view, self.tool, p)));
+                    let press = ui.input(|i| i.pointer.press_origin()).filter(|p| rect.contains(*p));
+                    if resp.drag_started_by(egui::PointerButton::Primary) && !alt {
+                        let at = press.unwrap_or(m);
+                        match giz.as_ref().and_then(|g| tf::pick_gizmo(g, &view, self.tool, at)) {
+                            Some(part) => self.start_tf(part.kind, at, part.axis, true),
+                            // dragging never moves things: it draws a selection box (move with G or the gizmo)
+                            None => self.box_from = Some(at),
+                        }
+                    }
+                    if let Some(b) = self.box_from {
+                        let r = egui::Rect::from_two_pos(b, m);
+                        ui.painter().rect(r, 0.0, egui::Color32::from_rgba_unmultiplied(120, 160, 230, 25), egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 160, 230)), egui::StrokeKind::Inside);
+                        if resp.drag_stopped() {
+                            let hits = tf::in_box(self.objs(), &view, r);
+                            if !sh { self.sel_set.clear(); }
+                            for i in hits { if !self.sel_set.contains(&i) { self.sel_set.push(i); } }
+                            self.sel = self.sel_set.last().copied();
+                            self.box_from = None;
+                        }
+                    }
+                    if resp.clicked() && self.add_at.is_none() && !self.swallow { let hit = tf::pick(self.objs(), &view, m); self.select(hit, sh); }
+                    if resp.double_clicked() { let hit = tf::pick(self.objs(), &view, m); if hit.is_some() { self.select(hit, false); self.focus_selected(); } else { self.frame_all(); } }
+                    if let Some(g) = &giz { tf::draw_gizmo(ui.painter(), g, &view, self.tool, self.hover); }
+                    // the middle or right button (or Alt with the left) orbits, as on the page
+                    orbiting = resp.dragged_by(egui::PointerButton::Secondary) || resp.dragged_by(egui::PointerButton::Middle) || (alt && resp.dragged_by(egui::PointerButton::Primary));
+                }
+            } else if resp.double_clicked() { self.frame_all(); }
+            if ui.input(|i| i.pointer.any_released()) && self.tf.is_none() { self.swallow = false; }
             // the page's mouse in a bake's view: any button orbits, with Shift it pans, with Ctrl it zooms; the wheel zooms
             let d = resp.drag_delta();
-            if resp.dragged() && d != egui::Vec2::ZERO {
+            if orbiting && resp.dragged() && d != egui::Vec2::ZERO && self.tf.is_none() {
                 self.goal = None;
-                let (sh, ct) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
                 if sh { self.cam.pan(d.x, d.y); } else if ct { self.cam.zoom(d.y * 10.0); } else { self.cam.orbit(d.x, d.y); }
             }
             if resp.hovered() {
                 let s = ui.input(|i| i.smooth_scroll_delta.y);
                 if s != 0.0 { self.goal = None; self.cam.zoom(-s * 2.0); }
             }
-            if resp.double_clicked() { self.frame_all(); }
-            self.axis_widget(ui, resp.rect);
+            self.axis_widget(ui, rect);
+            self.viewport_bar(ui, rect);
+            if !self.tf_text.is_empty() {
+                let help = "X Y Z: axis (twice: its own axes, Shift: across) · type a number · Ctrl: snap · click or Enter: done · Esc or right click: cancel";
+                ui.painter().text(rect.left_bottom() + egui::vec2(12.0, -30.0), egui::Align2::LEFT_BOTTOM, &self.tf_text, egui::FontId::proportional(15.0), egui::Color32::WHITE);
+                ui.painter().text(rect.left_bottom() + egui::vec2(12.0, -10.0), egui::Align2::LEFT_BOTTOM, help, egui::FontId::proportional(12.0), egui::Color32::from_gray(0xb0));
+            }
+            self.add_menu(ui);
         });
     }
 }

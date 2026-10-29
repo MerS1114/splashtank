@@ -20,6 +20,7 @@
 mod bake_cli;
 mod bakeui;
 mod edit;
+mod tf;
 mod gpu;
 mod gui;
 mod render;
