@@ -1,4 +1,4 @@
-﻿# SplashTank: notes for Claude
+# SplashTank: notes for Claude
 
 SplashTank is a water simulator in one HTML page: a WebGPU FLIP solver (Houdini FLIP look) with a three.js r128 viewer and a Blender-style interface. The owner is Mer. She opens the built page in Microsoft Edge (Chromium, so the same WebGPU and ANGLE-on-D3D WebGL as Chrome; her reports say "Chrome" in the browser line because Edge's user agent contains it) on a work computer where she cannot install software, so everything has to stay a single self-contained page that runs in the browser.
 
