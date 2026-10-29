@@ -84,7 +84,7 @@ pub struct Desc {
     pub spray_cap: u32,
     /// narrow band look: the grid-only deep water saved as points too
     pub nb_look: bool,
-    /// tall cells for the deep narrow-band water (native only; solver.tallCells, off by default)
+    /// tall cells for the deep narrow-band water (native only; solver.tallCells, on by default)
     pub tall: bool,
     /// parts of the scene the native solver does not run yet: said once, then left out
     pub left_out: Vec<String>,
@@ -266,7 +266,7 @@ pub fn desc_from_scene(scene: &Value, o: &BakeOpts) -> Result<Desc, String> {
         tear: num(&sv, "tear", 0.5) as f32 * 0.5 * cell_ratio.powi(3),
         size, open, org, fills: box_fills, events, objs,
         wind, drag: num(&sv, "airDrag", 0.3) as f32 * k, gust: num(&sv, "gust", 1.0) as f32 * k, foam_sens: num(&sv, "foamSens", 1.0) as f32 * k, foam_tau: num(&sv, "foamTau", 1.2) as f32,
-        nb, ocean, spr, air, drip, spray_cap, nb_look, tall: flag(&sv, "tallCells", false),
+        nb, ocean, spr, air, drip, spray_cap, nb_look, tall: flag(&sv, "tallCells", true),
         left_out, scene: scene.clone(), light: Value::Null,
     };
     dsc.light = serde_json::json!({
