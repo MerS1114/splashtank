@@ -14,6 +14,7 @@ bytemuck = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }  # numbers read back exactly as the page wrote them
 png = "0.18.1"
 pollster = "1.0.1"
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }  # free space of each drive (where bakes go)
 
 [build-dependencies]
 winresource = "0.1"

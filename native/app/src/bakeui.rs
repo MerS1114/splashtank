@@ -101,7 +101,7 @@ fn hms(s: f32) -> String {
 }
 
 /// What the panel asks the window to do.
-pub enum Action { Start(String, Task), Stop }
+pub enum Action { Start(String, Task), Stop, Fail(String) }
 
 /// The settings in the panel (the page's Bake settings), taken from the file opened last.
 pub struct BakeUi {
@@ -123,30 +123,104 @@ pub struct BakeUi {
     resumable: Option<(PathBuf, String)>,
     /// the estimate for the settings and scene it was made for (worked out again when either changes)
     est: Option<(String, String)>,
+    /// where bakes go until saved under a name (File > Save bake); remembered between runs
+    pub folder: PathBuf,
+}
+
+/// The program's own settings file (%LOCALAPPDATA%\SplashTank\settings.json): small things remembered between runs.
+fn settings_path() -> Option<PathBuf> { std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("SplashTank").join("settings.json")) }
+pub fn setting(k: &str) -> Option<serde_json::Value> {
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(settings_path()?).ok()?).ok()?;
+    v.get(k).cloned()
+}
+pub fn set_setting(k: &str, val: serde_json::Value) {
+    let Some(p) = settings_path() else { return; };
+    let mut v: serde_json::Value = std::fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| serde_json::json!({}));
+    v[k] = val;
+    let _ = std::fs::create_dir_all(p.parent().unwrap());
+    let _ = std::fs::write(&p, serde_json::to_vec_pretty(&v).unwrap_or_default());
+}
+
+/// Free bytes on the drive holding p, and whether it is a fixed drive (not removable or a network share).
+fn drive_free(p: &Path) -> Option<(u64, bool)> {
+    use std::os::windows::ffi::OsStrExt;
+    let w: Vec<u16> = p.as_os_str().encode_wide().chain([0]).collect();
+    let mut free = 0u64;
+    // SAFETY: w is a NUL-terminated path; the out pointers are valid
+    let ok = unsafe { windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(w.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) };
+    if ok == 0 { return None; }
+    let kind = unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(w.as_ptr()) };
+    Some((free, kind == 3))
+}
+
+/// Where bakes go when nothing was chosen: the fixed drive with the most free space (C: on Mer's PC writes about 13 MB/s on long
+/// writes, her G: 463 MB/s), in a folder "SplashTank bakes"; on C: under %LOCALAPPDATA%.
+fn default_folder() -> PathBuf {
+    let local = std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("SplashTank").join("Bakes")).unwrap_or_else(|| std::env::temp_dir().join("SplashTank bakes"));
+    let mut best: Option<(u64, PathBuf)> = drive_free(Path::new("C:\\")).map(|(f, _)| (f, local.clone()));
+    for l in b'D'..=b'Z' {
+        let root = PathBuf::from(format!("{}:\\", l as char));
+        if let Some((free, true)) = drive_free(&root) { if best.as_ref().is_none_or(|b| free > b.0) { best = Some((free, root.join("SplashTank bakes"))); } }
+    }
+    best.map_or(local, |b| b.1)
+}
+
+/// The time now as year-month-day hour.minute.second (UTC), for bake file names.
+fn stamp() -> String {
+    let s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+    let (days, rem) = (s.div_euclid(86400), s.rem_euclid(86400));
+    // days since 1970 to a date (Howard Hinnant's civil_from_days)
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02} {:02}.{:02}.{:02}", rem / 3600, rem / 60 % 60, rem % 60)
 }
 
 impl Default for BakeUi {
     fn default() -> BakeUi {
         BakeUi { src: None, spacing: 0.04, seconds: 5.0, quality: 1.0, auto_max: true, max_m: 4.0, accurate: false, water_only: false, ckpt_min: 5.0,
-            det: DetailOpts::default(), det_open: false, follow: true, resumable: None, est: None }
+            det: DetailOpts::default(), det_open: false, follow: true, resumable: None, est: None,
+            folder: setting("bakeFolder").and_then(|v| v.as_str().map(PathBuf::from)).unwrap_or_else(default_folder) }
     }
 }
 
-/// next to p, named after it with a suffix
-fn beside(p: &Path, suffix: &str) -> PathBuf {
-    let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "bake".into());
-    p.with_file_name(format!("{stem}{suffix}.splc"))
-}
-
-/// The save dialog, starting at def.
-fn save_as(title: &str, def: &Path) -> Option<PathBuf> {
-    let mut d = rfd::FileDialog::new().set_title(title).add_filter("Bake cache", &["splc"]);
-    if let Some(dir) = def.parent() { d = d.set_directory(dir); }
-    if let Some(n) = def.file_name() { d = d.set_file_name(n.to_string_lossy()); }
-    d.save_file().map(|p| if p.extension().is_none() { p.with_extension("splc") } else { p })
-}
-
 impl BakeUi {
+    /// A new file in the bake folder for a bake of the scene named stem (what): "<stem> <date time><what>.splc".
+    fn auto_out(&self, what: &str) -> Result<PathBuf, String> {
+        std::fs::create_dir_all(&self.folder).map_err(|e| format!("Could not make the bake folder {}: {e}", self.folder.display()))?;
+        let stem = self.src.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "bake".into());
+        let stem = stem.trim_end_matches("-native").to_string();
+        Ok(self.folder.join(format!("{stem} {}{what}.splc", stamp())))
+    }
+    /// p is in the bake folder (a bake not saved under a name of its own).
+    pub fn in_folder(&self, p: &Path) -> bool { p.parent().is_some_and(|d| d == self.folder) }
+    /// A bake of the scene with the panel's settings, into the bake folder.
+    pub fn start_bake(&self, scene: Option<&serde_json::Value>) -> Option<Action> {
+        let scene = scene?.clone();
+        match self.auto_out("") {
+            Ok(out) => {
+                let kind = Kind::Bake { water_only: self.water_only, checkpoint_secs: self.ckpt_min * 60.0 };
+                Some(Action::Start(format!("Baking {}", out.file_name().unwrap_or_default().to_string_lossy()), Task { kind, inp: None, scene, o: self.opts(), out }))
+            }
+            Err(e) => Some(Action::Fail(e)),
+        }
+    }
+    /// Bake whitewater for the bake at c, into the bake folder.
+    pub fn start_whitewater(&self, c: Option<PathBuf>, scene: Option<&serde_json::Value>) -> Option<Action> {
+        let c = c.filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("splc")))?;
+        let scene = scene?.clone();
+        let out = match self.auto_out(" whitewater") { Ok(o) => o, Err(e) => return Some(Action::Fail(e)) };
+        match bake_cli::from_cache(&c) {
+            Ok((_, o)) => Some(Action::Start(format!("Whitewater for {}", c.file_name().unwrap_or_default().to_string_lossy()), Task { kind: Kind::Whitewater, inp: Some(c), scene, o, out })),
+            Err(e) => Some(Action::Fail(e)),
+        }
+    }
     /// A file was opened: its bake settings fill the panel (a scene file holds no live spacing, so the spacing stays as it was).
     pub fn source(&mut self, p: &Path) {
         self.src = Some(p.to_owned());
@@ -213,10 +287,12 @@ impl BakeUi {
                     }).sum();
                     (v / (d.d as f64).powi(3)) as u64
                 };
-                let mem = splash_sim::bake::estimate_bytes(d.max_n as u64, d.apic, d.cell_ratio, d.spray_cap as u64);
+                // Max points as the bake will pick it (session.rs): unless given, at least 4M or 1.3 times the start; a narrow band 2.5 times
+                let max_n = if d.max_n_set { d.max_n as u64 } else if d.nb.is_some() || d.ocean.is_some() { (d.max_n as u64).max(start * 5 / 2) } else { (d.max_n as u64).max(4_000_000).max(start * 13 / 10) };
+                let mem = splash_sim::bake::estimate_bytes(max_n, d.apic, d.cell_ratio, d.spray_cap as u64);
                 let per = start as f64 * 6.0 + if d.spray_cap > 0 { 200_000.0 * 10.0 } else { 0.0 };
                 format!("About {:.2} M points to start (Max points {:.1} M), about {:.1} GB of video memory, about {:.0} MB a frame, {:.1} GB for {} frames.",
-                    start as f64 / 1e6, d.max_n as f64 / 1e6, mem as f64 / 1e9, per / 1048576.0, per * (d.frames + 1) as f64 / 1073741824.0, d.frames + 1)
+                    start as f64 / 1e6, max_n as f64 / 1e6, mem as f64 / 1e9, per / 1048576.0, per * (d.frames + 1) as f64 / 1073741824.0, d.frames + 1)
             }
         };
         self.est = Some((key, v.clone()));
@@ -276,13 +352,22 @@ impl BakeUi {
             });
             let est = self.estimate(&scene);
             ui.label(egui::RichText::new(est).small()).on_hover_text("The water a narrow band bake starts with is counted exactly; it can grow after impacts (Max points Auto allows for that). Sizes on disk assume compact frames.");
-            if ui.button("Bake...").on_hover_text("Choose where to save the cache, then bake. The view follows the newest frame.").clicked() {
-                let def = beside(&src, if is_cache { "-again" } else { "-native" });
-                if let Some(out) = save_as("Save the bake as", &def) {
-                    let kind = Kind::Bake { water_only: self.water_only, checkpoint_secs: self.ckpt_min * 60.0 };
-                    act = Some(Action::Start(format!("Baking {}", out.file_name().unwrap_or_default().to_string_lossy()), Task { kind, inp: None, scene: scene.clone(), o: self.opts(), out }));
-                }
+            if ui.add_sized([120.0, 26.0], egui::Button::new(egui::RichText::new("Bake").strong())).on_hover_text("Bake now, into the bake folder. The view follows the newest frame; File > Save bake keeps it under a name of its own.").clicked() {
+                act = self.start_bake(Some(&scene));
             }
+            let _ = is_cache;
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Bake folder").small());
+                ui.label(egui::RichText::new(self.folder.display().to_string()).small().monospace());
+            });
+            ui.horizontal(|ui| {
+                if ui.small_button("Change…").on_hover_text("Where bakes go until saved under a name. A fast drive with room matters for big bakes.").clicked() {
+                    if let Some(d) = rfd::FileDialog::new().set_directory(&self.folder).pick_folder() { self.folder = d; set_setting("bakeFolder", serde_json::json!(self.folder.display().to_string())); }
+                }
+                if ui.small_button("Open").clicked() { let _ = std::fs::create_dir_all(&self.folder); let _ = std::process::Command::new("explorer").arg(&self.folder).spawn(); }
+                if let Some((free, _)) = drive_free(self.folder.ancestors().last().unwrap_or(&self.folder)) { ui.label(egui::RichText::new(format!("{:.0} GB free", free as f64 / 1e9)).small()); }
+            });
+            if self.folder.to_string_lossy().to_ascii_uppercase().starts_with("C:") { ui.label(egui::RichText::new("Drive C: writes slowly on this computer (about 13 MB/s on long writes); big bakes are much faster on another drive.").small().color(egui::Color32::from_rgb(0xe9, 0xa4, 0x3a))); }
             if let Some((out, say)) = self.resumable.clone().filter(|_| !busy) {
                 ui.label(say);
                 if ui.button("Resume").on_hover_text("Carry on the stopped bake from its last checkpoint, with the settings it was started with.").clicked() {
@@ -301,14 +386,8 @@ impl BakeUi {
             ui.separator();
             ui.label(format!("On the bake shown ({})", c.file_name().unwrap_or_default().to_string_lossy()));
             ui.add_enabled_ui(!busy, |ui| {
-                if ui.button("Bake whitewater...").on_hover_text("Whitewater made from this bake's water, with its scene's whitewater settings; saved as a new cache.").clicked() {
-                    if let Some(out) = save_as("Save with whitewater as", &beside(c, "-ww")) {
-                        match bake_cli::from_cache(c) {
-                            Ok((_, o)) => act = Some(Action::Start(format!("Whitewater for {}", out.file_name().unwrap_or_default().to_string_lossy()),
-                                Task { kind: Kind::Whitewater, inp: Some(c.to_owned()), scene: scene.clone(), o, out })),
-                            Err(e) => w.job.lock().unwrap().result = Some((e, true)),
-                        }
-                    }
+                if ui.button("Bake whitewater").on_hover_text("Whitewater made from this bake's water, with the Whitewater settings as they are now; a new bake in the bake folder.").clicked() {
+                    act = self.start_whitewater(Some(c.to_owned()), Some(&scene));
                 }
                 let r = egui::CollapsingHeader::new("Detail").default_open(false).show(ui, |ui| {
                     ui.label("A finer sim over a region of this bake, guided by it. The region is the dashed blue box.");
@@ -330,8 +409,8 @@ impl BakeUi {
                     });
                     ui.add(egui::Slider::new(&mut self.det.pull, 0.0..=1.0).step_by(0.01).text("Follow the bake"))
                         .on_hover_text("How strongly the fine water is pulled towards the bake's motion each frame.");
-                    if ui.button("Bake detail...").clicked() {
-                        if let Some(out) = save_as("Save with detail as", &beside(c, "-detail")) {
+                    if ui.button("Bake detail").clicked() {
+                        if let Ok(out) = self.auto_out(" detail") {
                             match bake_cli::from_cache(c) {
                                 Ok((_, o)) => act = Some(Action::Start(format!("Detail for {}", out.file_name().unwrap_or_default().to_string_lossy()),
                                     Task { kind: Kind::Detail(self.det), inp: Some(c.to_owned()), scene: scene.clone(), o, out })),

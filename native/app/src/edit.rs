@@ -245,12 +245,13 @@ fn vec3(ui: &mut egui::Ui, o: &mut Value, name: &str, keys: [&str; 3], d: f64, s
 
 /// The Objects tab: the outliner and the selected object's settings (the page's object panel).
 /// act: a button asking the window to "dup"licate or "del"ete the selection.
-pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>, t: f64, hidden: &mut Vec<u64>, act: &mut Option<&'static str>) -> bool {
+pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>, t: f64, hidden: &mut Vec<u64>, act: &mut Option<&'static str>, list_too: bool) -> bool {
     HOVER.with(|h| h.set(None));
     let mut changed = false;
     let Some(list) = j.get_mut("objs").and_then(Value::as_array_mut) else { return false; };
-    if list.is_empty() { ui.label("No objects."); return false; }
-    egui::ScrollArea::vertical().id_salt("outliner").max_height(180.0).show(ui, |ui| {
+    if list.is_empty() { ui.label("No objects. Add one with Shift+A or the outliner's +."); return false; }
+    if !list_too && sel.is_none() { ui.label("Click an object in the view or the outliner."); }
+    if list_too { egui::ScrollArea::vertical().id_salt("outliner").max_height(180.0).show(ui, |ui| {
         for (k, o) in list.iter().enumerate() {
             let kind = if crate::tf::is_emitter(o) { "source" } else if o["water"].as_bool() == Some(true) { "water" } else { o["shape"].as_str().unwrap_or("mesh") };
             let keys = o["keys"].as_array().map_or(0, Vec::len);
@@ -265,7 +266,7 @@ pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>, t: f64
                 if ui.selectable_label(*sel == Some(k), txt).clicked() { *sel = Some(k); }
             });
         }
-    });
+    }); }
     // recorded motion (the page's Motion for baking)
     let recd: Vec<f64> = list.iter().filter_map(|o| { let a = o["rec"]["arr"].as_array()?; (a.len() >= 4).then(|| (o["rec"]["start"].as_f64().unwrap_or(0.0) + (a.len() / 4) as f64) / 60.0) }).collect();
     if !recd.is_empty() {

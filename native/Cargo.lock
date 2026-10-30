@@ -2077,6 +2077,7 @@ dependencies = [
  "serde_json",
  "splash-format",
  "splash-sim",
+ "windows-sys 0.59.0",
  "winresource",
 ]
 
