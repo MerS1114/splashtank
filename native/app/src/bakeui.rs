@@ -190,6 +190,18 @@ impl Default for BakeUi {
     }
 }
 
+/// Bakes left in the bake folder by an earlier run (closed by a crash, or a bake still running when the window closed) are temporary:
+/// deleted at start-up, except those with a checkpoint (stopped partway: Resume can carry them on, and they go once replaced or left).
+pub fn clean_folder(folder: &Path) {
+    let Ok(rd) = std::fs::read_dir(folder) else { return; };
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if name.ends_with(".splc") && !splash_sim::bake::checkpoint_path(&p).exists() { let _ = std::fs::remove_file(&p); }
+        if name.ends_with(".ckpt.tmp") { let _ = std::fs::remove_file(&p); }
+    }
+}
+
 impl BakeUi {
     /// A new file in the bake folder for a bake of the scene named stem (what): "<stem> <date time><what>.splc".
     fn auto_out(&self, what: &str) -> Result<PathBuf, String> {
@@ -352,7 +364,7 @@ impl BakeUi {
             });
             let est = self.estimate(&scene);
             ui.label(egui::RichText::new(est).small()).on_hover_text("The water a narrow band bake starts with is counted exactly; it can grow after impacts (Max points Auto allows for that). Sizes on disk assume compact frames.");
-            if ui.add_sized([120.0, 26.0], egui::Button::new(egui::RichText::new("Bake").strong())).on_hover_text("Bake now, into the bake folder. The view follows the newest frame; File > Save bake keeps it under a name of its own.").clicked() {
+            if ui.add_sized([120.0, 26.0], egui::Button::new(egui::RichText::new("Bake").strong())).on_hover_text("Bake now. The bake is temporary (in the bake folder) until File > Save bake keeps it: a new bake replaces it, and leaving it (another scene, closing) deletes it after asking.").clicked() {
                 act = self.start_bake(Some(&scene));
             }
             let _ = is_cache;
@@ -361,7 +373,7 @@ impl BakeUi {
                 ui.label(egui::RichText::new(self.folder.display().to_string()).small().monospace());
             });
             ui.horizontal(|ui| {
-                if ui.small_button("Change…").on_hover_text("Where bakes go until saved under a name. A fast drive with room matters for big bakes.").clicked() {
+                if ui.small_button("Change…").on_hover_text("Where temporary bakes are written while you work with them. A fast drive with room matters for big bakes.").clicked() {
                     if let Some(d) = rfd::FileDialog::new().set_directory(&self.folder).pick_folder() { self.folder = d; set_setting("bakeFolder", serde_json::json!(self.folder.display().to_string())); }
                 }
                 if ui.small_button("Open").clicked() { let _ = std::fs::create_dir_all(&self.folder); let _ = std::process::Command::new("explorer").arg(&self.folder).spawn(); }

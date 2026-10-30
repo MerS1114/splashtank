@@ -31,6 +31,7 @@ pub fn run(files: Vec<PathBuf>) {
         let rs = cc.wgpu_render_state.as_ref().ok_or("This program needs a GPU through wgpu.")?;
         theme(&cc.egui_ctx);
         let mut app = App::new(rs, cc.egui_ctx.clone());
+        crate::bakeui::clean_folder(&app.bake.folder);
         for f in &files { app.open(f); }
         // like the page: a scene to start from, with live water on
         if files.is_empty() { app.new_scene("Wave tank"); app.msg = "The Wave tank, with live water. File > New scene for another, or drop a scene or bake on the window.".into(); }
@@ -194,6 +195,8 @@ struct App {
     bake_stale: bool,
     /// a bake being moved to where Save bake put it: done (Ok: the new path) or failed, from a copying thread
     saving: Option<mpsc::Receiver<Result<PathBuf, String>>>,
+    /// the temporary bake shown when a task started: deleted once the task's own bake exists (a new bake replaces the old one)
+    replaced: Option<PathBuf>,
     /// undo: the scene before each change; stable is the scene at rest, burst says a change is going on (a drag, a G move)
     undo: Vec<Value>,
     redo: Vec<Value>,
@@ -286,7 +289,7 @@ impl App {
         });
         App {
             doc: Doc::default(), tab: Tab::Object, scene_path: None, dirty: false, sel: None, r: Renderer::new(&rs.device), target: None,
-            ws_bake: false, aside: None, kf_open: true, bake_stale: false, saving: None,
+            ws_bake: false, aside: None, kf_open: true, bake_stale: false, saving: None, replaced: None,
             sel_set: Vec::new(), tool: Tool::Select, tf: None, tf_text: String::new(), undo: Vec::new(), redo: Vec::new(), stable: None, burst: false,
             changed_now: false, hover: None, add_at: None, box_from: None, find: String::new(), obj_act: None, edit: None, etf: None, orient_local: false, snap_on: false, snap_to: 0, handles: true, face_drag: None, st: 0.0, splay: false, auto_key: false, rec_on: false, rec_buf: std::collections::HashMap::new(), pb: 1, sel_key: None, key_drag: None, key_del_now: false,
             live: false, live_w: Worker::new(ctx.clone()), live_rx: None, live_pending: Vec::new(), live_stale: false, swallow: false,
@@ -298,10 +301,28 @@ impl App {
         }
     }
 
-    /// Asks before unsaved scene edits are thrown away; true to go ahead.
-    fn may_discard(&self) -> bool {
-        !self.dirty || rfd::MessageDialog::new().set_title("SplashTank").set_level(rfd::MessageLevel::Warning)
-            .set_description("The scene has changes that are not saved. Go on without saving them?").set_buttons(rfd::MessageButtons::YesNo).show() == rfd::MessageDialogResult::Yes
+    /// Asks before unsaved scene edits or an unsaved bake are thrown away; true to go ahead. A bake in the bake folder is temporary: going
+    /// ahead deletes it (File > Save bake keeps one).
+    fn may_discard(&mut self) -> bool {
+        let bake = self.bake_unsaved() && !self.worker.busy();
+        if !self.dirty && !bake { return true; }
+        let what = match (self.dirty, bake) {
+            (true, true) => "The scene has changes that are not saved, and the bake is not saved (it will be deleted; File > Save bake keeps it).",
+            (true, false) => "The scene has changes that are not saved.",
+            _ => "The bake is not saved: it will be deleted (File > Save bake keeps it).",
+        };
+        let yes = rfd::MessageDialog::new().set_title("SplashTank").set_level(rfd::MessageLevel::Warning)
+            .set_description(format!("{what} Go on?")).set_buttons(rfd::MessageButtons::YesNo).show() == rfd::MessageDialogResult::Yes;
+        if yes && bake { if let Some(p) = self.path.clone() { self.drop_temp(&p); } }
+        yes
+    }
+    /// Deletes a temporary bake (in the bake folder) and its checkpoint, letting go of it first if it is shown.
+    fn drop_temp(&mut self, p: &Path) {
+        if !self.bake.in_folder(p) { return; }
+        self.close_if(p);
+        let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_file(splash_sim::bake::checkpoint_path(p));
+        if self.path.as_deref() == Some(p) { self.path = None; }
     }
 
     fn save_scene(&mut self, ask: bool) {
@@ -455,6 +476,7 @@ impl App {
             Action::Stop => self.worker.stop(),
             Action::Fail(e) => self.msg = e,
             Action::Start(title, t) => {
+                self.replaced = self.path.clone().filter(|p| self.bake_unsaved() && *p != t.out);
                 // the bake gets the GPU: live water pauses, keeping its frames (it carries on after the bake if it was not finished)
                 if self.live_w.busy() { self.live_stale = true; }
                 self.live_w.stop(); self.live_rx = None; self.live_pending.clear();
@@ -489,13 +511,14 @@ impl App {
         if self.was_busy && !busy {
             self.bake.check_resume(&out);
             let _ = ok;
+            if let Some(old) = self.replaced.take().filter(|_| out.exists()) { self.drop_temp(&old); }
             if out.exists() {
                 // the finished bake is shown (the scene stays as it is being edited)
                 let (keep, st) = (self.bake.follow, self.st);
                 self.path = None;
                 self.follow(&out);
                 if !keep { self.set_time(st); }
-                self.msg = format!("Baked {} frames into {}{}", self.frames(), out.display(), if self.bake_unsaved() { " (File > Save bake to keep it under a name of its own)" } else { "" });
+                self.msg = if self.bake_unsaved() { format!("Baked {} frames. The bake is temporary: File > Save bake keeps it.", self.frames()) } else { format!("Baked {} frames into {}", self.frames(), out.display()) };
             }
         }
         self.was_busy = busy;
@@ -1758,7 +1781,7 @@ impl eframe::App for App {
 
         self.key_del_now = false;
         let dropped: Vec<PathBuf> = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
-        if let Some(p) = dropped.last() { self.open(p); }
+        if let Some(p) = dropped.last() { if self.may_discard() { self.open(p); } }
         let n = self.frames();
         // the page's keys: Space plays, Left/Right step a frame, Shift+Left/Right go to the ends, Home (or F) frames the tank, 1/3/7 look
         // along an axis (with Ctrl from the other side), 5 switches perspective and orthographic
@@ -1860,7 +1883,7 @@ impl eframe::App for App {
         self.changed_now = false;
         // Ctrl+S saves the scene; closing the window with unsaved edits asks first
         if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) && self.doc.scene.is_some() { self.save_scene(false); }
-        if ui.ctx().input(|i| i.viewport().close_requested()) && self.dirty && !self.may_discard() {
+        if ui.ctx().input(|i| i.viewport().close_requested()) && !self.may_discard() {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         if ui.input(|i| i.key_pressed(egui::Key::F3)) { self.tab = Tab::Sim; self.set_ws(false); }
