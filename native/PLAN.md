@@ -1,67 +1,123 @@
-# SplashTank native: plan
+# SplashTank desktop: the new plan
 
-A desktop program that runs the SplashTank FLIP solver straight on the graphics card, for scenes, bakes and memory use beyond what a browser allows. The web page stays as it is and keeps working; the native program reads and writes the same scene files (.json) and bake caches (.splc).
+Decided with Mer on 2026-10-29: the desktop program is SplashTank from now on. The web page stays exactly as it is (still online, no more changes); Mer uses it or Remote Desktop at work. The desktop program keeps the page's interface and features but no longer has to match the page's solver, file layout or limits. Everything under the interface is free to be whatever is most accurate and fastest on a desktop PC with a real graphics card.
 
-## Why
+The first plan (porting the page: viewer, solver, big scenes, bake controls, editor) is in `PLAN-page-port.md`. It is done, and it is the starting point here.
 
-In the browser a dense bake is held in memory (about 28 MB a frame for a 6M point ocean), the GPU's buffers are capped by the browser, and the page dies if the tab runs out of memory. The native program streams bake frames to and from disk, so a bake's length no longer costs memory, and it asks the GPU for everything the card offers.
+## Ground rules
 
-## Choice of tools
+- Target machine: Mer's home PC (RTX 3060 Ti, 8 GB video memory, 12 CPU threads, 32 GB RAM). The program may require a desktop graphics card with at least 16 storage buffers per shader and 4 GB of video memory, and says so plainly at start-up on anything less.
+- The interface stays like the page (layout, keys, mouse, panels, Blender style). Mer should not have to relearn anything.
+- Old files still open: page scene files (.json) and page caches (.splc) are read forever. New files are written in the new formats only.
+- Every change to the water is measured, not guessed: the accuracy tests and the benchmark below run before and after, and the numbers go in the commit and in CLAUDE.md.
+- Work goes on branch native/desktop-app, into the SplashTank Testing copy after each change; published only when Mer says.
+- Mer leaves the Detail pass to be reworked later; it is phase 8 and waits for her ideas.
 
-- Rust with wgpu. wgpu is the library Firefox uses for WebGPU, so it runs the same WGSL compute shaders the page already uses (`src/flip/wgsl-*.js`), on DX12, Vulkan or Metal. The solver is ported, not rewritten.
-- egui for the interface (panels, buttons, timeline), winit for the window.
-- Built with Rust's MSVC toolchain and the Visual Studio Build Tools (the GNU toolchain's dlltool cannot build the Windows crates without a full MinGW). The result is one .exe that needs no installer.
-- The old `native/splash.cpp` (a CPU baker for an older format) stays where it is; nothing here depends on it.
+## What we keep (it worked)
 
-## Layout
+- Sparse grid of 8x8x8 blocks that exist only near water, grown on demand.
+- APIC transfer with Splash detail (a share of FLIP on top), particle separation, velocity extrapolation, multigrid pressure.
+- Narrow band (particles only near the surface) with the fixes from the meteor work: fast deep water turns back into particles, refills only where grid-only water is moving.
+- Tall cells for deep water.
+- Fast drops flying free, growing and moving colliders that throw water, the real air field, Houdini-style whitewater rules, drips.
+- Streaming bakes to disk, checkpoints and resume, Max points picked from the scene and the free video memory, the disk-speed warning.
+- Frames kept on the GPU up to a budget, decoded in the vertex shader; the page's point look.
+- The whole editor: objects, edit mode, snapping, keys and timeline, motion recording, live water, settings rows.
 
-All under `native/`, a Cargo workspace:
+## What we drop
 
-- `format/` (library): scene files and cache files. Reads and writes the same SPLC version 2 layout as `writeCacheParts` / `parseCache2` in `src/shared.js`, including compact frames (flag 8), per-frame boxes (flag 32), whitewater (flag 2), deep water (flag 4) and Bake whitewater frames (flag 16). Scene files are kept as JSON values, so fields the native side does not know survive a load and save.
-- `app/` (the program): window, viewer, playback, the command-line modes (`--info`, `--picture`, `--bake`) and the Bake panel.
-- `sim/` (library): the FLIP solver on wgpu (`gpu.rs` pipelines, `flip.rs` FlipSim, `runner.rs` SceneRunner, `scene.rs` bake settings from a scene file, `sdf.rs` collision shapes, `bake.rs` the streaming bake).
-- `tools/export-wgsl.js`: a Node script that loads `src/flip/wgsl-*.js` and writes the joined shader text (`flipWGSL()`) and the binding table (`FLIP_L`) to `native/sim/shaders/`. The page's files stay the one source of the shaders; a test fails when the export is out of date. wgpu's shader compiler needs two patches, made when loading: no `enable subgroups;` line, and `subgroupElect()` written with `subgroupBroadcastFirst`.
-- `tools/compare.js` with the page test `tests/native-compare.js`: the same scene baked by both, frame by frame.
+- Settled water (the idea is flawed: it holds old pressure through an impact).
+- The page's 8-buffer limit and the splitting it forced (separate passes only to fit 8 buffers).
+- The shader export from the page (`tools/export-wgsl.js`) and the text patches applied when loading: the shaders become the desktop program's own source files.
+- The tests that compare against the page frame by frame (native-compare, nb-check). They are replaced by reference numbers recorded once from today's program, and then by the accuracy tests.
+- Copying the page's quirks only to match it (for example sorting turned off under APIC, the turbulence white-water term missing under APIC on 8 buffers).
 
-## Sharing the file formats
+## Phase 0: a fresh foundation (no change to the water)
 
-- The cache layout is written down once more in `native/format/src/cache.rs`, with the JS functions it mirrors named in its comments. Anyone changing the layout in `src/shared.js` changes both; CLAUDE.md will say so.
-- A test in `native/format` writes a cache, reads it back, and reads caches made by the page (a small one kept in the repo as a fixture, and Mer's big one when it is on disk).
-- Native bakes are ordinary SPLC files, so the page can open them, as long as the whole file fits in the browser's memory. Very long native bakes may not; the native program will be able to save a part of a bake (a frame range, or every nth frame) for the page.
+1. Shaders as our own source: `sim/shaders/` split by area (core, blocks, solver, pressure, narrow band, tall cells, whitewater, air), joined by a small include step in gpu.rs. Binding numbers come from the shader text (already scanned by binding_use), not from the page's table. The exporter and the patches go.
+2. Reference numbers: run the current program on a fixed set of scenes and store per-frame measures (water centre, height spread, particles, substeps, fastest water, pressure left unsolved) in `native/tests/reference/`. Later changes are compared against them, and any difference must be one we meant.
+3. The accuracy tests in Rust (`cargo test --release -- accuracy`, a few minutes), ported from tests/accuracy.js, each with a known answer:
+   - still water stays still (mean speed after 3 s, mean height);
+   - dam break front against Martin and Moyce 1952;
+   - volume kept over 10 s of sloshing;
+   - standing wave: period against the wave formula, height lost per period;
+   - swirl (Taylor-Green vortex): energy and vortex kept after 3 s;
+   - drop into deep water: crown height, water thrown out (the crown and impact counts from tests/crown.js and impact.js);
+   - underwater blast: speed of the water pushed out.
+4. The benchmark set, run by `splashtank --benchmark-set` and written to a text file: Meteor lake at 0.03 and 0.015, Dam break 0.025 full depth, Mer's meteor ocean at 0.012, the deep ocean (tall cells). GPU time per stage, whole step, memory.
+5. DX12 against Vulkan on her card: both are offered by wgpu; measure the benchmark set on each and pick the faster as default.
 
-## Memory and streaming
+Done when: the shaders build from our own files, every test passes, and the reference and benchmark numbers are recorded with today's water.
 
-Reading a cache:
+## Phase 1: speed, same water
 
-- The file is memory-mapped, not read into memory. On opening, the program walks the frame headers once (no point data is read) and keeps a list of where each frame starts.
-- A loader thread decodes frames ahead of the playhead into a small queue; the GPU keeps as many frames as a set budget of video memory allows (like the page's GPU memory setting). Memory use depends on that budget, not on how long the bake is.
-- Points are uploaded in their file layout (compact 32-bit positions, 16-bit speed and white-water level) and decoded in the vertex shader, as the page does. The CPU never loops over the points.
+The browser limit made the solver many small passes. With it gone:
 
-Writing a cache during a bake:
+1. Merge passes that only were split for the buffer limit: g2p always reads the old grid velocity (the turbulence white water works under APIC), whitewater sampling goes into the whitewater step, list building into classify where it can.
+2. Sorting under APIC: the sort carries the APIC rows too, so particles stay sorted by block (the page had to switch sorting off under APIC).
+3. Particles to grid without atomic additions ("gather"): with particles sorted by block, one workgroup owns one block, reads the particles of its block and its neighbours, and writes each face once. Faster on the GPU and the same result every run (today's atomics add in a different order each time).
+4. Fewer round trips to the CPU: the step's decisions (substeps, growing blocks, sorting) read counters a frame late from a ring of small readbacks, so the GPU never waits for the CPU.
+5. Frame packing on all CPU threads (rayon) while the GPU runs the next frame.
 
-- Each finished frame is read back from the GPU and handed to a packer thread (measurements, compact positions, buried water) and then a writer thread that appends it to the file, while the GPU runs the next frame. At most two frames wait at each, so only a few frames are ever in memory.
-- The JSON block at the start holds per-frame measurements that grow during the bake. Space is reserved for it and padded with spaces (JSON allows trailing spaces, and the page's reader accepts them); if it outgrows the space, the file is rewritten once at the end.
-- The frame count is written as "as many as there are" while baking and corrected at the end. The page's reader already stops at the end of the file, so a bake cut short by a crash still opens, with every frame that was finished.
+Done when: the reference numbers match (within run-to-run spread, and exactly for anything now deterministic), and the benchmark set is faster. Every merge is measured on its own; anything that is not faster goes back.
 
-GPU limits:
+## Phase 2: accuracy core
 
-- The program requests the adapter's full limits: biggest buffer, biggest storage binding, storage buffers per kernel (the page asks for 8 to 16).
-- One particle buffer of 2 GB holds about 44M particles with APIC (48 bytes each). The home card has 8 GB of video memory in all, so the grid and the other buffers run out before one particle buffer does. Splitting particle buffers (dispatching the particle kernels once per chunk, each with its own buffer and a base index) is planned, but only built if a measured scene needs it.
-- Host memory is 64-bit with no browser cap; RAM still matters for building collision shapes and seeding, which run on the CPU.
+1. Pressure solved to an accuracy, every step: conjugate gradient with the multigrid as its preconditioner (MGPCG, McAdams, Sifakis and Teran 2010). It stops when the pressure left unsolved is under a set tolerance (Normal 0.1%, Accurate 0.001%) instead of after a fixed number of sweeps, warm-started from the last step. The sums it needs are done on the GPU with subgroup reductions; the stop test is checked every few iterations without waiting on the CPU (the iteration count is decided on the GPU through indirect dispatch). Incompressible water: an impact can no longer squeeze the water; it has to push it out.
+2. Smooth solid walls: each cell face gets the share of it that is open (from the collider's distance field), and the pressure solve weights faces by it (Batty, Bertails and Bridson 2007; Houdini's Voxel Face Area). Slopes and curved objects stop looking like stairs to the water, water slides down a slope instead of sticking at the steps, and thin gaps still pass water.
+3. A sharp water surface: the liquid surface is built from the particles each step as a distance field on the grid (Zhu and Bridson 2005), and the pressure at the surface uses where the surface really is inside the cell (ghost fluid, Gibou et al. 2002, Enright et al. 2003). This is what keeps waves from losing height and keeps their period right. The same distance field serves the narrow band, the whitewater (crests from its curvature) and the Bake whitewater pass.
+4. Particle motion through the grid velocity with a higher-order step (RK3), as Houdini does, instead of one straight step per substep: drops and sheets follow curved paths correctly at large time steps.
+5. Volume kept: the particle separation stays, and the measured volume over a bake is shown in the bake report, so loss is visible.
 
-## Phases
+Targets, at cell size 0.025 m: standing wave loses under 3% of its height a period (today 10-18%) with the period within 1%; volume within 0.5% after 10 s of sloshing (today 1.2-1.6%); still water under 2 mm/s mean; dam break front within 10% of the measurements; swirl keeps over 90% of its energy; pressure left unsolved under the tolerance on every step. The meteor crown at least as tall and full as today.
 
-1. Viewer (done). Opens a page-made .splc and plays it: water, deep water and whitewater points coloured by speed, the tank box, the scene's objects posed from each frame, orbit camera, play, pause, frame stepping and scrubbing. Opens a page-made scene .json and shows its tank, objects and starting water. Done when Mer's 418 MB, 4M point, 18 frame cache and her scene play on this PC.
-2. Solver port, core FLIP (done): shader export, wgpu device with full limits, the FlipSim buffers, binding table and stages from `src/flip/sim.js`, the parameter block, colliders (buildSDF ported to Rust), keyframes and SceneRunner. Headless bakes that stream to disk. Checked against the page with the same measures (bakeDiag per frame), since two different GPU APIs will not give bit-identical results. Results: a dam break with a keyframed ball, 312k and 2.5M particles, matched the page frame by frame (water centre within 0.006-0.011 units, height spread within 2%, same substeps); the 3 s, 2.5M particle bake took 28.7 s natively against 76.7 s in the page on the same card (37 s before packing ran alongside the GPU), with memory flat at about 0.5 GB while its cache file grew to 1.1 GB. The scene file has no live spacing, so `--bake` takes `--spacing`.
-3. The rest of the solver (done): narrow band and ocean, whitewater, air field, drips, deep water look points, Bake whitewater (`--bake-whitewater`) and the Detail pass (`--detail-pass`), the last two as commands that read a finished bake and write a new cache. Results on Mer's meteor ocean scene: at live spacing 0.08 the same starting water as the page to the particle, then the water within the page's own run-to-run spread frame by frame (centre within 0.006 units, height spread within 0.4%), whitewater counts within the page's spread, Bake whitewater and the Detail pass close to the page's (fine water counts within 0.5%). At its full size (bake spacing 0.012, Accurate, whitewater on, 6.2M to 8M points), one second took 60 s natively against 278 s in the page on the same card, with 1.4 GB peak memory while a 1.3 GB cache streamed to disk.
-4. Big-scene work (done). Measured on Mer's ocean at bake spacing 0.012: the bake's buffers take 1.3 GB at the page's 8M Max points and 2.8 GB at 20M, of the card's 8 GB; video memory was never the limit. Max points was: the narrow band fills every spare slot by frame 2 and wants about twice the starting water after the impact (10.5 to 12M against 6.2M), and when it runs out the refill goes wherever the GPU lists cells first (the water drifted 0.06 to one side). A narrow band bake now picks Max points itself unless given: 2.5 times the starting water, as far as the card's free memory (nvidia-smi) and one buffer allow (15.4M there); every bake checks its estimate against the free memory before starting. Checkpoints: every 5 minutes of baking (--checkpoint-every; spaced so writing them takes at most a tenth of the time) the bake writes out.splc.ckpt: every GPU buffer that carries state between steps (particle buffers only as far as the particles go), the solver's counters, the scene runner, where the cache file ends, and the scene and settings it was started with; --resume out.splc cuts the cache back to that frame and carries on; a finished bake removes it. A bake killed at frame 30 and resumed from its checkpoint at 19 matched one that ran straight through as closely as two straight runs match each other. The disk: drive C: on this PC writes at 13 MB/s sustained (G: 463 MB/s), and a full-size frame is about 75 MB, so on C: the same bake took 173 s instead of 83 s; bakes now measure the time they wait for the disk and say when it held them back. Playback: --playback-test streams a 1.8 GB, 15M point bake through a 512 MB budget at 45 frames a second from the file cache (70 MB a frame); a bake bigger than RAM plays as fast as its drive reads. Split particle buffers: not built, as planned only if a measured scene needs them; one buffer holds 44M particles and 20M took 2.8 GB.
-Bake controls in the window (done, Mer asked after phase 4): a Bake panel with the bake settings, Bake, Stop, Resume, Bake whitewater and Detail with its region shown; progress and messages in the panel; the view follows the cache being written. Surface drawing is not wanted natively (Mer).
-Viewer look (done, Mer asked after phase 3): the page's point shaders, blending between frames, background, tank, grid, whitewater area, objects, camera, mouse, keys, axis widget and theme; tests/native-look.js pictures match. Still to come: Surface drawing, Bake playback levels, the ocean view outside the box.
-Throughout: the native program should look and handle like the page (Mer asked after trying phase 1): the same mouse and key controls in the viewport, the same water, deep water and whitewater look (blending between frames, look-only extras, Surface drawing), the same panel layout and Blender-style theme. Pictures from `--picture` are compared against the page's test screenshots.
+## Phase 3: narrow band, ocean and tall cells on the new core
 
-5. Interface: a full editor in the native program like the page's (Mer's choice): properties, outliner, objects and edit mode, keys and the timeline, Live and Bake. Started: tabs Bake, Simulation (the page's rows, exported by native/tools/export-settings.js), Tank, Objects (outliner and object fields), View; Save scene; edits go into the scene file's JSON in place. Then: moving objects in the viewport (G/R/S, the gizmo, tools), adding, duplicating and deleting objects, undo. Next: keys and the timeline, a live sim, edit mode.
+1. The narrow band's depth field becomes the liquid distance field from phase 2 (one field instead of two that can disagree).
+2. Tall cells that come back: when calm water returns below the surface, its columns become tall again (today they never do), and their flow is carried along; ocean waves drive the tall cells at the tank's sides.
+3. The two open questions from Mer's big ocean bake, checked with the new tests: the mean water height dropping between frames 0 and 3, and the bake reporting water at 238 m/s.
+4. Splitting the particle buffer only if a measured scene needs more than one buffer holds (about 44M particles today).
 
-## Things to know
+## Phase 4: whitewater and air
 
-- Built and tuned for Mer's home PC only (NVIDIA RTX 3060 Ti, 8 GB, Vulkan), Mer's call: it is not meant for the work computer, where the web page stays the tool. Use what this card offers (subgroups, 2 GB storage bindings, the 9-buffer APIC kernel) without fallbacks for smaller GPUs.
-- Native work lives on its own branch (`native/desktop-app`), not on the testing page's branch or main. The branch name does not start with `claude/`, so pushing it does not replace the testing page.
+1. The Houdini emission rules kept, but measured on the liquid distance field: crests from its curvature and the speed towards the outside, churn from the change in velocity. Same settings and looks.
+2. Mist as a volume: a density field carried by the air field and drawn as soft see-through fog, thicker and controllable (density, how fast it fades, how much the air turbulence breaks it up). Smoke as a setting of the same volume (made by objects or sources, rising with heat).
+3. A finer air field where the card has memory for it (the page capped it at about 260k cells).
+
+## Phase 5: data, the new cache format
+
+1. One new file format (.splc version 3), built for streaming and seeking:
+   - Points stored in a fixed order that is the same in every frame and spreads evenly through the water, so any first part of a frame is an even sample (drawing fewer points is just drawing a shorter range).
+   - Each frame stored as the difference from where the last two frames predict each point (motion prediction), quantized, then compressed (zstd). A full frame every 24 frames so any frame can be reached quickly, like video.
+   - Velocity can be kept (for motion blur when rendering elsewhere, and so Bake whitewater no longer guesses it from the next frame).
+   - Target: 3 to 5 times smaller than today's caches, and faster to read than the disk is to send it.
+2. Old .splc files still open, and can be converted.
+3. Export for Blender: points per frame (PLY sequence, with speed and velocity) and a meshed surface per frame (marching cubes over the liquid distance field on the GPU, OBJ or PLY sequence; Alembic if a Rust writer is good enough). OpenVDB later (writing VDB from Rust needs work).
+
+## Phase 6: playback
+
+1. Level of detail from the point order: fewer points far away, when the frame would be late or while scrubbing fast.
+2. Frames decoded on the GPU from the compressed layout, so uploads are a fraction of today's.
+3. The page's Bake playback Full / Smooth / Fast becomes this automatic level of detail with a quality setting.
+
+## Phase 7: interface
+
+1. The gaps from the page: smoothness test, saving live water as a cache, invert selection, the Back / Left / Bottom views, the page's real inset in edit mode.
+2. Desktop comforts: recent files, scene autosave and recovery after a crash, a project folder (scene, bakes and exports kept together), a bake queue (several bakes in a row, overnight), a notice when a bake finishes, settings remembered between runs.
+3. Panels for the new solver settings in plain words (pressure accuracy, smooth walls on/off, mist volume, export), with tooltips that say what each costs.
+
+## Phase 8: Detail pass rework
+
+Waits for Mer's ideas on how it should work. Things learned so far: fine water leaving the region should be kept, not killed; the fine sim should make its own whitewater; its settings belong in the cache file.
+
+## Later
+
+- Octree or adaptive grid (finer cells near the surface, coarser deep down), after tall cells are measured on the new core.
+- Splitting very large scenes over the GPU and the CPU's memory.
+
+## How each phase is checked
+
+- `cargo test --release`: format, shaders, the accuracy tests, the reference numbers.
+- The benchmark set on Mer's card before and after, numbers in the commit message.
+- Pictures from `--picture` and screenshots of the window on her PC.
+- Mer tries the testing copy; it is published when she says.
