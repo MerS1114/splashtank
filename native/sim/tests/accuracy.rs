@@ -18,14 +18,19 @@ use splash_sim::scene::{desc_from_scene, BakeOpts, Desc};
 use splash_sim::session::Session;
 
 /// live spacing of the cases with known answers (cell 0.025 m)
-const SP: f32 = 0.0125;
+/// (ACC_SP overrides it, to see what resolution does)
+fn sp() -> f32 { std::env::var("ACC_SP").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0125) }
 
 fn scene(w: f64, h: f64, d: f64, fills: Value, g: f64) -> Value {
     // ACC_XFER=flip compares the FLIP transfer
     let xfer = std::env::var("ACC_XFER").unwrap_or_else(|_| "apic".into());
-    json!({ "app": "SplashTank", "version": 2, "box": { "min": { "x": -w / 2.0, "y": 0, "z": -d / 2.0 }, "size": { "w": w, "h": h, "d": d }, "open": {} },
+    // ACC_SOLVER: solver settings to try, e.g. {"sep": 0, "iters": 200} (merged into the scene's solver)
+    let extra: Value = std::env::var("ACC_SOLVER").ok().and_then(|v| serde_json::from_str(&v).ok()).unwrap_or(json!({}));
+    let mut sc = json!({ "app": "SplashTank", "version": 2, "box": { "min": { "x": -w / 2.0, "y": 0, "z": -d / 2.0 }, "size": { "w": w, "h": h, "d": d }, "open": {} },
         "solver": { "engine": "flip", "nbOn": false, "sprOn": false, "airOn": false, "dripOn": false, "scale": 1, "subMax": 16, "vmaxW": 50, "colMax": 100, "g": g, "cap": 4000000, "xfer": xfer },
-        "bake": { "dur": 30, "fps": 60 }, "fills": fills, "events": [], "objs": [] })
+        "bake": { "dur": 30, "fps": 60 }, "fills": fills, "events": [], "objs": [] });
+    if let Some(m) = extra.as_object() { for (k, v) in m { sc["solver"][k] = v.clone(); } }
+    sc
 }
 
 fn desc(sc: &Value, spacing: f32) -> Desc {
@@ -65,7 +70,7 @@ fn len(v: [f32; 3]) -> f32 { (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt() }
 fn still() {
     let gpu = Gpu::new().unwrap();
     let sc = scene(1.0, 1.0, 1.0, json!([{ "t": "box", "fx0": 0, "fx1": 1, "y0": 0, "y1": 0.5, "fz0": 0, "fz1": 1 }]), 9.8);
-    let d = desc(&sc, SP);
+    let d = desc(&sc, sp());
     let mut s = Session::new(&gpu, &d, &|_| {}, None).unwrap();
     s.seed(&gpu);
     let mean_y = |p: &[[f32; 3]]| p.iter().map(|q| q[1] as f64).sum::<f64>() / p.len() as f64;
@@ -95,7 +100,7 @@ fn dam_scene() -> (Value, f64, f64) {
 fn dam() {
     let gpu = Gpu::new().unwrap();
     let (sc, a, _) = dam_scene();
-    let d = desc(&sc, SP);
+    let d = desc(&sc, sp());
     let mut s = Session::new(&gpu, &d, &|_| {}, None).unwrap();
     s.seed(&gpu);
     let (x0, y0) = (s.lay.b.x0, s.lay.b.y0);
@@ -123,7 +128,7 @@ fn volume() {
     let gpu = Gpu::new().unwrap();
     let (sc, a, w) = dam_scene();
     let want = a * 2.0 * a / w;
-    let d = desc(&sc, SP);
+    let d = desc(&sc, sp());
     let mut s = Session::new(&gpu, &d, &|_| {}, None).unwrap();
     s.seed(&gpu);
     let (b, h, sp) = (s.lay.b, s.lay.h, s.lay.d);
@@ -151,7 +156,7 @@ fn slosh() {
     let gpu = Gpu::new().unwrap();
     let (l, dd, hd, am) = (1.0f64, 0.2f64, 0.5f64, 0.08f64);
     let sc = scene(l, 1.0, dd, json!([]), 9.8);
-    let d = desc(&sc, SP);
+    let d = desc(&sc, sp());
     let mut s = Session::new(&gpu, &d, &|_| {}, None).unwrap();
     let (b, sp) = (s.lay.b, s.lay.d as f64);
     let mut rng = splash_sim::flip::Rng::new(7);
@@ -213,7 +218,7 @@ fn swirl() {
     let (l, dd, u) = (1.0f64, 0.1f64, 0.5f64);
     // no gravity: with it, the thin gap left at the top sloshes and pollutes the vortex
     let sc = scene(l, l, dd, json!([]), 0.0);
-    let d = desc(&sc, SP);
+    let d = desc(&sc, sp());
     let mut s = Session::new(&gpu, &d, &|_| {}, None).unwrap();
     let (b, sp) = (s.lay.b, s.lay.d as f64);
     let pi = std::f64::consts::PI;

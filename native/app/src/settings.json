@@ -1254,6 +1254,18 @@
    ],
    "def": true,
    "tip": "Native program only, narrow band only: deep water well under the band is kept as one tall cell per column instead of a cell every spacing, so deep lakes and oceans need a fraction of the grid (a deep ocean baked about 3 times faster). When the surface, particles, an object or a source comes near, that depth goes back to ordinary cells. Objects and sources low in the water keep ordinary cells near them from the start. The web page ignores this setting."
+  },
+  {
+   "group": 1,
+   "kind": "check",
+   "label": "Sharp water surface",
+   "key": "ghost",
+   "path": [
+    "solver",
+    "ghost"
+   ],
+   "def": true,
+   "tip": "The pressure meets the air where the water's surface really is inside each cell, worked out from the particles every step, instead of at the middle of the next cell. Waves keep their height and timing (a standing wave lost 13% of its height a period without it, 2.7% with it) and splashes rise more freely. Costs about a tenth more time. The web page ignores this setting."
   }
  ],
  "looks": {

@@ -49,7 +49,7 @@ The first plan (porting the page: viewer, solver, big scenes, bake controls, edi
 
 Done when: the shaders build from our own files, every test passes, and the reference and benchmark numbers are recorded with today's water.
 
-## Phase 1: speed, same water
+## Phase 1: speed, same water — done 2026-10-30, see CLAUDE.md
 
 The browser limit made the solver many small passes. With it gone:
 
@@ -61,7 +61,7 @@ The browser limit made the solver many small passes. With it gone:
 
 Done when: the reference numbers match (within run-to-run spread, and exactly for anything now deterministic), and the benchmark set is faster. Every merge is measured on its own; anything that is not faster goes back.
 
-## Phase 2: accuracy core
+## Phase 2: accuracy core — sharp surface done 2026-10-30 (the wave targets met); the pressure solve was shown not to be the cause, so MGPCG waits behind smooth walls
 
 1. Pressure solved to an accuracy, every step: conjugate gradient with the multigrid as its preconditioner (MGPCG, McAdams, Sifakis and Teran 2010). It stops when the pressure left unsolved is under a set tolerance (Normal 0.1%, Accurate 0.001%) instead of after a fixed number of sweeps, warm-started from the last step. The sums it needs are done on the GPU with subgroup reductions; the stop test is checked every few iterations without waiting on the CPU (the iteration count is decided on the GPU through indirect dispatch). Incompressible water: an impact can no longer squeeze the water; it has to push it out.
 2. Smooth solid walls: each cell face gets the share of it that is open (from the collider's distance field), and the pressure solve weights faces by it (Batty, Bertails and Bridson 2007; Houdini's Voxel Face Area). Slopes and curved objects stop looking like stairs to the water, water slides down a slope instead of sticking at the steps, and thin gaps still pass water.

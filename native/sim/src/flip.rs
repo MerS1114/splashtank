@@ -114,9 +114,9 @@ fn sort_keys(n: [u32; 3]) -> (u32, u32) {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Opt { pub apic: bool, pub sort: bool, pub sort_auto: bool, pub p2g_win: bool, pub ballistic: bool, pub settle: bool, pub settle_tol: f32,
-    pub mg: bool, pub sep: f32, pub sep_iters: u32, pub extrap: bool }
+    pub mg: bool, pub sep: f32, pub sep_iters: u32, pub extrap: bool, pub ghost: bool }
 impl Default for Opt {
-    fn default() -> Opt { Opt { apic: true, sort: false, sort_auto: true, p2g_win: false, ballistic: true, settle: false, settle_tol: 0.001, mg: true, sep: 10.0, sep_iters: 8, extrap: true } }
+    fn default() -> Opt { Opt { apic: true, sort: false, sort_auto: true, p2g_win: false, ballistic: true, settle: false, settle_tol: 0.001, mg: true, sep: 10.0, sep_iters: 8, extrap: true, ghost: true } }
 }
 
 /// Three small staging buffers for the ctl counters, read back without waiting (readStats): each step uses the newest that arrived.
@@ -382,7 +382,8 @@ impl FlipSim {
     /// kept velocity (narrow band only), slot bookkeeping, and the fluid cell lists.
     fn make_slot_buffers(&mut self, gpu: &Gpu, n: u32) {
         let c = n as u64 * SLOT_CELLS;
-        for k in [6, 7, 8, 9, 39, 41] { self.buf.insert(k, Self::mk(gpu, c * 4)); }
+        for k in [6, 7, 8, 9, 39, 41, 47] { self.buf.insert(k, Self::mk(gpu, c * 4)); }
+        self.buf.insert(46, Self::mk(gpu, c * 16));
         self.buf.insert(3, Self::mk(gpu, c * 12)); self.buf.insert(5, Self::mk(gpu, c * 12));
         self.buf.insert(31, Self::mk(gpu, if self.vel_g_on { c * 12 } else { 16 }));
         for k in [18, 19, 20] { self.buf.insert(k, Self::mk(gpu, n as u64 * 4)); }
@@ -851,6 +852,8 @@ impl FlipSim {
         self.set_f(417, if self.opt.settle { self.opt.settle_tol } else { 0.0 });
         self.set_f(418, if self.opt.sep > 0.0 && !self.ww_only { 1.0 - (-self.opt.sep * dt).exp() } else { 0.0 });
         self.set_f(421, if apic { 1.0 } else { 0.0 });
+        // the sharp water surface (ghost fluid with theta from the surface field each step); off: the page's cell-centred surface
+        self.set_f(419, if self.opt.ghost && !self.ww_only { -1.0 } else { 0.0 });
         if self.opt.mg && !self.ww_only {
             self.mg_top = self.mg_plan(gpu);
             for (k, q) in self.mg_dense.clone().iter().enumerate() { self.pu[424 + 4 * k..428 + 4 * k].copy_from_slice(q); }
@@ -938,10 +941,12 @@ impl FlipSim {
         if self.only_tiles { return; }
         indirect(ps, "clearSlots", 80);
         dispatch(ps, if self.opt.p2g_win { "p2gWin" } else { "p2g" }, n);
+        if self.opt.ghost && !self.ww_only { dispatch(ps, "surfSplat", n); }
         mk(ps, "p2g");
         if nb { indirect(ps, "nbPhi", 64); indirect(ps, "nbJacA", 64); indirect(ps, "nbJacB", 64); indirect(ps, "nbJacA", 64); mk(ps, "narrow band"); }
         if self.solid_dirty { indirect(ps, "solidBuild", 64); self.solid_dirty = false; }
         indirect(ps, "classify", 64);
+        if self.opt.ghost && !self.ww_only { indirect(ps, "surfPhi", 64); }
         if nb { indirect(ps, "nbVel", 64); }
         indirect(ps, "normFaces", 64);
         mk(ps, "classify");
@@ -1201,6 +1206,7 @@ impl FlipSim {
         let ty: Vec<u32> = bytemuck::cast_slice(&self.read_buf(gpu, 7, bytes)).to_vec();
         let pr: Vec<f32> = bytemuck::cast_slice(&self.read_buf(gpu, 8, bytes)).to_vec();
         let rh: Vec<f32> = bytemuck::cast_slice(&self.read_buf(gpu, 9, bytes)).to_vec();
+        let sp: Vec<f32> = if self.opt.ghost { bytemuck::cast_slice(&self.read_buf(gpu, 47, bytes)).to_vec() } else { Vec::new() };
         let [nx, ny, nz] = self.l.n.map(|v| v as i64);
         let [tx, ty_] = [self.t[0] as i64, self.t[1] as i64];
         let open = self.open;
@@ -1226,8 +1232,14 @@ impl FlipSim {
                 for (a, b, cc) in [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
                     let q = ty_of(i + a, j + b, k + cc);
                     if q == 2 { continue; }
-                    nns += 1.0;
-                    if q == 1 { sum += pr[idx(i + a, j + b, k + cc) as usize] as f64; }
+                    if q == 1 { nns += 1.0; sum += pr[idx(i + a, j + b, k + cc) as usize] as f64; continue; }
+                    // to air: over theta (faceTheta in solver.wgsl)
+                    let (qi, qj, qk) = (i + a, j + b, k + cc);
+                    let inside = qi >= 0 && qj >= 0 && qk >= 0 && qi < nx && qj < ny && qk < nz;
+                    let pa = if sp.is_empty() { 0.0 } else { let x = if inside { idx(qi, qj, qk) } else { -1 }; if x < 0 { 1.5 } else { sp[x as usize] } };
+                    let pf = if sp.is_empty() { 0.0 } else { sp[c] };
+                    let th = if sp.is_empty() || pa <= 0.0 { 1.0 } else if pf >= 0.0 { 0.1 } else { (pf / (pf - pa)).clamp(0.1, 1.0) };
+                    nns += 1.0 / th as f64;
                 }
                 let r = rh[c] as f64 - (nns * pr[c] as f64 - sum);
                 r2 += r * r; b2 += (rh[c] as f64).powi(2);

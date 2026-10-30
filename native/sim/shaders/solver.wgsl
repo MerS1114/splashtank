@@ -11,6 +11,7 @@ fn clearSlots(@builtin(global_invocation_id) g: vec3<u32>) {
   var s = 0u; if (blk < sc) { s = slotList[blk]; }
   let c = s * 512u + (t & 511u);
   atomicStore(&cnt[c], 0);
+  for (var a = 0u; a < 4u; a++) { atomicStore(&sacc[c * 4u + a], 0); }
   for (var a = 0u; a < 3u; a++) { atomicStore(&accV[c * 3u + a], 0); atomicStore(&accW[c * 3u + a], 0); }
   if (s == 0u) { rhs[c] = 8.0; }   // the spare slot reads as air in the narrow band depth passes
 }
@@ -221,14 +222,58 @@ fn presNbr(i: i32, j: i32, k: i32) -> vec2<f32> {
     if (a == 0u) { q.x -= 1; } else if (a == 1u) { q.x += 1; } else if (a == 2u) { q.y -= 1; } else if (a == 3u) { q.y += 1; } else if (a == 4u) { q.z -= 1; } else { q.z += 1; }
     let ty = ctypeOf(q.x, q.y, q.z);
     if (ty == 2u) { continue; }
-    if (ty == 1u) { nns += 1.0; sum += presAt(q); } else { nns += 1.0 / ghostTheta(); }
+    if (ty == 1u) { nns += 1.0; sum += presAt(q); } else { nns += 1.0 / faceTheta(vec3<i32>(i, j, k), q); }
   }
   return vec2<f32>(sum, nns);
 }
 // Ghost fluid free surface (Gibou et al. 2002, Enright et al. 2003): the air pressure 0 is set where the surface is, a share theta of
-// a cell from the water cell's centre, not at the next air cell's centre (theta 1, first order: the surface sat half a cell too high in
-// the solve, so waves on coarse grids ran slow and lost height). P.ext0.w is theta; 0 means 1.
+// a cell from the water cell's centre, not at the next air cell's centre (theta 1, first order: the surface sat up to half a cell off in
+// the solve, and every time the surface crossed into the next cell the water lost a little energy: a standing wave lost 13% of its height
+// a period, more with more substeps, and ran 3.5% slow). P.ext0.w below 0: theta from the surface field of each step (surfPhi), per
+// face; above 0: one theta everywhere (the web page's experiment); 0: theta 1.
 fn ghostTheta() -> f32 { return select(1.0, clamp(P.ext0.w, 0.2, 1.0), P.ext0.w > 0.0); }
+fn sphiAt(q: vec3<i32>) -> f32 { if (!inDom(q) || !hasStorage(q)) { return 1.5; } return sphi[cellIdx(q.x, q.y, q.z)]; }
+// theta of the face between water cell f and air cell q: where the surface field crosses zero between their centres
+fn faceTheta(f: vec3<i32>, q: vec3<i32>) -> f32 {
+  if (P.ext0.w >= 0.0) { return ghostTheta(); }
+  let pf = sphiAt(f); let pa = sphiAt(q);
+  if (pa <= 0.0) { return 1.0; }   // the field says water there too: as before
+  if (pf >= 0.0) { return 0.1; }   // the water cell's centre is outside the water: the surface is right at it
+  return clamp(pf / (pf - pa), 0.1, 1.0);
+}
+// the surface field (Zhu and Bridson 2005): each particle adds its offset from the centres of the 8 cells around it, weighted
+// trilinearly; a cell's distance to the surface is then the length of its average offset less a particle radius (0.75 of the spacing:
+// a cell centre right on a flat surface then reads 0)
+const SURFS: f32 = 65536.0;
+@compute @workgroup_size(256)
+fn surfSplat(@builtin(global_invocation_id) g: vec3<u32>) {
+  let i = gid1(g); if (i >= P.n || P.ext0.w >= 0.0) { return; }
+  let q = pos[i]; if (q.y < DEADY || isBallistic(i)) { return; }
+  let gg = (q.xyz - vec3<f32>(P.x0, P.y0, P.z0)) * P.ih - vec3<f32>(0.5);
+  let f0 = floor(gg); let fr = gg - f0; let i0 = vec3<i32>(f0);
+  for (var c = 0u; c < 8u; c++) {
+    let o = vec3<i32>(i32(c & 1u), i32((c >> 1u) & 1u), i32((c >> 2u) & 1u));
+    let w = select(1.0 - fr.x, fr.x, o.x == 1) * select(1.0 - fr.y, fr.y, o.y == 1) * select(1.0 - fr.z, fr.z, o.z == 1);
+    let cc = i0 + o;
+    if (w <= 0.0 || !inDom(cc) || !hasStorage(cc)) { continue; }
+    let ci = cellIdx(cc.x, cc.y, cc.z) * 4u; let off = fr - vec3<f32>(o);
+    atomicAdd(&sacc[ci], i32(round(w * SURFS)));
+    atomicAdd(&sacc[ci + 1u], i32(round(w * off.x * SURFS))); atomicAdd(&sacc[ci + 2u], i32(round(w * off.y * SURFS))); atomicAdd(&sacc[ci + 3u], i32(round(w * off.z * SURFS)));
+  }
+}
+@compute @workgroup_size(256)
+fn surfPhi(@builtin(global_invocation_id) g: vec3<u32>) {
+  let a = acell(gid1(g)); if (!a.ok || P.ext0.w >= 0.0) { return; }
+  let c = a.c; let sw = f32(atomicLoad(&sacc[c * 4u])) / SURFS;
+  // no particles near: a water cell (the narrow band's deep water, or one just emptied) is inside, by the band's depth when there is one
+  var phi = select(1.5, select(-0.5, min(phiOf(c), -0.5), P.nb != 0u), (ctype[c] & 0xffu) == 1u);
+  if (sw > 1.0e-4) {
+    let d = vec3<f32>(f32(atomicLoad(&sacc[c * 4u + 1u])), f32(atomicLoad(&sacc[c * 4u + 2u])), f32(atomicLoad(&sacc[c * 4u + 3u]))) / (SURFS * sw);
+    phi = length(d) - 0.75 * pow(P.rest, -1.0 / 3.0);
+  }
+  if (P.nb != 0u && phiOf(c) < -1.0) { phi = min(phi, phiOf(c)); }   // deep narrow band water has no particles
+  sphi[c] = phi;
+}
 // settled water: a fluid cell whose pressure from the last step already balances this step's divergence, so one relaxation would change
 // it by less than the tolerance (P.ext0.y: how far, in cells per step, the water may move from the difference; 0 = off). Once that has
 // held for SETTLE steps in a row it is left out of the pressure lists and keeps its pressure; mostly calm deep water. Checked again every
@@ -280,7 +325,8 @@ fn projBody(f: u32, axis: u32, at: vec3<i32>) {
   var pl = 0.0; var ph = 0.0;
   if (tl == 1u) { pl = presAt(lo); }
   if (th == 1u) { ph = pres[cellIdx(hi.x, hi.y, hi.z)]; }
-  let k = select(1.0 / ghostTheta(), 1.0, tl == 1u && th == 1u);   // to the surface: the gradient over theta of a cell
+  var k = 1.0;   // to the surface: the gradient over theta of a cell
+  if (tl == 1u && th != 1u) { k = 1.0 / faceTheta(lo, hi); } else if (th == 1u && tl != 1u) { k = 1.0 / faceTheta(hi, lo); }
   gvW(f, gvR(f) - P.dt * P.ih * k * (ph - pl));
 }
 @compute @workgroup_size(256)
@@ -575,7 +621,9 @@ fn g2pRest(i: u32, p: vec3<f32>, v0: vec3<f32>, fcell: vec3<i32>, vn: vec3<f32>,
     let gp = p * 0.55; let tt = P.q8 * 0.6;
     gust = vec3<f32>(vnz(gp + vec3<f32>(tt, 0.0, 0.0)), vnz(gp + vec3<f32>(17.3, tt, 4.1)), vnz(gp + vec3<f32>(5.7, 9.2, tt))) * 2.0 - vec3<f32>(1.0);
   }
-  let kd = select(P.q4 * (0.04 + 1.5 * exposure * exposure), 0.0, P.ext3.y > 0.5);   // water feels the air field instead (airDragW)
+  // only water the air can reach is dragged: the web page dragged all water a little (0.04), a brake on the whole body (a standing wave
+  // lost about 1% of its height a period to it)
+  let kd = select(P.q4 * exposure * (0.04 + 1.5 * exposure), 0.0, P.ext3.y > 0.5);   // water feels the air field instead (airDragW)
   let airv = vec3<f32>(P.q1, P.q2, P.q3) + gust * P.q7;
   v = v + (airv - v) * (1.0 - exp(-kd * P.dt));
   let sp = length(v);

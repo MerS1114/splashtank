@@ -200,7 +200,7 @@ fn airDragW(@builtin(global_invocation_id) g: vec3<u32>) {
   let c = particleCell(p); var rho = 1.0;
   if (hasStorage(c)) { rho = f32(atomicLoad(&cnt[cellIdx(c.x, c.y, c.z)])) / P.rest; }
   let exposure = 1.0 - 0.97 * smoothstep(0.1, 0.65, rho);
-  let kd = P.ext3.z * (0.04 + 1.5 * exposure * exposure);
+  let kd = P.ext3.z * exposure * (0.04 + 1.5 * exposure);   // only water the air can reach (as g2pRest)
   let v = vel[i].xyz;
   vel[i] = vec4<f32>(v + (airAt(p) - v) * (1.0 - exp(-kd * P.dt)), vel[i].w);
 }
