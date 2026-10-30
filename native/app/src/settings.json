@@ -1236,12 +1236,12 @@
    "kind": "check",
    "label": "Grouped transfer",
    "key": "p2gWin",
-   "tip": "Particles hand their velocity to the grid, and read it back, through a small patch of the grid kept in fast workgroup memory, instead of each particle going to the grid on its own. Exactly the same result. Needs Sort particles on to help. Whether it is faster depends on the GPU: the Solver benchmark compares both (row G) on this computer.",
+   "tip": "Particles hand their velocity to the grid through a small patch of the grid kept in fast workgroup memory, instead of each particle going to the grid on its own. Exactly the same result, much faster in big scenes. Needs Sort particles on to help.",
    "path": [
     "solver",
     "p2gWin"
    ],
-   "def": false
+   "def": true
   },
   {
    "group": 14,

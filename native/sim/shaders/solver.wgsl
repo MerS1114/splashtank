@@ -55,15 +55,18 @@ fn p2gWin(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation
       if (axis == 0u) { q.y -= 0.5; q.z -= 0.5; } else if (axis == 1u) { q.x -= 0.5; q.z -= 0.5; } else { q.x -= 0.5; q.y -= 0.5; }
       let f0 = floor(q); let fr = q - f0; let i0 = vec3<i32>(f0);
       var vc = v.x; if (axis == 1u) { vc = v.y; } else if (axis == 2u) { vc = v.z; }
+      let apic = P.ext1.y > 0.5; var cr = vec3<f32>(0.0); if (apic) { cr = aff[i * 3u + axis].xyz; }
       for (var c = 0u; c < 8u; c++) {
         let dx = i32(c & 1u); let dy = i32((c >> 1u) & 1u); let dz = i32((c >> 2u) & 1u);
         let w = select(1.0 - fr.x, fr.x, dx == 1) * select(1.0 - fr.y, fr.y, dy == 1) * select(1.0 - fr.z, fr.z, dz == 1);
         if (w <= 0.0) { continue; }
+        // APIC as in p2g: the particle's velocity plus how it changes from the particle to this face
+        var vf = vc; if (apic) { vf += dot(cr, (vec3<f32>(f32(dx), f32(dy), f32(dz)) - fr) * P.h); }
         let gc = i0 + vec3<i32>(dx, dy, dz); let l = gc - o;
         if (win == 1u && all(l >= vec3<i32>(0)) && all(l < vec3<i32>(11))) {
           let e = u32(l.x + 11 * (l.y + 11 * l.z)) * 2u;
-          atomicAdd(&p2gAcc[e], i32(round(w * vc * P.scale))); atomicAdd(&p2gAcc[e + 1u], i32(round(w * P.scale)));
-        } else { p2gFace(axis, gc, vc, w); }
+          atomicAdd(&p2gAcc[e], i32(round(w * vf * P.scale))); atomicAdd(&p2gAcc[e + 1u], i32(round(w * P.scale)));
+        } else { p2gFace(axis, gc, vf, w); }
       }
     }
     if (win == 1u) {

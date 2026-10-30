@@ -261,7 +261,7 @@ pub fn desc_from_scene(scene: &Value, o: &BakeOpts) -> Result<Desc, String> {
         d, max_n, max_n_set: o.max_points.is_some(), fps, substeps, max_sub, frames: (dur * fps).round() as u32,
         g, iters, flip: num(&sv, "flip", 0.95) as f32, apic_flip: num(&sv, "apicFlip", 0.8) as f32, comp: if sep > 0.0 { 0.0 } else { 6.0 }, sep, apic, accurate,
         // the Speed-ups switches: not in the page's scene files (its defaults then), kept under solver by the native window
-        cell_ratio, sort: flag(&sv, "sortP", true), p2g_win: flag(&sv, "p2gWin", false), ballistic: flag(&sv, "ballistic", true), settle: flag(&sv, "settle", false), mg: flag(&sv, "mg", true),
+        cell_ratio, sort: flag(&sv, "sortP", true), p2g_win: flag(&sv, "p2gWin", true), ballistic: flag(&sv, "ballistic", true), settle: flag(&sv, "settle", false), mg: flag(&sv, "mg", true),
         detail, col_max: num(&sv, "colMax", 100.0) as f32 * k, vmax_w: num(&sv, "vmaxW", 50.0) as f32 * k, scale,
         tear: num(&sv, "tear", 0.5) as f32 * 0.5 * cell_ratio.powi(3),
         size, open, org, fills: box_fills, events, objs,

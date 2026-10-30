@@ -62,34 +62,56 @@ fn growFree(@builtin(global_invocation_id) g: vec3<u32>) {
 
 // ---- optional particle sort ----
 // groups particles that are near each other in memory, so neighbouring threads read the same grid cells.
-// The key is the particle's block of cells in z-order (Morton order: nearby blocks get nearby keys), a counting sort over 32768 keys:
-// 4x4x4 cell blocks while each side of the box is at most 128 cells, larger blocks beyond. It used to hash 4x4x4 blocks into 65536
-// buckets, which put far-apart blocks in one bucket and neighbouring blocks far apart (as in Fernandez-Fernandez et al. 2022, the
-// grouping only has to be nearly right, but it should follow space). Dead particles go last. Results do not depend on particle order.
-fn spread5(v: u32) -> u32 { var x = v & 31u; x = (x | (x << 8u)) & 0x0300F00Fu; x = (x | (x << 4u)) & 0x030C30C3u; x = (x | (x << 2u)) & 0x09249249u; return x; }
-fn sortShift() -> u32 { let m = max(max(P.nx, P.ny), P.nz); var sh = 2u; loop { if (((m - 1u) >> sh) < 32u || sh >= 12u) { break; } sh++; } return sh; }
+// The key is the particle's 4x4x4 block of cells in z-order (Morton order: nearby blocks get nearby keys), a counting sort over up to
+// 2^21 keys (128 blocks a side; coarser blocks only beyond 512 cells a side). The web page had 32768 keys, so in a big tank (Mer's ocean,
+// 266 cells a side) a key covered 16x16x16 cells and the particles inside one came out in a random order: grid to particle got slower than
+// unsorted. Dead particles go last. Results do not depend on particle order (the transfers add whole numbers).
+const SORTKMAX: u32 = 2097152u;   // at most this many keys; the chunk sums are kept after them
+// the keys this tank needs (8 to the power of the bits a block's coordinate needs), so a small tank clears and scans only a few;
+// dead particles take key sortK(). sort_keys in flip.rs works out the same.
+fn sortK() -> u32 { let m = max(max(P.nx, P.ny), P.nz); let top = (m - 1u) >> sortShift(); var b = 1u; loop { if ((top >> b) == 0u || b >= 7u) { break; } b++; } return 1u << (3u * b); }
+fn sortCh() -> u32 { return (sortK() + 64u) / 64u; }
+fn spread7(v: u32) -> u32 { var r = 0u; for (var b = 0u; b < 7u; b++) { r |= ((v >> b) & 1u) << (3u * b); } return r; }
+fn sortShift() -> u32 { let m = max(max(P.nx, P.ny), P.nz); var sh = 2u; loop { if (((m - 1u) >> sh) < 128u || sh >= 12u) { break; } sh++; } return sh; }
 fn sortKey(i: u32) -> u32 {
   let q = pos[i];
-  if (q.y < DEADY) { return 65535u; }
+  if (q.y < DEADY) { return sortK(); }
   let c = vec3<u32>(particleCell(q.xyz)) >> vec3<u32>(sortShift());
-  return spread5(c.x) | (spread5(c.y) << 1u) | (spread5(c.z) << 2u);
+  return spread7(c.x) | (spread7(c.y) << 1u) | (spread7(c.z) << 2u);
 }
 @compute @workgroup_size(256)
-fn sortClear(@builtin(global_invocation_id) g: vec3<u32>) { let t = gid1(g); if (t < 65536u) { atomicStore(&sortCnt[t], 0u); } }
+fn sortClear(@builtin(global_invocation_id) g: vec3<u32>) { let t = gid1(g); if (t <= sortK()) { atomicStore(&sortCnt[t], 0u); } }
 @compute @workgroup_size(256)
 fn sortHist(@builtin(global_invocation_id) g: vec3<u32>) { let i = gid1(g); if (i >= P.n) { return; } atomicAdd(&sortCnt[sortKey(i)], 1u); }
+// the exclusive prefix sum of the counts in three passes: each chunk of 64 keys summed, the chunk sums scanned by one workgroup, then each
+// chunk's keys written from its chunk's start
+@compute @workgroup_size(256)
+fn sortSums(@builtin(global_invocation_id) g: vec3<u32>) {
+  let c = gid1(g); if (c >= sortCh()) { return; }
+  let kk = sortK();
+  var s = 0u;
+  for (var q = 0u; q < 64u; q++) { let k = c * 64u + q; if (k <= kk) { s += atomicLoad(&sortCnt[k]); } }
+  atomicStore(&sortCnt[SORTKMAX + 1u + c], s);
+}
 var<workgroup> sortPart: array<u32, 256>;
 @compute @workgroup_size(256)
 fn sortScan(@builtin(local_invocation_id) l: vec3<u32>) {
-  let t = l.x; let base = t * 256u;
+  let ch = sortCh(); let t = l.x; let per = (ch + 255u) / 256u; let base = t * per;
   var s = 0u;
-  for (var q = 0u; q < 256u; q++) { s += atomicLoad(&sortCnt[base + q]); }
+  for (var q = 0u; q < per; q++) { let c = base + q; if (c < ch) { s += atomicLoad(&sortCnt[SORTKMAX + 1u + c]); } }
   sortPart[t] = s;
   workgroupBarrier();
   if (t == 0u) { var run = 0u; for (var q = 0u; q < 256u; q++) { let v = sortPart[q]; sortPart[q] = run; run += v; } }
   workgroupBarrier();
   var run = sortPart[t];
-  for (var q = 0u; q < 256u; q++) { let v = atomicLoad(&sortCnt[base + q]); atomicStore(&sortCnt[base + q], run); run += v; }
+  for (var q = 0u; q < per; q++) { let c = base + q; if (c < ch) { let v = atomicLoad(&sortCnt[SORTKMAX + 1u + c]); atomicStore(&sortCnt[SORTKMAX + 1u + c], run); run += v; } }
+}
+@compute @workgroup_size(256)
+fn sortApply(@builtin(global_invocation_id) g: vec3<u32>) {
+  let c = gid1(g); if (c >= sortCh()) { return; }
+  let kk = sortK();
+  var run = atomicLoad(&sortCnt[SORTKMAX + 1u + c]);
+  for (var q = 0u; q < 64u; q++) { let k = c * 64u + q; if (k <= kk) { let v = atomicLoad(&sortCnt[k]); atomicStore(&sortCnt[k], run); run += v; } }
 }
 @compute @workgroup_size(256)
 fn sortScatter(@builtin(global_invocation_id) g: vec3<u32>) {
@@ -99,6 +121,20 @@ fn sortScatter(@builtin(global_invocation_id) g: vec3<u32>) {
 }
 @compute @workgroup_size(256)
 fn sortCopy(@builtin(global_invocation_id) g: vec3<u32>) { let i = gid1(g); if (i >= P.n) { return; } pos[i] = tpos[i]; vel[i] = tvel[i]; pid[i] = tpid[i]; }
+// under APIC the particles' rows move with them (the web page could not bind that many buffers, so it did not sort under APIC)
+@compute @workgroup_size(256)
+fn sortScatterA(@builtin(global_invocation_id) g: vec3<u32>) {
+  let i = gid1(g); if (i >= P.n) { return; }
+  let d = atomicAdd(&sortCnt[sortKey(i)], 1u);
+  tpos[d] = pos[i]; tvel[d] = vel[i]; tpid[d] = pid[i];
+  for (var k = 0u; k < 3u; k++) { taff[d * 3u + k] = aff[i * 3u + k]; }
+}
+@compute @workgroup_size(256)
+fn sortCopyA(@builtin(global_invocation_id) g: vec3<u32>) {
+  let i = gid1(g); if (i >= P.n) { return; }
+  pos[i] = tpos[i]; vel[i] = tvel[i]; pid[i] = tpid[i];
+  for (var k = 0u; k < 3u; k++) { aff[i * 3u + k] = taff[i * 3u + k]; }
+}
 // back into id order for saving, so frame after frame the same slot is the same particle
 @compute @workgroup_size(256)
 fn unsort(@builtin(global_invocation_id) g: vec3<u32>) { let i = gid1(g); if (i >= P.n) { return; } tpos[pid[i]] = pos[i]; }

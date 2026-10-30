@@ -99,6 +99,19 @@ pub fn ww_area_box(b: &splash_format::Box3, k: f32, up: f32) -> splash_format::B
 }
 
 /// Solver options (sim.opt).
+/// The sort's most keys and their chunks of 64 (SORTKMAX in blocks.wgsl): the count buffer's size.
+const SORT_K: u32 = 1 << 21;
+const SORT_CH: u32 = (SORT_K + 1).div_ceil(64);
+/// The keys this layout's sort uses (sortK in blocks.wgsl), and their chunks of 64.
+fn sort_keys(n: [u32; 3]) -> (u32, u32) {
+    let m = n[0].max(n[1]).max(n[2]);
+    let mut sh = 2; while ((m - 1) >> sh) >= 128 && sh < 12 { sh += 1; }
+    let top = (m - 1) >> sh;
+    let mut b = 1; while (top >> b) != 0 && b < 7 { b += 1; }
+    let k = 1u32 << (3 * b);
+    (k, (k + 64) / 64)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Opt { pub apic: bool, pub sort: bool, pub sort_auto: bool, pub p2g_win: bool, pub ballistic: bool, pub settle: bool, pub settle_tol: f32,
     pub mg: bool, pub sep: f32, pub sep_iters: u32, pub extrap: bool }
@@ -214,7 +227,8 @@ impl FlipSim {
         buf.insert(16, mk(ntiles as u64 * 4)); buf.insert(17, mk(ntiles as u64 * 4)); buf.insert(21, mk(ntiles as u64 * 8));
         buf.insert(40, mk(16));
         buf.insert(43, mk(32));   // tall cells: off (T = 0) until enable_tall
-        buf.insert(10, mk(32 * 128)); buf.insert(22, mk(65536 * 4)); buf.insert(23, mk(16)); buf.insert(24, mk(16));
+        buf.insert(44, mk(16));   // the sort's copy of the APIC rows, made on first use
+        buf.insert(10, mk(32 * 128)); buf.insert(22, mk((SORT_K + 1 + SORT_CH) as u64 * 4)); buf.insert(23, mk(16)); buf.insert(24, mk(16));
         buf.insert(12, dev.create_buffer(&wgpu::BufferDescriptor { label: Some("ctl"), size: 64, usage: STOR, mapped_at_creation: false }));
         buf.insert(25, mk(16));
         buf.insert(15, mk(16)); buf.insert(37, mk(16));
@@ -749,12 +763,13 @@ impl FlipSim {
         }
         let apic = self.opt.apic && !self.ww_only;
         if apic && self.buf[&42].size() < self.max_n as u64 * 48 { self.buf.insert(42, Self::mk(gpu, self.max_n as u64 * 48)); self.groups_dirty = true; }
-        // the sort (FLIP only) needs a second copy of the particles
-        if self.opt.sort && !apic && self.buf[&23].size() < self.max_n as u64 * 16 {
+        // the sort needs a second copy of the particles (and of their APIC rows)
+        if self.opt.sort && !self.ww_only && self.buf[&23].size() < self.max_n as u64 * 16 {
             let m = self.max_n as u64;
             self.buf.insert(23, Self::mk(gpu, m * 16)); self.buf.insert(24, Self::mk(gpu, m * 16)); self.buf.insert(27, Self::mk(gpu, m * 4));
             self.groups_dirty = true;
         }
+        if self.opt.sort && apic && self.buf[&44].size() < self.max_n as u64 * 48 { self.buf.insert(44, Self::mk(gpu, self.max_n as u64 * 48)); self.groups_dirty = true; }
         let fr =if apic { if gpu.pipes.contains_key("g2pAo") { o.apic_flip } else { 0.0 } } else { o.flip };
         let flip = fr.clamp(0.0, 1.0).powf(dt * 60.0);
         let stride = 1u32.max(n.div_ceil(300000));
@@ -888,15 +903,17 @@ impl FlipSim {
             ps.dispatch_workgroups_indirect(args, off);
         };
         let apic = self.opt.apic && !self.ww_only;
-        let sort_on = self.opt.sort && !apic;
+        let sort_on = self.opt.sort && !self.ww_only;
         if sort_on && !self.only_tiles {
             self.sort_tick += 1;
             self.sort_moved += self.stats.map(|s| s.vmax).unwrap_or(0.0) * self.last_dt / self.l.h;
             if !self.sorted_ever || self.sort_tick >= 64 || (self.sort_tick >= 4 && self.sort_moved >= 2.0) {
                 self.sort_tick = 0; self.sort_moved = 0.0; self.sorted_ever = true;
-                dispatch(ps, "sortClear", 65536); dispatch(ps, "sortHist", n);
+                let (sk, sch) = sort_keys(self.l.n);
+                dispatch(ps, "sortClear", sk + 1); dispatch(ps, "sortHist", n); dispatch(ps, "sortSums", sch);
                 ps.set_pipeline(&gpu.pipes["sortScan"].pipeline); ps.set_bind_group(0, &g["sortScan"], &[]); ps.dispatch_workgroups(1, 1, 1);
-                dispatch(ps, "sortScatter", n); dispatch(ps, "sortCopy", n);
+                dispatch(ps, "sortApply", sch);
+                if apic { dispatch(ps, "sortScatterA", n); dispatch(ps, "sortCopyA", n); } else { dispatch(ps, "sortScatter", n); dispatch(ps, "sortCopy", n); }
                 mk(ps, "sort");
             }
         }
@@ -915,7 +932,7 @@ impl FlipSim {
         mk(ps, "blocks");
         if self.only_tiles { return; }
         indirect(ps, "clearSlots", 80);
-        dispatch(ps, if self.opt.p2g_win && !apic { "p2gWin" } else { "p2g" }, n);
+        dispatch(ps, if self.opt.p2g_win { "p2gWin" } else { "p2g" }, n);
         mk(ps, "p2g");
         if nb { indirect(ps, "nbPhi", 64); indirect(ps, "nbJacA", 64); indirect(ps, "nbJacB", 64); indirect(ps, "nbJacA", 64); mk(ps, "narrow band"); }
         if self.solid_dirty { indirect(ps, "solidBuild", 64); self.solid_dirty = false; }

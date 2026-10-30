@@ -268,7 +268,8 @@ fn crown() {
     ys.sort_by(|a, b| a.total_cmp(b));
     let surf = ys[ys.len() * 98 / 100];
     // water more than 3 cells above the still surface: in the middle (r < 0.15 R), in a ring (0.15-0.6 R), further out
-    let (mut best, mut at, mut line) = ([0usize; 3], 0, String::new());
+    // judged as the crown first rises (the first frame with over 2000 up in the ring): later the crown spreads past the ring anyway
+    let (mut best, mut at, mut first, mut line) = ([0usize; 3], 0, None, String::new());
     for k in 1..=12 {
         frames(&gpu, &mut s, 6);
         let (p, _) = read(&gpu, &mut s);
@@ -280,10 +281,12 @@ fn crown() {
         }
         line += &format!(" f{}: {}/{}/{}", k * 6, up[0], up[1], up[2]);
         if up[1] > best[1] { best = up; at = k * 6; }
+        if first.is_none() && up[1] > 2000 { first = Some((k * 6, up)); }
     }
     eprintln!("crown: most water up in the ring at frame {at}: middle {} ring {} outside {} (Meteor lake 0.04)\n  middle/ring/outside:{line}", best[0], best[1], best[2]);
     assert!(best[1] > 2000, "the impact throws up little water in a ring ({})", best[1]);
-    assert!(best[1] > 3 * best[2], "water rises outside the ring ({} against {} in it): a broad mound, not a crown", best[2], best[1]);
+    let (ff, fu) = first.unwrap_or((0, best));
+    assert!(fu[1] > 3 * fu[2], "at frame {ff} water rises outside the ring ({} against {} in it): a broad mound, not a crown", fu[2], fu[1]);
 }
 
 #[test]
