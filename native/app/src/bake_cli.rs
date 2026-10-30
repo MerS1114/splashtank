@@ -3,6 +3,7 @@
 //! `--detail-pass`: a finer sim over a region of a finished bake, guided by it (the page's Detail), written to a new cache.
 //! `--bake-whitewater`: whitewater made afterwards from a finished bake's water (the page's Bake whitewater), written to a new cache.
 //! `--resume out.splc`: carries on a bake that stopped (a crash, a power cut, closing it) from its last checkpoint.
+//! `--benchmark-set [report.txt]`: the solver benchmark on a fixed set of scenes, to compare builds and graphics APIs.
 
 use serde_json::Value;
 use splash_sim::bake::{self, Progress};
@@ -155,6 +156,11 @@ fn bake_now(gpu: &Gpu, desc: &Desc, o: &BakeOpts, out: &Path, mut ro: bake::RunO
 /// The command line: builds the task from the arguments and prints its progress.
 pub fn run(args: &[String]) -> Result<(), String> {
     let flag = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
+    if args.iter().any(|a| a == "--benchmark-set") {
+        let out = args.iter().position(|a| a == "--benchmark-set").and_then(|i| args.get(i + 1)).filter(|v| !v.starts_with("--")).map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("benchmark-set.txt"));
+        return benchmark_set(&out, flag("--steps").and_then(|v| v.parse().ok()));
+    }
     if let Some(inp) = flag("--benchmark") {
         let p = Path::new(&inp);
         let (scene, mut o) = if inp.to_ascii_lowercase().ends_with(".splc") { from_cache(p)? } else { (read_json(p)?, BakeOpts::default()) };
@@ -216,3 +222,46 @@ pub fn run(args: &[String]) -> Result<(), String> {
     eprintln!("wrote {}", task.out.display());
     Ok(())
 }
+
+/// The benchmark set: the scenes every solver change is timed on (GPU milliseconds per stage, from a moment where the water is busy).
+/// Mer's meteor ocean is included when her scene file is in Downloads. steps: how many steps each is timed over (default 60).
+pub fn benchmark_set(out: &Path, steps: Option<u32>) -> Result<(), String> {
+    let all: Value = serde_json::from_str(include_str!("scenes.json")).map_err(|e| e.to_string())?;
+    let mut deep = all["scenes"]["Ocean"].clone();
+    // the deep ocean of the tall cell measurements: 6.4 m high, the still level at three quarters, no hull
+    deep["box"]["size"]["h"] = serde_json::json!(6.4);
+    deep["ocean"]["level"] = serde_json::json!(0.75);
+    deep["objs"] = serde_json::json!([]);
+    let mut cases: Vec<(String, Value, f32, f32)> = vec![
+        ("Meteor lake 0.03".into(), all["scenes"]["Meteor lake"].clone(), 0.03, 2.5),
+        ("Meteor lake 0.015".into(), all["scenes"]["Meteor lake"].clone(), 0.015, 2.5),
+        ("Dam break 0.025".into(), all["scenes"]["Dam break"].clone(), 0.025, 1.0),
+        ("Deep ocean 0.03 (tall cells)".into(), deep, 0.03, 1.0),
+    ];
+    let mer = dirs_downloads().map(|d| d.join("splashtank-scene.json"));
+    if let Some(p) = mer.filter(|p| p.exists()) { cases.push(("Mer's meteor ocean 0.012".into(), read_json(&p)?, 0.012, 0.5)); }
+    let mut gpu = None;
+    let mut text = String::new();
+    let t0 = std::time::Instant::now();
+    for (name, scene, sp, at) in cases {
+        let n = steps.unwrap_or(if sp < 0.02 { 30 } else { 60 });
+        eprintln!("{name}: simulating to {at} s, then timing {n} steps");
+        let res = Arc::new(std::sync::Mutex::new(None));
+        let o = BakeOpts { spacing: sp, seconds: Some(at + 1.0), detail: Some(1.0), ..Default::default() };
+        let t = Task { kind: Kind::Bench { at, steps: n, out: res.clone() }, inp: None, scene, o, out: std::env::temp_dir().join("splashtank-bench.splc") };
+        let tc = std::time::Instant::now();
+        execute(&t, &mut gpu, &mut |_| true)?;
+        if text.is_empty() { if let Some(g) = &gpu { text += &format!("Benchmark set, build {}, {}\n\n", env!("SPLASH_COMMIT"), g.describe()); } }
+        let got = res.lock().unwrap().clone();
+        match got {
+            Some(b) => text += &format!("{name} ({:.0} s with warming up)\n{}\n", tc.elapsed().as_secs_f64(), b.text()),
+            None => text += &format!("{name}: ended before {at} s\n\n"),
+        }
+    }
+    text += &format!("All in {:.0} s\n", t0.elapsed().as_secs_f64());
+    std::fs::write(out, &text).map_err(|e| format!("Could not write {}: {e}", out.display()))?;
+    eprintln!("{text}Written to {}", out.display());
+    Ok(())
+}
+
+fn dirs_downloads() -> Option<PathBuf> { std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join("Downloads")) }

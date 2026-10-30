@@ -27,7 +27,7 @@ pub fn describe(adapter: &wgpu::Adapter, device: &wgpu::Device) -> String {
 pub fn picture(files: &[PathBuf], out: &Path, frame: f64, size: [u32; 2]) -> Result<(), String> {
     let mut doc = Doc::default();
     for f in files { eprintln!("{}", crate::open_into(&mut doc, f)?); }
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::PRIMARY, ..wgpu::InstanceDescriptor::new_without_display_handle() });
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: splash_sim::gpu::preferred_backends(), ..wgpu::InstanceDescriptor::new_without_display_handle() });
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() }))
         .map_err(|e| format!("No GPU adapter: {e}"))?;
     let (device, queue) = pollster::block_on(adapter.request_device(&device_descriptor(&adapter))).map_err(|e| format!("No GPU device: {e}"))?;
@@ -68,7 +68,7 @@ pub fn playback_test(file: &Path, budget_mb: u64, size: [u32; 2], loops: u32) ->
     let mut doc = Doc::default();
     eprintln!("{}", crate::open_into(&mut doc, file)?);
     let n = doc.cache.as_ref().map(|c| c.frames.len()).ok_or("That is not a cache.")?;
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::PRIMARY, ..wgpu::InstanceDescriptor::new_without_display_handle() });
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: splash_sim::gpu::preferred_backends(), ..wgpu::InstanceDescriptor::new_without_display_handle() });
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() }))
         .map_err(|e| format!("No GPU adapter: {e}"))?;
     let (device, queue) = pollster::block_on(adapter.request_device(&device_descriptor(&adapter))).map_err(|e| format!("No GPU device: {e}"))?;

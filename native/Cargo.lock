@@ -2056,6 +2056,7 @@ name = "splash-sim"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "naga",
  "pollster 0.4.0",
  "rayon",
  "serde_json",

@@ -10,6 +10,8 @@
 //!       (300; 0: none) next to the cache (out.splc.ckpt) and removed when the bake finishes.
 //!   splashtank --benchmark in.json|in.splc [--spacing 0.04] [--at 2.5] [--steps 60]
 //!       the solver benchmark: simulates up to --at seconds, then times --steps steps stage by stage on the GPU.
+//!   splashtank --benchmark-set [report.txt] [--steps 60]
+//!       the benchmark on the fixed set of scenes (SPLASH_BACKEND=dx12 or vulkan picks the graphics API).
 //!   splashtank --resume out.splc
 //!       carries on a bake that stopped, from its last checkpoint.
 //!   splashtank --bake-whitewater in.splc out.splc [--scene scene.json]
@@ -82,7 +84,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     if args.iter().any(|a| a.starts_with("--")) { attach_console(); }
-    if args.iter().any(|a| a == "--bake" || a == "--bake-whitewater" || a == "--detail-pass" || a == "--resume" || a == "--benchmark") {
+    if args.iter().any(|a| a == "--bake" || a == "--bake-whitewater" || a == "--detail-pass" || a == "--resume" || a == "--benchmark" || a == "--benchmark-set") {
         if let Err(e) = bake_cli::run(&args) { eprintln!("{e}"); std::process::exit(1); }
         return;
     }

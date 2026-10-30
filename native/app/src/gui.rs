@@ -19,6 +19,8 @@ pub fn run(files: Vec<PathBuf>) {
         wgpu_options: WgpuConfiguration {
             wgpu_setup: WgpuSetup::CreateNew(WgpuSetupCreateNew {
                 device_descriptor: Arc::new(crate::gpu::device_descriptor),
+                // the window draws on the same graphics API the solver runs on (Vulkan here)
+                instance_descriptor: wgpu::InstanceDescriptor { backends: splash_sim::gpu::preferred_backends(), ..wgpu::InstanceDescriptor::new_without_display_handle() },
                 ..WgpuSetupCreateNew::without_display_handle()
             }),
             ..Default::default()

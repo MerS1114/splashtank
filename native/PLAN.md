@@ -32,7 +32,7 @@ The first plan (porting the page: viewer, solver, big scenes, bake controls, edi
 - The tests that compare against the page frame by frame (native-compare, nb-check). They are replaced by reference numbers recorded once from today's program, and then by the accuracy tests.
 - Copying the page's quirks only to match it (for example sorting turned off under APIC, the turbulence white-water term missing under APIC on 8 buffers).
 
-## Phase 0: a fresh foundation (no change to the water)
+## Phase 0: a fresh foundation (no change to the water) — done 2026-10-29, see CLAUDE.md
 
 1. Shaders as our own source: `sim/shaders/` split by area (core, blocks, solver, pressure, narrow band, tall cells, whitewater, air), joined by a small include step in gpu.rs. Binding numbers come from the shader text (already scanned by binding_use), not from the page's table. The exporter and the patches go.
 2. Reference numbers: run the current program on a fixed set of scenes and store per-frame measures (water centre, height spread, particles, substeps, fastest water, pressure left unsolved) in `native/tests/reference/`. Later changes are compared against them, and any difference must be one we meant.

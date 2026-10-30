@@ -2,7 +2,7 @@
 name = "splash-sim"
 version = "0.1.0"
 edition = "2021"
-description = "SplashTank's FLIP solver on wgpu, running the page's own WGSL shaders"
+description = "SplashTank's FLIP water solver on wgpu"
 
 [dependencies]
 splash-format = { path = "../format" }
@@ -11,3 +11,4 @@ pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }  # numbers read back exactly as the page wrote them
 rayon = "1"
+naga = { version = "30", features = ["wgsl-in"] }  # which bindings each kernel uses, read from the shader itself

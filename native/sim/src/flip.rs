@@ -592,6 +592,17 @@ impl FlipSim {
     }
 
     /// Particle velocities (x y z w each), in slot order (the detail pass keeps its own copy of the particles).
+    /// Every particle slot's position and velocity, in the same (storage) order (for measuring; parked slots have y below -1e5).
+    pub fn read_particles(&mut self, gpu: &Gpu, pos: &mut Vec<f32>, vel: &mut Vec<f32>) {
+        let bytes = sizes(self.n) * 16;
+        let mut st = self.stage.take();
+        let p = Self::read_into(gpu, &self.buf[&1], 0, bytes, &mut st, None);
+        self.stage = st;
+        pos.clear();
+        pos.extend_from_slice(&bytemuck::cast_slice::<u8, f32>(&p)[..self.n as usize * 4]);
+        self.read_vel(gpu, vel);
+    }
+
     pub fn read_vel(&mut self, gpu: &Gpu, dst: &mut Vec<f32>) {
         let bytes = sizes(self.n) * 16;
         let mut st = self.stage.take();
@@ -738,7 +749,13 @@ impl FlipSim {
         }
         let apic = self.opt.apic && !self.ww_only;
         if apic && self.buf[&42].size() < self.max_n as u64 * 48 { self.buf.insert(42, Self::mk(gpu, self.max_n as u64 * 48)); self.groups_dirty = true; }
-        let fr = if apic { if gpu.pipes.contains_key("g2pAo") { o.apic_flip } else { 0.0 } } else { o.flip };
+        // the sort (FLIP only) needs a second copy of the particles
+        if self.opt.sort && !apic && self.buf[&23].size() < self.max_n as u64 * 16 {
+            let m = self.max_n as u64;
+            self.buf.insert(23, Self::mk(gpu, m * 16)); self.buf.insert(24, Self::mk(gpu, m * 16)); self.buf.insert(27, Self::mk(gpu, m * 4));
+            self.groups_dirty = true;
+        }
+        let fr =if apic { if gpu.pipes.contains_key("g2pAo") { o.apic_flip } else { 0.0 } } else { o.flip };
         let flip = fr.clamp(0.0, 1.0).powf(dt * 60.0);
         let stride = 1u32.max(n.div_ceil(300000));
         self.pu.iter_mut().for_each(|w| *w = 0);

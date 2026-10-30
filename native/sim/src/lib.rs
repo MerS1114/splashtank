@@ -1,4 +1,4 @@
-//! SplashTank's FLIP solver on wgpu, running the page's own WGSL kernels (exported by native/tools/export-wgsl.js).
+//! SplashTank's FLIP water solver on wgpu. The shader is in sim/shaders/ (started from the web page's, now this program's own).
 // the cache header's settings are one big json! literal
 #![recursion_limit = "256"]
 
@@ -11,18 +11,11 @@ pub mod gpu;
 pub mod runner;
 pub mod scene;
 pub mod sdf;
+pub mod session;
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-
-    /// The shader files here must be what the page's src/flip/*.js make now (node native/tools/export-wgsl.js writes them).
-    #[test]
-    fn shaders_up_to_date() {
-        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tools/export-wgsl.js");
-        let Ok(out) = std::process::Command::new("node").arg(&script).arg("--check").output() else { eprintln!("node not found, skipped"); return; };
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    }
 
     /// Ocean waves and the narrow band seed (a box against two walls, a sphere, the ocean) the same as the page's oceanWaves and
     /// nbSeedCount (native/tools/nb-check.js runs them).
