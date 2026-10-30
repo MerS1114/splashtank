@@ -84,7 +84,8 @@ struct PackU { nW: u32, nS: u32, nD: u32, wFromPos: u32, srcS: u32, srcD: u32, o
 @group(0) @binding(40) var<storage, read_write> mg: array<f32>;   // multigrid levels (wgsl-multigrid.js)
 @group(0) @binding(41) var<storage, read_write> dpres: array<f32>;   // per cell: the separation potential (sepRelax), whose gradient moves particles apart
 @group(0) @binding(42) var<storage, read_write> aff: array<vec4<f32>>;
-@group(0) @binding(44) var<storage, read_write> taff: array<vec4<f32>>;   // the sort's second copy of the APIC rows   // APIC: per particle three rows (x, y, z velocity), each how that velocity changes across space
+@group(0) @binding(44) var<storage, read_write> taff: array<vec4<f32>>;
+@group(0) @binding(45) var<storage, read_write> fmax: array<atomic<u32>>;   // the fastest particle at the end of a frame (speedMax)   // the sort's second copy of the APIC rows   // APIC: per particle three rows (x, y, z velocity), each how that velocity changes across space
 @group(0) @binding(38) var<uniform> PK: PackU;      // per drip sample: (local position, collider), (local normal, wetness)   // the grid velocity kept from the last step (narrow band)
 
 fn colSize(k: u32) -> f32 { let s = cols[k * 8u + 5u].w; return select(1.0, s, s > 0.0); }

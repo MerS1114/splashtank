@@ -46,6 +46,9 @@ impl<'d> Session<'d> {
         let oc = desc.ocean.as_ref().map(|c| (c, &ocean_w[..]));
         let mut need = 0u64;
         let free = free_vram_mb();
+        // sorting keeps a second copy of the particles; when that does not fit the card, the bake goes without sorting (slower, same water)
+        let mut sort = desc.sort;
+        let fits = |n: u64, s: bool| free.is_none_or(|mb| estimate_bytes(n, desc.apic, desc.cell_ratio, desc.spray_cap as u64, s) <= mb << 20);
         if let Some((m, nd)) = resumed {
             max_n = m;
             need = nd;
@@ -58,9 +61,11 @@ impl<'d> Session<'d> {
             // first. So, unless Max points was given, 2.5 times the start, as far as the card's free memory and one buffer allow.
             if !desc.max_n_set {
                 let mut want = (need as f64 * 2.5).ceil() as u64;
+                let least = (need as f64 * 1.3).ceil() as u64;
+                if sort && !fits(least, true) && fits(least, false) { sort = false; }
                 if let Some(mb) = free {
-                    let per = (estimate_bytes(1 << 20, desc.apic, desc.cell_ratio, 0) - estimate_bytes(0, desc.apic, desc.cell_ratio, 0)) as f64 / (1 << 20) as f64;
-                    let room = (mb as f64 * 1048576.0 * 0.85 - estimate_bytes(0, desc.apic, desc.cell_ratio, desc.spray_cap as u64) as f64).max(0.0);
+                    let per = (estimate_bytes(1 << 20, desc.apic, desc.cell_ratio, 0, sort) - estimate_bytes(0, desc.apic, desc.cell_ratio, 0, sort)) as f64 / (1 << 20) as f64;
+                    let room = (mb as f64 * 1048576.0 * 0.85 - estimate_bytes(0, desc.apic, desc.cell_ratio, desc.spray_cap as u64, sort) as f64).max(0.0);
                     want = want.min((room / per) as u64).max((need as f64 * 1.3).ceil() as u64);
                 }
                 max_n = (max_n as u64).max(want).min(lim as u64) as u32;
@@ -80,7 +85,9 @@ impl<'d> Session<'d> {
             max_n = (max_n as u64).max(4_000_000).max((need as f64 * 1.3).ceil() as u64).min(lim as u64) as u32;
         }
         // the card must hold it: say so before starting rather than fail partway
-        let est = estimate_bytes(max_n as u64, desc.apic, desc.cell_ratio, desc.spray_cap as u64);
+        if sort && !fits(max_n as u64, true) && fits(max_n as u64, false) { sort = false; }
+        if sort != desc.sort { say("Sorting particles is off for this bake: its second copy of the particles does not fit the card's free memory (same water, a little slower)."); }
+        let est = estimate_bytes(max_n as u64, desc.apic, desc.cell_ratio, desc.spray_cap as u64, sort);
         if let Some(mb) = free {
             if est > mb << 20 { return Err(format!("This bake needs about {:.1} GB of video memory and {:.1} GB is free. Lower Max points or Max whitewater, or use a coarser spacing.", est as f64 / 1e9, mb as f64 / 1024.0)); }
         }
@@ -92,7 +99,7 @@ impl<'d> Session<'d> {
             if t > 0 { sim.enable_tall(gpu, t, margin, desc.g * sim.l.h * (surf - t as f32 + 0.5)); say(&format!("Tall cells: the deep water below {:.2} (row {t}) is one cell a column", sim.l.b.y0 + t as f32 * sim.l.h)); }
             else { say("Tall cells: the water is not deep enough under its band for them here"); }
         }
-        sim.opt.apic = desc.apic; sim.opt.sort = desc.sort; sim.opt.p2g_win = desc.p2g_win; sim.opt.ballistic = desc.ballistic; sim.opt.settle = desc.settle;
+        sim.opt.apic = desc.apic; sim.opt.sort = sort; sim.opt.p2g_win = desc.p2g_win; sim.opt.ballistic = desc.ballistic; sim.opt.settle = desc.settle;
         sim.opt.mg = desc.mg; sim.opt.sep = desc.sep;
         let acc = desc.accurate;
         if acc { sim.opt.sep_iters = 16; }
@@ -169,13 +176,13 @@ impl<'d> Session<'d> {
         Ok(Some((sub, obj_v)))
     }
 
-    /// After frame self.f's particles are read back into buf (n of them): how fast the water got (the next frame's substeps), the
-    /// frame's measurements, and under Accurate the next frame's pressure iterations. Moves on to the next frame.
-    pub fn finish_frame(&mut self, gpu: &Gpu, buf: &[f32], n: u32, sub: u32, obj_v: f32, ovf0: u64) -> Value {
+    /// After frame self.f's readback was started (sim.readback_begin, n particles): how fast the water got (the next frame's substeps,
+    /// measured on the GPU by speedMax), the frame's measurements, and under Accurate the next frame's pressure iterations. Moves on to
+    /// the next frame. The particles themselves can be collected later (readback_end), while the next frame runs.
+    pub fn finish_frame(&mut self, gpu: &Gpu, n: u32, sub: u32, obj_v: f32, ovf0: u64) -> Value {
         let sim = &mut self.sim;
+        let mut mv: f32 = sim.frame_speed(gpu);
         sim.wait_stats(gpu);
-        let mut mv: f32 = 0.0;
-        for i in 0..n as usize { mv = mv.max(buf[i * 4 + 3] % 64.0); }
         let st = sim.stats.unwrap_or_default();
         mv = mv.max(st.vmax);
         let f = self.f;

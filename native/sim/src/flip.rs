@@ -164,6 +164,10 @@ pub struct FlipSim {
     pub stats: Option<Stats>,
     pub ovf_total: u64,
     stage: Option<wgpu::Buffer>,
+    /// a readback started and not collected yet: the particles' bytes, and the fastest particle's 4 bytes
+    pending: Option<(u32, u64, wgpu::SubmissionIndex)>,
+    fstage: Option<wgpu::Buffer>,
+    fmapped: bool,
     pub grew: u32,
     /// the whitewater pass over a finished bake (Bake whitewater): the loaded particles only build the grid, the whitewater stages run
     pub ww_only: bool,
@@ -227,7 +231,8 @@ impl FlipSim {
         buf.insert(16, mk(ntiles as u64 * 4)); buf.insert(17, mk(ntiles as u64 * 4)); buf.insert(21, mk(ntiles as u64 * 8));
         buf.insert(40, mk(16));
         buf.insert(43, mk(32));   // tall cells: off (T = 0) until enable_tall
-        buf.insert(44, mk(16));   // the sort's copy of the APIC rows, made on first use
+        buf.insert(44, mk(16));
+        buf.insert(45, mk(16));   // the sort's copy of the APIC rows, made on first use
         buf.insert(10, mk(32 * 128)); buf.insert(22, mk((SORT_K + 1 + SORT_CH) as u64 * 4)); buf.insert(23, mk(16)); buf.insert(24, mk(16));
         buf.insert(12, dev.create_buffer(&wgpu::BufferDescriptor { label: Some("ctl"), size: 64, usage: STOR, mapped_at_creation: false }));
         buf.insert(25, mk(16));
@@ -241,7 +246,7 @@ impl FlipSim {
             l, rest: l.ratio.powi(3), open, max_n, cap: max_n, n: 0, opt: Opt::default(), ntiles, t, scap, scap_max, lcap: 0, buf,
             groups: HashMap::new(), groups_dirty: true, pu: vec![0; (gpu.params_bytes / 4) as usize], cf: vec![0.0; 32 * 32], cf_prev: None, solid_dirty: true,
             sdf_sig: 0, sdf_cap: 16, run_start: 0, run_pos: Vec::new(), run_vel: Vec::new(), tm: 0.0, seed: 0, sort_tick: 0, sort_moved: 0.0, sorted_ever: false,
-            last_dt: 0.0, mg_size: 0, mg_dense: Vec::new(), mg_top: 0, only_tiles: false, stats_ring, stats: None, ovf_total: 0, stage: None, grew: 0, ww_only: false, tall_t0: 0, prof: None, prof_acc: Vec::new(), prof_steps: 0,
+            last_dt: 0.0, mg_size: 0, mg_dense: Vec::new(), mg_top: 0, only_tiles: false, stats_ring, stats: None, ovf_total: 0, stage: None, pending: None, fstage: None, fmapped: false, grew: 0, ww_only: false, tall_t0: 0, prof: None, prof_acc: Vec::new(), prof_steps: 0,
             vel_g_on: false, nb_init: 0, nb_fills: Vec::new(), nb_vols: Vec::new(), nb_band: None, ocean: None, ocean_w: Vec::new(), nb_on: false, init_step: 0,
             spray_cap: 0, spr_disp_max: 0, deep_on: false, air_dims: None, ndrip: 0, drip_sig: vec![u32::MAX], drip_cache: HashMap::new(),
             air_real: false, air_feel: false, air_iters: 20, air_on_step: false, drip_on_step: false, spr_on_step: false, ab: l.b,
@@ -957,11 +962,14 @@ impl FlipSim {
         }
         // whitewater: sampling the water at each point, moving the points, and making new ones from the water
         if self.spray_cap > 0 {
+            // sampling the water stays its own pass: folded into sprayStep the one big kernel ran slower (5.7 ms against 2.7 + 1.0 on Meteor lake at 0.015)
             dispatch(ps, "wwArgs", 1); indirect(ps, "wwSample", 112);
+            mk(ps, "ww sample");
             indirect(ps, "sprayStep", 112);
+            mk(ps, "ww move");
             if self.spr_on_step { dispatch(ps, "sprayEmit", n); if f32::from_bits(self.pu[83]) > 0.0 { dispatch(ps, "spinEmit", n); } }
             if self.drip_on_step { dispatch(ps, "dripStep", self.ndrip); }
-            mk(ps, "whitewater");
+            mk(ps, "ww emit");
         }
         if nb {
             if tall { indirect(ps, "tallCheck", 64); }
@@ -1054,32 +1062,67 @@ impl FlipSim {
 
     /// Particle positions in their original order (x y z, speed + 64 x white-water level in w), into dst (readbackInto).
     pub fn readback(&mut self, gpu: &Gpu, dst: &mut Vec<f32>) -> u32 {
+        self.readback_begin(gpu);
+        self.readback_end(gpu, dst)
+    }
+
+    /// Starts reading the particles back (in id order) and the fastest particle (speedMax): the copies are queued behind the frame's work
+    /// and mapped when the GPU gets there, so the next frame can be sent meanwhile. Returns how many particles.
+    pub fn readback_begin(&mut self, gpu: &Gpu) -> u32 {
         self.flush_run(gpu);
         let n = self.n;
         let bytes = sizes(n) * 16;
+        if self.fstage.is_none() {
+            self.fstage = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("fmax"), size: 16, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+        }
+        gpu.queue.write_buffer(&self.buf[&45], 0, &[0u8; 16]);
         if self.stage.as_ref().map(|s| s.size() < bytes).unwrap_or(true) {
             self.stage = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("readback"), size: (self.max_n as u64).max(1) * 16,
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
         }
         self.make_groups(gpu);
         let mut enc = gpu.device.create_command_encoder(&Default::default());
-        if self.sorted_ever {
-            self.pu[0] = n;
-            gpu.queue.write_buffer(&self.buf[&0], 0, bytemuck::cast_slice(&self.pu[..1]));
-            {
-                let mut ps = enc.begin_compute_pass(&Default::default());
-                let g = n.div_ceil(256);
+        self.pu[0] = n;
+        gpu.queue.write_buffer(&self.buf[&0], 0, bytemuck::cast_slice(&self.pu[..1]));
+        {
+            let mut ps = enc.begin_compute_pass(&Default::default());
+            let g = n.div_ceil(256);
+            ps.set_pipeline(&gpu.pipes["speedMax"].pipeline); ps.set_bind_group(0, &self.groups["speedMax"], &[]);
+            ps.dispatch_workgroups(g.min(65535), g.div_ceil(65535), 1);
+            if self.sorted_ever {
                 ps.set_pipeline(&gpu.pipes["unsort"].pipeline); ps.set_bind_group(0, &self.groups["unsort"], &[]);
                 ps.dispatch_workgroups(g.min(65535), g.div_ceil(65535), 1);
             }
-            enc.copy_buffer_to_buffer(&self.buf[&23], 0, self.stage.as_ref().unwrap(), 0, bytes);
-        } else {
-            enc.copy_buffer_to_buffer(&self.buf[&1], 0, self.stage.as_ref().unwrap(), 0, bytes);
         }
-        gpu.queue.submit([enc.finish()]);
+        enc.copy_buffer_to_buffer(&self.buf[if self.sorted_ever { &23 } else { &1 }], 0, self.stage.as_ref().unwrap(), 0, bytes);
+        enc.copy_buffer_to_buffer(&self.buf[&45], 0, self.fstage.as_ref().unwrap(), 0, 16);
+        let idx = gpu.queue.submit([enc.finish()]);
+        self.stage.as_ref().unwrap().slice(..bytes).map_async(wgpu::MapMode::Read, |_| {});
+        self.fstage.as_ref().unwrap().slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        self.fmapped = true;
+        self.pending = Some((n, bytes, idx));
+        n
+    }
+
+    /// The fastest particle at the end of the frame whose readback was started (waits for the GPU to finish that frame).
+    pub fn frame_speed(&mut self, gpu: &Gpu) -> f32 {
+        let Some(fs) = self.fstage.as_ref().filter(|_| self.fmapped) else { return 0.0; };
+        // only up to the readback's own submission (a frame sent after it keeps running)
+        let idx = self.pending.as_ref().map(|p| p.2.clone());
+        let _ = gpu.device.poll(wgpu::PollType::Wait { submission_index: idx, timeout: None });
+        let v = { let m = fs.slice(..).get_mapped_range().unwrap(); f32::from_bits(u32::from_le_bytes([m[0], m[1], m[2], m[3]])) };
+        fs.unmap();
+        self.fmapped = false;
+        if v.is_finite() { v } else { 0.0 }
+    }
+
+    /// Collects the readback started by readback_begin into dst (waits only if the copy is not done yet).
+    pub fn readback_end(&mut self, gpu: &Gpu, dst: &mut Vec<f32>) -> u32 {
+        let Some((n, bytes, idx)) = self.pending.take() else { dst.clear(); return 0; };
+        let _ = gpu.device.poll(wgpu::PollType::Wait { submission_index: Some(idx), timeout: None });
+        // the fastest particle's stage is mapped too: let go of it if frame_speed was not asked
+        if self.fmapped { if let Some(fs) = self.fstage.as_ref() { fs.unmap(); } self.fmapped = false; }
         let st = self.stage.as_ref().unwrap();
-        st.slice(..bytes).map_async(wgpu::MapMode::Read, |_| {});
-        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         dst.clear();
         dst.extend_from_slice(bytemuck::cast_slice(&st.slice(..bytes).get_mapped_range().unwrap()[..n as usize * 16]));
         st.unmap();

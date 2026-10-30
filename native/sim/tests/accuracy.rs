@@ -38,8 +38,9 @@ fn frames(gpu: &Gpu, s: &mut Session, k: u32) -> u32 {
     let mut most = 0;
     for _ in 0..k {
         let (sub, ov) = s.step_frame(gpu, |_, _, _| Ok(false)).unwrap().unwrap();
-        let n = s.sim.readback(gpu, &mut buf);
-        s.finish_frame(gpu, &buf, n, sub, ov, 0);
+        let n = s.sim.readback_begin(gpu);
+        s.finish_frame(gpu, n, sub, ov, 0);
+        s.sim.readback_end(gpu, &mut buf);
         most = most.max(sub);
     }
     most

@@ -111,6 +111,14 @@ fn p2g(@builtin(global_invocation_id) g: vec3<u32>) {
   }
   atomicAdd(&cnt[cellIdx(cc.x, cc.y, cc.z)], 1);
 }
+// the fastest particle at the end of a frame (the speed in pos.w below 64; positive floats sort as their bits): the next frame's substeps
+// come from it, read as 4 bytes so the frame's particles can be read back while the GPU already works on the next frame
+@compute @workgroup_size(256)
+fn speedMax(@builtin(global_invocation_id) g: vec3<u32>) {
+  let i = gid1(g); if (i >= P.n) { return; }
+  let w = pos[i].w % 64.0;
+  if (w > 0.0) { atomicMax(&fmax[0], bitcast<u32>(w)); }
+}
 @compute @workgroup_size(256)
 fn solidBuild(@builtin(global_invocation_id) g: vec3<u32>) {
   let a = acell(gid1(g)); if (!a.ok) { return; }

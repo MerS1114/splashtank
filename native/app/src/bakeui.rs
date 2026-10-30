@@ -301,7 +301,7 @@ impl BakeUi {
                 };
                 // Max points as the bake will pick it (session.rs): unless given, at least 4M or 1.3 times the start; a narrow band 2.5 times
                 let max_n = if d.max_n_set { d.max_n as u64 } else if d.nb.is_some() || d.ocean.is_some() { (d.max_n as u64).max(start * 5 / 2) } else { (d.max_n as u64).max(4_000_000).max(start * 13 / 10) };
-                let mem = splash_sim::bake::estimate_bytes(max_n, d.apic, d.cell_ratio, d.spray_cap as u64);
+                let mem = splash_sim::bake::estimate_bytes(max_n, d.apic, d.cell_ratio, d.spray_cap as u64, d.sort);
                 let per = start as f64 * 6.0 + if d.spray_cap > 0 { 200_000.0 * 10.0 } else { 0.0 };
                 format!("About {:.2} M points to start (Max points {:.1} M), about {:.1} GB of video memory, about {:.0} MB a frame, {:.1} GB for {} frames.",
                     start as f64 / 1e6, max_n as f64 / 1e6, mem as f64 / 1e9, per / 1048576.0, per * (d.frames + 1) as f64 / 1073741824.0, d.frames + 1)

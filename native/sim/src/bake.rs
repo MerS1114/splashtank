@@ -167,31 +167,41 @@ pub fn pack16(pos: Vec<u16>, spd: Vec<u8>, fm: Vec<u8>, n: usize, b: &Box3, q: O
 /// Per-frame measurements for the bake report, as bakeDiag: where the water is, how fast, how much left or went bad.
 pub fn diag(buf: &[f32], n: usize, b: &Box3, vcap: f32) -> Value {
     const H: usize = 16;
-    let mut hist = [0u32; H];
     let hy = (b.y1 - b.y0) / H as f32;
     let cap = vcap.min(63.0) * 0.98;
     let e = 1e-3;
-    let (mut alive, mut bad, mut out, mut capped, mut foamy) = (0u32, 0u32, 0u32, 0u32, 0u32);
-    let (mut sx, mut sy, mut sz, mut ss, mut smax, mut fl) = (0f64, 0f64, 0f64, 0f64, 0f32, 0f64);
-    let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
-    for i in 0..n {
-        let p = &buf[i * 4..i * 4 + 4];
-        if !p.iter().all(|v| v.is_finite()) { bad += 1; continue; }
-        if p[1] < -1e5 { continue; }
-        alive += 1;
-        let lv = (p[3] / 64.0).floor();
-        let sp = p[3] - lv * 64.0;
-        sx += p[0] as f64; sy += p[1] as f64; sz += p[2] as f64; ss += sp as f64; smax = smax.max(sp); fl += lv as f64;
-        if lv >= 8.0 { foamy += 1; }
-        if sp >= cap { capped += 1; }
-        if p[0] < b.x0 - e || p[0] > b.x1 + e || p[1] < b.y0 - e || p[1] > b.y1 + e || p[2] < b.z0 - e || p[2] > b.z1 + e { out += 1; }
-        for k in 0..3 { lo[k] = lo[k].min(p[k]); hi[k] = hi[k].max(p[k]); }
-        hist[(((p[1] - b.y0) / hy).floor() as i64).clamp(0, H as i64 - 1) as usize] += 1;
-    }
-    let a = alive.max(1) as f64;
-    json!({ "alive": alive, "gone": n as u32 - alive - bad, "nonFinite": bad, "outsideBox": out, "atWaterSpeedLimit": capped, "meanSpeed": ss / a, "maxSpeed": smax,
-        "meanFoam": fl / a / 15.0, "foamyPoints": foamy, "center": [sx / a, sy / a, sz / a],
-        "bbox": if alive > 0 { json!([lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]]) } else { Value::Null }, "heightHist": hist })
+    /// the measurements of some of the points; chunks of them are measured on every core and added up
+    #[derive(Clone, Copy)]
+    struct Acc { alive: u32, bad: u32, out: u32, capped: u32, foamy: u32, s: [f64; 4], smax: f32, fl: f64, lo: [f32; 3], hi: [f32; 3], hist: [u32; H] }
+    let zero = Acc { alive: 0, bad: 0, out: 0, capped: 0, foamy: 0, s: [0.0; 4], smax: 0.0, fl: 0.0, lo: [f32::INFINITY; 3], hi: [f32::NEG_INFINITY; 3], hist: [0; H] };
+    let add = |mut x: Acc, y: Acc| {
+        x.alive += y.alive; x.bad += y.bad; x.out += y.out; x.capped += y.capped; x.foamy += y.foamy; x.smax = x.smax.max(y.smax); x.fl += y.fl;
+        for k in 0..4 { x.s[k] += y.s[k]; }
+        for k in 0..3 { x.lo[k] = x.lo[k].min(y.lo[k]); x.hi[k] = x.hi[k].max(y.hi[k]); }
+        for k in 0..H { x.hist[k] += y.hist[k]; }
+        x
+    };
+    let t = buf[..n * 4].par_chunks(4 * 65536).map(|ch| {
+        let mut x = zero;
+        for p in ch.chunks_exact(4) {
+            if !p.iter().all(|v| v.is_finite()) { x.bad += 1; continue; }
+            if p[1] < -1e5 { continue; }
+            x.alive += 1;
+            let lv = (p[3] / 64.0).floor();
+            let sp = p[3] - lv * 64.0;
+            x.s[0] += p[0] as f64; x.s[1] += p[1] as f64; x.s[2] += p[2] as f64; x.s[3] += sp as f64; x.smax = x.smax.max(sp); x.fl += lv as f64;
+            if lv >= 8.0 { x.foamy += 1; }
+            if sp >= cap { x.capped += 1; }
+            if p[0] < b.x0 - e || p[0] > b.x1 + e || p[1] < b.y0 - e || p[1] > b.y1 + e || p[2] < b.z0 - e || p[2] > b.z1 + e { x.out += 1; }
+            for k in 0..3 { x.lo[k] = x.lo[k].min(p[k]); x.hi[k] = x.hi[k].max(p[k]); }
+            x.hist[(((p[1] - b.y0) / hy).floor() as i64).clamp(0, H as i64 - 1) as usize] += 1;
+        }
+        x
+    }).reduce(|| zero, add);
+    let a = t.alive.max(1) as f64;
+    json!({ "alive": t.alive, "gone": n as u32 - t.alive - t.bad, "nonFinite": t.bad, "outsideBox": t.out, "atWaterSpeedLimit": t.capped, "meanSpeed": t.s[3] / a, "maxSpeed": t.smax,
+        "meanFoam": t.fl / a / 15.0, "foamyPoints": t.foamy, "center": [t.s[0] / a, t.s[1] / a, t.s[2] / a],
+        "bbox": if t.alive > 0 { json!([t.lo[0], t.lo[1], t.lo[2], t.hi[0], t.hi[1], t.hi[2]]) } else { Value::Null }, "heightHist": t.hist })
 }
 
 /// Water on a lattice inside a volume object's mesh (fillVolume).
@@ -325,8 +335,10 @@ pub fn free_vram_mb() -> Option<u64> {
 
 /// About how much video memory a bake with Max points max_n takes: per particle its position, velocity, number, APIC rows and the
 /// readback copy; the block pool when its water sits packed (gridCost's estimate); whitewater with its readback copy; a margin.
-pub fn estimate_bytes(max_n: u64, apic: bool, ratio: f32, spray_cap: u64) -> u64 {
-    let per = 16 + 16 + 4 + 16 + if apic { 48 } else { 0 };
+pub fn estimate_bytes(max_n: u64, apic: bool, ratio: f32, spray_cap: u64, sort: bool) -> u64 {
+    // with sorting, its second copy of position, velocity and number (and the APIC rows): leaving it out ran Mer's ocean out of memory
+    let rows = if apic { 48 } else { 0 };
+    let per = 16 + 16 + 4 + 16 + rows + if sort { 16 + 16 + 4 + rows } else { 0 };
     let blocks = (max_n as f64 / (ratio as f64).powi(3) / 512.0 * 2.5).ceil() as u64;
     max_n * per + blocks * (512 * 72 + 12) + spray_cap * (16 * 4 + 4) + (300 << 20)
 }
@@ -428,6 +440,18 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, ro: &RunOpts, mut progress: impl 
     // checkpoints are spaced so writing them takes at most a tenth of the bake (a slow drive takes minutes for a big one)
     let (mut last_ck, mut ck_gap) = (Instant::now(), ro.checkpoint_secs);
     let mut prof_wall = 0.0f64;
+    // A frame whose particles are still being read back while the next frame runs on the GPU: (its particle count, object poses,
+    // measurements, whitewater and deep water). The GPU used to sit idle while each frame was read back (a tenth of a frame on Meteor
+    // lake at 0.015).
+    let mut pend: Option<(u32, Vec<f32>, Value, Raw)> = None;
+    // a frame's particles, collected, go to the packer and the writer; None when the writer stopped
+    let flush = |ses: &mut Session, buf: &mut Vec<f32>, p: (u32, Vec<f32>, Value, Raw)| -> Option<f64> {
+        ses.sim.readback_end(gpu, buf);
+        let tw = Instant::now();
+        let (n, objs, dg, raw) = p;
+        if tx.send(Job::Frame(std::mem::take(buf), n as usize, objs, dg, raw)).is_err() { return None; }
+        Some(tw.elapsed().as_secs_f64())
+    };
     while ses.f <= frames && !stopped {
         let f = ses.f;
         let tf0 = Instant::now();
@@ -447,25 +471,26 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, ro: &RunOpts, mut progress: impl 
         })?;
         let Some((sub, obj_v)) = step else { return Ok(()); };
         let t_sub = tf0.elapsed().as_secs_f32();
-        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
-        let t_gpu = tf0.elapsed().as_secs_f32();
-        n = ses.sim.readback(gpu, &mut buf);
+        // the frame before: its particles are collected now, while this frame runs
+        if let Some(p) = pend.take() { match flush(&mut ses, &mut buf, p) { Some(w) => wait += w, None => break } }
+        let t_prev = tf0.elapsed().as_secs_f32();
+        n = ses.sim.readback_begin(gpu);
+        // whitewater and deep water are read at once (they wait for this frame's work to finish)
         let raw = Raw { spray: ses.sim.read_spray(gpu), deep: if desc.nb_look { ses.sim.read_deep(gpu) } else { None } };
-        let t_read = tf0.elapsed().as_secs_f32();
+        let t_gpu = tf0.elapsed().as_secs_f32();
         let states = sample_all(f as f32 / fps);
-        let mut dg = ses.finish_frame(gpu, &buf, n, sub, obj_v, ovf0);
-        // where the frame's time went (ms): sending the steps, the GPU finishing them, reading the particles back; packing runs alongside.
-        // waitDisk: how long this frame waited for the packer and the disk to take it (a slow drive holds the whole bake back)
-        let tw = Instant::now();
-        dg["timing"] = json!({ "send": t_sub * 1000.0, "gpu": (t_gpu - t_sub) * 1000.0, "read": (t_read - t_gpu) * 1000.0 });
+        let mut dg = ses.finish_frame(gpu, n, sub, obj_v, ovf0);
+        // where the frame's time went (ms): sending the steps, collecting the frame before, the GPU finishing this one and the small reads,
+        // the measurements; the particles are collected during the next frame and packed alongside.
+        dg["timing"] = json!({ "send": t_sub * 1000.0, "prev": (t_prev - t_sub) * 1000.0, "gpu": (t_gpu - t_prev) * 1000.0, "read": (tf0.elapsed().as_secs_f32() - t_gpu) * 1000.0 });
         dg["ms"] = json!(tf0.elapsed().as_secs_f32() * 1000.0); dg["elapsed"] = json!(since(&t0));
-        if tx.send(Job::Frame(std::mem::take(&mut buf), n as usize, poses(&states), dg, raw)).is_err() { break; }
-        let w1 = tw.elapsed().as_secs_f64();
-        wait += w1;
+        pend = Some((n, poses(&states), dg, raw));
         stopped = !progress(&Progress { f, frames, n, elapsed: since(&t0) as f32, sub, frame_ms: tf0.elapsed().as_secs_f32() * 1000.0, wait: wait as f32 });
         // a checkpoint: once the frame is in the file, the GPU state and the bake's own state next to it; also when stopped, so a
-        // stopped bake can always carry on
-        if ro.checkpoint_secs > 0.0 && f < frames && (stopped || last_ck.elapsed().as_secs_f32() >= ck_gap) {
+        // stopped bake can always carry on. Both collect the frame now (the next frame must not have started).
+        let ck = ro.checkpoint_secs > 0.0 && f < frames && (stopped || last_ck.elapsed().as_secs_f32() >= ck_gap);
+        if ck || stopped { if let Some(p) = pend.take() { match flush(&mut ses, &mut buf, p) { Some(w) => wait += w, None => break } } }
+        if ck {
             let tc = Instant::now();
             let (ms, mr) = mpsc::channel();
             if tx.send(Job::Mark(ms)).is_err() { break; }
@@ -480,6 +505,7 @@ pub fn run(gpu: &Gpu, desc: &Desc, out: &Path, ro: &RunOpts, mut progress: impl 
             last_ck = Instant::now();
         }
     }
+    if let Some(p) = pend.take() { let _ = flush(&mut ses, &mut buf, p); }
     drop(tx);
     let _ = pt.join();
     let (w, diags) = wt.join().map_err(|_| "The cache writer stopped.".to_string())??;
