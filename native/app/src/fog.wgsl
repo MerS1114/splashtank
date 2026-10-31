@@ -9,6 +9,7 @@ struct FogU {
   e: vec4<f32>,          // its size; w how far a step towards the sun goes in the volume's own coordinates
   sun: vec4<f32>,        // towards the sun, scene coordinates over size
   col: vec4<f32>,        // lit colour; w how dark its shade goes
+  more: vec4<f32>,       // x the density it can reach (Opacity; 0 no limit), y Break-up, z w spare
 };
 @group(0) @binding(0) var<uniform> F: FogU;
 @group(1) @binding(0) var ta: texture_3d<f32>;
@@ -30,6 +31,13 @@ fn vs(@builtin(vertex_index) i: u32, @builtin(instance_index) k: u32) -> V {
   return o;
 }
 
+fn hash(p: vec3<f32>) -> f32 { return fract(sin(dot(p, vec3<f32>(12.9898, 78.233, 37.719))) * 43758.5453); }
+fn noise(p: vec3<f32>) -> f32 {
+  let i = floor(p); let f = p - i; let w = f * f * (3.0 - 2.0 * f);
+  let c = array<f32, 8>(hash(i), hash(i + vec3<f32>(1.0, 0.0, 0.0)), hash(i + vec3<f32>(0.0, 1.0, 0.0)), hash(i + vec3<f32>(1.0, 1.0, 0.0)),
+                        hash(i + vec3<f32>(0.0, 0.0, 1.0)), hash(i + vec3<f32>(1.0, 0.0, 1.0)), hash(i + vec3<f32>(0.0, 1.0, 1.0)), hash(i + vec3<f32>(1.0, 1.0, 1.0)));
+  return mix(mix(mix(c[0], c[1], w.x), mix(c[2], c[3], w.x), w.y), mix(mix(c[4], c[5], w.x), mix(c[6], c[7], w.x), w.y), w.z);
+}
 fn density(u: vec3<f32>) -> f32 {
   let a = textureSampleLevel(ta, sa, u, 0.0).r;
   let b = textureSampleLevel(tb, sb, u, 0.0).r;
@@ -44,8 +52,15 @@ fn fs(v: V) -> @location(0) vec4<f32> {
   if (any(u < vec3<f32>(0.0)) || any(u > vec3<f32>(1.0))) { discard; }
   // thinning out towards the edges of the volume, so its box never shows
   let edge = min(u, vec3<f32>(1.0) - u) * F.e.xyz / (F.e.w * 3.0);
-  let d = density(u) * smoothstep(0.0, 1.0, min(edge.x, min(edge.y, edge.z)));
+  var d = density(u) * smoothstep(0.0, 1.0, min(edge.x, min(edge.y, edge.z)));
   if (d < 0.002) { discard; }
+  if (F.more.y > 0.0) {   // fine holes, on the grid of the volume's own shape so they stay where they are
+    let q = u * F.e.xyz / F.e.w;
+    let n = 0.6 * noise(q * 0.5) + 0.3 * noise(q * 1.1) + 0.1 * noise(q * 2.3);
+    d *= clamp(1.0 + F.more.y * (1.6 * n - 1.3) * 2.0, 0.0, 1.0);
+    if (d < 0.002) { discard; }
+  }
+  if (F.more.x > 0.0) { d = F.more.x * (1.0 - exp(-d / F.more.x)); }
   let a = 1.0 - exp(-F.z.w * d * F.b0.w);
   // a little of its own shadow: how much lies towards the sun
   let s = F.sun.xyz * F.e.w;

@@ -27,6 +27,9 @@ struct Params {
   ext3: vec4<f32>,                                         // words 444-447: x real air flow (1: carried along, incompressible), y water feels the air field (1), z drag on water (/s), w pressure sweeps
   ext4: vec4<f32>,                                         // words 448-451: mist and smoke volume: x on, y density a mist point adds per second, z fade (/s), w (bits) which colliders make smoke
   ext5: vec4<f32>,                                         // words 452-455: x heat's lift, y heat's fade (/s), z smoke made per second, w the time this update covers
+  ext6: vec4<f32>,                                         // words 456-459: volume: x how fast it sinks (solver units, negative rises), y how much it follows the air, z how much it spreads, w spare
+  ext7: vec4<f32>,                                         // words 460-463: volume made by: x mist, y spray, z foam points, w spare
+  ext8: vec4<f32>,                                         // words 464-467: volume: x lowest, y highest height it is made at (solver units), z w spare
 };
 // a particle flying free of the grid (ballistic) keeps its white-water level in vel.w plus 2
 const BALLISTIC: f32 = 1.5;
@@ -78,7 +81,7 @@ fn gv0W(f: u32, v: f32) { atomicStore(&accW[f], bitcast<i32>(v)); }
 @group(0) @binding(35) var<storage, read_write> air2: array<vec4<f32>>;
 @group(0) @binding(51) var<storage, read_write> fog: array<vec2<f32>>;       // the mist and smoke volume, twice as fine as the air: density, heat
 @group(0) @binding(52) var<storage, read_write> fog2: array<vec2<f32>>;
-@group(0) @binding(53) var<storage, read_write> fogAcc: array<atomic<i32>>;  // density mist points left in a fog cell since the last update (fixed point)
+@group(0) @binding(53) var<storage, read_write> fogAcc: array<atomic<i32>>;  // density whitewater points left in a fog cell since the last update (32nds)
 @group(0) @binding(36) var<storage, read_write> drip: array<vec4<f32>>;
 // the live view packed the way cache frames are stored (see packDisp): 16-bit positions across the box, a speed byte and a white-water byte
 struct PackU { nW: u32, nS: u32, nD: u32, wFromPos: u32, srcS: u32, srcD: u32, oWp: u32, oWs: u32, oWf: u32, oSp: u32, oSk: u32, oDp: u32, oDs: u32, pad0: u32, pad1: u32, pad2: u32,

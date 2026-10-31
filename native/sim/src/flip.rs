@@ -65,7 +65,9 @@ pub struct Spr {
 #[derive(Clone, Copy, Debug)]
 pub struct Air { pub couple: f32, pub decay: f32, pub real: bool, pub feel: bool, pub size: f32, pub oct: f32, pub speed: f32, pub swirl: f32, pub iters: u32, pub blur: f32,
     /// the mist and smoke volume: on, density a mist point adds a second, fade a second, heat's lift (solver units), heat's fade, smoke made a second
-    pub fog: bool, pub fog_add: f32, pub fog_fade: f32, pub lift: f32, pub heat_fade: f32, pub smoke: f32 }
+    pub fog: bool, pub fog_add: f32, pub fog_fade: f32, pub lift: f32, pub heat_fade: f32, pub smoke: f32,
+    /// how fast it sinks (solver units), how much it follows the air, spreads; made by mist, spray, foam; lowest and highest height as shares of the tank
+    pub fog_sink: f32, pub fog_follow: f32, pub fog_spread: f32, pub fog_from: [f32; 3], pub fog_at: [f32; 2] }
 /// Dripping off wet colliders (simPar().drip).
 #[derive(Clone, Copy, Debug)]
 pub struct Drip { pub rate: f32, pub dry: f32 }
@@ -866,6 +868,10 @@ impl FlipSim {
         self.set_f(448, self.fog_on as u32 as f32); self.set_f(449, airo.map_or(0.0, |a| a.fog_add)); self.set_f(450, airo.map_or(0.0, |a| a.fog_fade));
         self.pu[451] = cols[..nc].iter().take(32).enumerate().fold(0u32, |m, (k, c)| m | (c.smoke as u32) << k);
         self.set_f(452, airo.map_or(0.0, |a| a.lift)); self.set_f(453, airo.map_or(0.0, |a| a.heat_fade)); self.set_f(454, airo.map_or(0.0, |a| a.smoke));
+        let aw = |f: fn(&Air) -> f32, d: f32| airo.as_ref().map_or(d, f);
+        self.set_f(456, aw(|a| a.fog_sink, 0.0)); self.set_f(457, aw(|a| a.fog_follow, 1.0)); self.set_f(458, aw(|a| a.fog_spread, 0.06));
+        for k in 0..3 { self.set_f(460 + k, airo.map_or(0.0, |a| a.fog_from[k])); }
+        self.set_f(464, b.y0 + b.size()[1] * airo.map_or(0.0, |a| a.fog_at[0])); self.set_f(465, b.y0 + b.size()[1] * airo.map_or(1.0, |a| a.fog_at[1]));
         // about once a 48th of a second: the air moves slowly next to the water's substeps
         self.fog_wait += dt;
         self.fog_now = self.fog_on && self.fog_wait >= 1.0 / 48.0;

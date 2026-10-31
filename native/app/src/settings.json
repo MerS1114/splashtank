@@ -65,6 +65,41 @@
    "tip": "A coarse grid of moving air. Water near the surface, flying spray and moving objects drag it along; it spreads out and settles back to the wind. Spray and mist drift with it, so mist billows and trails behind a splash. With Real air flow it moves like air: carried along by itself, flowing around water and objects, with turbulence and swirls; with Water feels the air, the water feels it too."
   },
   {
+   "id": "mist",
+   "title": "Mist and smoke",
+   "parent": null,
+   "open": true,
+   "tip": "A soft cloud in the air, made by whitewater points and by objects marked Makes smoke (Objects tab). The air carries and swirls it, and it is kept with the bake. Only inside the tank. The web page ignores all of this."
+  },
+  {
+   "id": "mist-from",
+   "title": "Where it comes from",
+   "parent": 9,
+   "open": false,
+   "tip": "Which whitewater leaves cloud, and at what heights. Bake again to see a change."
+  },
+  {
+   "id": "mist-move",
+   "title": "How it moves",
+   "parent": 9,
+   "open": false,
+   "tip": "Its weight, how closely it follows the air and how it spreads. Bake again to see a change."
+  },
+  {
+   "id": "mist-look",
+   "title": "How it looks",
+   "parent": 9,
+   "open": true,
+   "tip": "These change only the picture: they apply at once, with no new bake."
+  },
+  {
+   "id": "mist-smoke",
+   "title": "Smoke",
+   "parent": 9,
+   "open": false,
+   "tip": "Smoke comes off objects marked Makes smoke, in the same cloud and the same colour as the mist. Bake again to see a change."
+  },
+  {
    "id": "drip",
    "title": "Dripping",
    "parent": null,
@@ -863,7 +898,7 @@
    "def": 0.5
   },
   {
-   "group": 9,
+   "group": 14,
    "kind": "check",
    "label": "Enabled",
    "key": "dripOn",
@@ -875,7 +910,7 @@
    "def": true
   },
   {
-   "group": 9,
+   "group": 14,
    "kind": "slider",
    "label": "Drip amount",
    "key": "dripRate",
@@ -894,7 +929,7 @@
    "def": 2
   },
   {
-   "group": 9,
+   "group": 14,
    "kind": "slider",
    "label": "Dries in",
    "key": "dripDry",
@@ -913,7 +948,7 @@
    "def": 3
   },
   {
-   "group": 10,
+   "group": 15,
    "kind": "check",
    "label": "Enabled",
    "key": "nbOn",
@@ -925,7 +960,7 @@
    "def": false
   },
   {
-   "group": 10,
+   "group": 15,
    "kind": "check",
    "label": "Deep water",
    "key": "nbLook",
@@ -937,7 +972,7 @@
    "def": false
   },
   {
-   "group": 10,
+   "group": 15,
    "kind": "slider",
    "label": "Band",
    "key": "nbBand",
@@ -956,7 +991,7 @@
    "def": 3
   },
   {
-   "group": 11,
+   "group": 16,
    "kind": "check",
    "label": "Enabled",
    "key": "ocean.on",
@@ -968,7 +1003,7 @@
    "def": false
   },
   {
-   "group": 11,
+   "group": 16,
    "kind": "slider",
    "label": "Wave height",
    "key": "ocean.height",
@@ -988,7 +1023,7 @@
    "def": 2
   },
   {
-   "group": 11,
+   "group": 16,
    "kind": "slider",
    "label": "Wavelength",
    "key": "ocean.length",
@@ -1008,7 +1043,7 @@
    "def": 30
   },
   {
-   "group": 11,
+   "group": 16,
    "kind": "slider",
    "label": "Direction",
    "key": "ocean.dir",
@@ -1028,7 +1063,7 @@
    "def": 0
   },
   {
-   "group": 11,
+   "group": 16,
    "kind": "slider",
    "label": "Spread",
    "key": "ocean.spread",
@@ -1048,7 +1083,7 @@
    "def": 25
   },
   {
-   "group": 11,
+   "group": 16,
    "kind": "slider",
    "label": "Water level",
    "key": "ocean.level",
@@ -1068,7 +1103,7 @@
    "def": 0.5
   },
   {
-   "group": 11,
+   "group": 16,
    "kind": "slider",
    "label": "Boundary",
    "key": "ocean.layer",
@@ -1088,7 +1123,7 @@
    "def": 0.15
   },
   {
-   "group": 11,
+   "group": 16,
    "kind": "slider",
    "label": "Seed",
    "key": "ocean.seed",
@@ -1108,7 +1143,7 @@
    "def": 1
   },
   {
-   "group": 12,
+   "group": 17,
    "kind": "slider",
    "label": "Min substeps",
    "key": "subMin",
@@ -1127,7 +1162,7 @@
    "def": 1
   },
   {
-   "group": 12,
+   "group": 17,
    "kind": "slider",
    "label": "Max substeps",
    "key": "subMax",
@@ -1146,7 +1181,7 @@
    "def": 16
   },
   {
-   "group": 12,
+   "group": 17,
    "kind": "slider",
    "label": "Object speed limit",
    "key": "colMax",
@@ -1165,7 +1200,7 @@
    "def": 100
   },
   {
-   "group": 12,
+   "group": 17,
    "kind": "slider",
    "label": "Max water speed",
    "key": "vmaxW",
@@ -1184,7 +1219,7 @@
    "def": 50
   },
   {
-   "group": 14,
+   "group": 19,
    "kind": "check",
    "label": "Sort particles",
    "key": "sortP",
@@ -1196,7 +1231,7 @@
    "def": true
   },
   {
-   "group": 14,
+   "group": 19,
    "kind": "check",
    "label": "Fast drops fly free",
    "key": "ballistic",
@@ -1208,7 +1243,7 @@
    "def": true
   },
   {
-   "group": 14,
+   "group": 19,
    "kind": "check",
    "label": "Settled water skips pressure",
    "key": "settle",
@@ -1220,7 +1255,7 @@
    "def": false
   },
   {
-   "group": 14,
+   "group": 19,
    "kind": "check",
    "label": "Multigrid pressure",
    "key": "mg",
@@ -1232,7 +1267,7 @@
    "def": true
   },
   {
-   "group": 14,
+   "group": 19,
    "kind": "check",
    "label": "Grouped transfer",
    "key": "p2gWin",
@@ -1244,7 +1279,7 @@
    "def": true
   },
   {
-   "group": 14,
+   "group": 19,
    "kind": "check",
    "label": "Tall cells (native)",
    "key": "tallCells",
@@ -1280,21 +1315,21 @@
    "tip": "Objects cut through grid cells smoothly, so slopes and curves stay slopes and curves to the water, instead of stairs that catch it. The web page ignores this setting."
   },
   {
-   "group": 2,
+   "group": 9,
    "kind": "check",
-   "label": "Mist and smoke volume",
+   "label": "Enabled",
    "key": "fogOn",
    "path": [
     "solver",
     "fogOn"
    ],
    "def": true,
-   "tip": "Mist points leave a soft cloud in the air that the air carries and swirls, and objects marked Makes smoke give off smoke. Kept with the bake and drawn as see-through fog (View tab). Only inside the tank. The web page ignores this."
+   "tip": "Keep a cloud of mist and smoke with the bake. Costs little time and about half a megabyte a frame."
   },
   {
-   "group": 2,
+   "group": 9,
    "kind": "slider",
-   "label": "Mist thickness",
+   "label": "Amount",
    "key": "fogAmount",
    "inv": false,
    "min": 0,
@@ -1307,19 +1342,19 @@
     "fogAmount"
    ],
    "def": 1,
-   "tip": "How much cloud each mist point leaves."
+   "tip": "How much cloud whitewater leaves."
   },
   {
-   "group": 2,
+   "group": 9,
    "kind": "slider",
-   "label": "Mist lasts",
+   "label": "How long it lasts",
    "key": "fogLife",
    "inv": false,
    "min": 0.2,
    "max": 20,
    "step": 0.1,
    "log": false,
-   "unit": " s",
+   "unit": "s",
    "path": [
     "solver",
     "fogLife"
@@ -1328,7 +1363,269 @@
    "tip": "How long the cloud takes to thin away."
   },
   {
-   "group": 2,
+   "group": 10,
+   "kind": "slider",
+   "label": "From mist",
+   "key": "fogFromMist",
+   "inv": false,
+   "min": 0,
+   "max": 5,
+   "step": 0.05,
+   "log": false,
+   "unit": "",
+   "path": [
+    "solver",
+    "fogFromMist"
+   ],
+   "def": 1,
+   "tip": "How much cloud each mist point leaves."
+  },
+  {
+   "group": 10,
+   "kind": "slider",
+   "label": "From spray",
+   "key": "fogFromSpray",
+   "inv": false,
+   "min": 0,
+   "max": 5,
+   "step": 0.05,
+   "log": false,
+   "unit": "",
+   "path": [
+    "solver",
+    "fogFromSpray"
+   ],
+   "def": 0,
+   "tip": "How much cloud each spray drop leaves, so flying water trails haze."
+  },
+  {
+   "group": 10,
+   "kind": "slider",
+   "label": "From foam",
+   "key": "fogFromFoam",
+   "inv": false,
+   "min": 0,
+   "max": 2,
+   "step": 0.01,
+   "log": false,
+   "unit": "",
+   "path": [
+    "solver",
+    "fogFromFoam"
+   ],
+   "def": 0,
+   "tip": "How much cloud foam leaves, so churned water steams. Foam lasts, so a little goes a long way."
+  },
+  {
+   "group": 10,
+   "kind": "slider",
+   "label": "Lowest height",
+   "key": "fogLow",
+   "inv": false,
+   "min": 0,
+   "max": 1,
+   "step": 0.01,
+   "log": false,
+   "unit": "",
+   "path": [
+    "solver",
+    "fogLow"
+   ],
+   "def": 0,
+   "tip": "No cloud is made below this share of the tank's height.",
+   "pct": true
+  },
+  {
+   "group": 10,
+   "kind": "slider",
+   "label": "Highest height",
+   "key": "fogHigh",
+   "inv": false,
+   "min": 0,
+   "max": 1,
+   "step": 0.01,
+   "log": false,
+   "unit": "",
+   "path": [
+    "solver",
+    "fogHigh"
+   ],
+   "def": 1,
+   "tip": "No cloud is made above this share of the tank's height.",
+   "pct": true
+  },
+  {
+   "group": 11,
+   "kind": "slider",
+   "label": "Weight",
+   "key": "fogWeight",
+   "inv": false,
+   "min": -10,
+   "max": 10,
+   "step": 0.1,
+   "log": false,
+   "unit": "m/s",
+   "path": [
+    "solver",
+    "fogWeight"
+   ],
+   "def": 0,
+   "tip": "Above 0 the cloud sinks at this speed, like cold mist hugging the water. Below 0 it rises like steam. 0 only drifts with the air."
+  },
+  {
+   "group": 11,
+   "kind": "slider",
+   "label": "Follows the air",
+   "key": "fogFollow",
+   "inv": false,
+   "min": 0,
+   "max": 1,
+   "step": 0.01,
+   "log": false,
+   "unit": "",
+   "path": [
+    "solver",
+    "fogFollow"
+   ],
+   "def": 1,
+   "tip": "How much of the air's motion it takes. Lower hangs in place.",
+   "pct": true
+  },
+  {
+   "group": 11,
+   "kind": "slider",
+   "label": "Spread",
+   "key": "fogSpread",
+   "inv": false,
+   "min": 0,
+   "max": 0.5,
+   "step": 0.005,
+   "log": false,
+   "unit": "",
+   "path": [
+    "solver",
+    "fogSpread"
+   ],
+   "def": 0.06,
+   "tip": "How fast it blurs out. Low keeps fine wisps and specks, high makes soft even haze."
+  },
+  {
+   "group": 12,
+   "kind": "slider",
+   "label": "Density",
+   "key": "fogDensity",
+   "inv": false,
+   "min": 0.05,
+   "max": 20,
+   "step": 0.05,
+   "log": true,
+   "unit": "",
+   "path": [
+    "solver",
+    "fogDensity"
+   ],
+   "def": 1,
+   "tip": "How thick it is drawn.",
+   "look": true
+  },
+  {
+   "group": 12,
+   "kind": "slider",
+   "label": "Opacity",
+   "key": "fogOpacity",
+   "inv": false,
+   "min": 0.05,
+   "max": 1,
+   "step": 0.01,
+   "log": false,
+   "unit": "",
+   "path": [
+    "solver",
+    "fogOpacity"
+   ],
+   "def": 1,
+   "tip": "The most solid it can get: lower keeps even the thickest cloud see-through.",
+   "pct": true,
+   "look": true
+  },
+  {
+   "group": 12,
+   "kind": "color",
+   "label": "Colour",
+   "key": "fogColor",
+   "path": [
+    "solver",
+    "fogColor"
+   ],
+   "def": [
+    237,
+    242,
+    247
+   ],
+   "look": true,
+   "tip": "The colour of lit cloud, for mist and smoke alike."
+  },
+  {
+   "group": 12,
+   "kind": "slider",
+   "label": "Brightness",
+   "key": "fogBright",
+   "inv": false,
+   "min": 0,
+   "max": 3,
+   "step": 0.01,
+   "log": false,
+   "unit": "",
+   "path": [
+    "solver",
+    "fogBright"
+   ],
+   "def": 1,
+   "tip": "How bright it is drawn. Under 1 it darkens towards smoke.",
+   "look": true
+  },
+  {
+   "group": 12,
+   "kind": "slider",
+   "label": "Shading",
+   "key": "fogShade",
+   "inv": false,
+   "min": 0,
+   "max": 1,
+   "step": 0.01,
+   "log": false,
+   "unit": "",
+   "path": [
+    "solver",
+    "fogShade"
+   ],
+   "def": 0.5,
+   "tip": "How dark it goes on the side away from the sun. 0 is flat.",
+   "pct": true,
+   "look": true
+  },
+  {
+   "group": 12,
+   "kind": "slider",
+   "label": "Break-up",
+   "key": "fogWisps",
+   "inv": false,
+   "min": 0,
+   "max": 1,
+   "step": 0.01,
+   "log": false,
+   "unit": "",
+   "path": [
+    "solver",
+    "fogWisps"
+   ],
+   "def": 0,
+   "tip": "Cuts fine holes into the cloud so it looks torn into wisps.",
+   "pct": true,
+   "look": true
+  },
+  {
+   "group": 13,
    "kind": "slider",
    "label": "Smoke amount",
    "key": "smokeAmount",
@@ -1346,7 +1643,25 @@
    "tip": "How much smoke objects marked Makes smoke give off."
   },
   {
-   "group": 2,
+   "group": 13,
+   "kind": "slider",
+   "label": "Smoke heat lasts",
+   "key": "smokeHeat",
+   "inv": false,
+   "min": 0.2,
+   "max": 20,
+   "step": 0.1,
+   "log": false,
+   "unit": "s",
+   "path": [
+    "solver",
+    "smokeHeat"
+   ],
+   "def": 3.3,
+   "tip": "How long smoke keeps rising before it only drifts."
+  },
+  {
+   "group": 13,
    "kind": "slider",
    "label": "Smoke rise",
    "key": "smokeLift",

@@ -199,7 +199,10 @@ pub fn desc_from_scene(scene: &Value, o: &BakeOpts) -> Result<Desc, String> {
         iters: 20, blur: 0.35,
         // native only (the page has no volume)
         fog: flag(&sv, "fogOn", true), fog_add: 0.1 * num(&sv, "fogAmount", 1.0) as f32, fog_fade: 1.0 / (num(&sv, "fogLife", 3.0) as f32).max(0.05),
-        lift: num(&sv, "smokeLift", 10.0) as f32 * k, heat_fade: 0.3, smoke: 3.0 * num(&sv, "smokeAmount", 1.0) as f32 });
+        lift: num(&sv, "smokeLift", 10.0) as f32 * k, heat_fade: 1.0 / (num(&sv, "smokeHeat", 3.3) as f32).max(0.05), smoke: 3.0 * num(&sv, "smokeAmount", 1.0) as f32,
+        fog_sink: num(&sv, "fogWeight", 0.0) as f32 * k, fog_follow: num(&sv, "fogFollow", 1.0) as f32, fog_spread: num(&sv, "fogSpread", 0.06) as f32,
+        fog_from: [num(&sv, "fogFromMist", 1.0) as f32, num(&sv, "fogFromSpray", 0.0) as f32, num(&sv, "fogFromFoam", 0.0) as f32],
+        fog_at: [num(&sv, "fogLow", 0.0) as f32, num(&sv, "fogHigh", 1.0) as f32] });
     let drip = (spr_on && flag(&sv, "dripOn", true)).then(|| Drip { rate: num(&sv, "dripRate", 2.0) as f32, dry: num(&sv, "dripDry", 3.0) as f32 });
     let spray_cap = if spr_on { num(&sv, "sprCap", 600000.0) as u32 } else { 0 };
     let nb_look = flag(&sv, "nbLook", false) && nb_active;

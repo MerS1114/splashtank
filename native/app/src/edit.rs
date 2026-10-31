@@ -36,7 +36,16 @@ fn reset_menu(resp: &egui::Response, j: &mut Value, path: &[&str], def: &Value) 
     ch
 }
 
+thread_local! { static SIM_CHANGED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// Whether a setting changed since the last call that needs a new simulation, not only a new picture.
+pub fn take_sim_change() -> bool { SIM_CHANGED.with(|c| c.replace(false)) }
+
 fn row(ui: &mut egui::Ui, j: &mut Value, r: &Value) -> bool {
+    let ch = row_inner(ui, j, r);
+    if ch && r["look"].as_bool() != Some(true) { SIM_CHANGED.with(|c| c.set(true)); }
+    ch
+}
+fn row_inner(ui: &mut egui::Ui, j: &mut Value, r: &Value) -> bool {
     let path = path_of(r);
     let tip = r["tip"].as_str().unwrap_or("");
     let name = r["label"].as_str().unwrap_or("");
@@ -47,6 +56,16 @@ fn row(ui: &mut egui::Ui, j: &mut Value, r: &Value) -> bool {
         let resp = ui.checkbox(&mut on, "");
         let ch = resp.changed();
         if ch { set(j, &path, json!(on)); }
+        return ch | reset_menu(&resp, j, &path, &r["def"]);
+    }
+    if r["kind"] == "color" {
+        let of = |v: Option<&Value>| -> [u8; 3] { let a = v.and_then(Value::as_array); [0, 1, 2].map(|k| a.and_then(|a| a.get(k)).and_then(Value::as_u64).unwrap_or(255) as u8) };
+        let def = of(Some(&r["def"]));
+        let mut c = of(get(j, &path).or(Some(&r["def"])));
+        label(ui, name, c != def, tip);
+        let resp = ui.color_edit_button_srgb(&mut c);
+        let ch = resp.changed();
+        if ch { set(j, &path, json!(c)); }
         return ch | reset_menu(&resp, j, &path, &r["def"]);
     }
     let f = |k: &str| r[k].as_f64();
@@ -66,7 +85,7 @@ fn row(ui: &mut egui::Ui, j: &mut Value, r: &Value) -> bool {
             if off && x == 0.0 { return "off".into(); }
             if full && x >= 10.0 { return "Full depth".into(); }
             if pct { return format!("{:.0}%", x * 100.0); }
-            let n = if x.abs() >= 100.0 || step >= 1.0 { format!("{x:.0}") } else if x.abs() >= 10.0 { format!("{x:.1}") } else { format!("{x:.2}") };
+            let n = if x.abs() >= 100.0 || step >= 1.0 { format!("{x:.0}") } else if x.abs() >= 10.0 { format!("{x:.1}") } else if step > 0.0 && step < 0.01 { format!("{x:.3}") } else { format!("{x:.2}") };
             if unit.is_empty() { n } else if unit == "x" || unit == "°" || unit == "%" { format!("{n}{unit}") } else { format!("{n} {unit}") }
         })
         .custom_parser(|t| t.trim().trim_end_matches(|c: char| !c.is_ascii_digit() && c != '.').trim().parse::<f64>().ok().map(|x| if pct && x > 1.0 { x / 100.0 } else { x }));

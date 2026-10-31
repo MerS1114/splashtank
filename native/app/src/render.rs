@@ -132,12 +132,11 @@ pub struct Look {
     pub region: Option<([f32; 3], [f32; 3])>,
     /// objects where the scene has them now, not where the cache's frame recorded them (the live sim while editing)
     pub scene_objs: bool,
-    /// the mist and smoke volume, and how thick it is drawn
+    /// draw the mist and smoke volume (how it looks is in the scene's settings, with the rest of it)
     pub fog: bool,
-    pub fog_k: f32,
 }
 impl Default for Look {
-    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None, scene_objs: false, by_type: false, time: 0.0, bg: 0, fog: true, fog_k: 1.0 } }
+    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None, scene_objs: false, by_type: false, time: 0.0, bg: 0, fog: true } }
 }
 
 #[repr(C)]
@@ -158,7 +157,7 @@ struct GpuFrame { water: Option<GpuLayer>, deep: Option<GpuLayer>, ww: Option<Gp
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct FogU { inv: [[f32; 4]; 4], rect: [f32; 4], z: [f32; 4], pz: [f32; 4], b0: [f32; 4], e: [f32; 4], sun: [f32; 4], col: [f32; 4] }
+struct FogU { inv: [[f32; 4]; 4], rect: [f32; 4], z: [f32; 4], pz: [f32; 4], b0: [f32; 4], e: [f32; 4], sun: [f32; 4], col: [f32; 4], more: [f32; 4] }
 
 /// One camera block per draw (water, deep water, whitewater, the rest): they differ in how many copies a point gets.
 struct CamSlot { buf: wgpu::Buffer, bg: wgpu::BindGroup }
@@ -420,10 +419,14 @@ impl Renderer {
                 fog_layers = if far > near { 96 } else { 0 };
                 let step = (far - near) / fog_layers.max(1) as f32;
                 let sun = Vec3::new(2.0, 5.0, 3.0).normalize() / e;
-                let dark = look.bg == 1;
+                let empty = serde_json::Value::Null;
+                let sv = doc.scene.as_ref().map_or_else(|| c.info.meta.pointer("/scene/solver").unwrap_or(&empty), |s| &s.json["solver"]);
+                let n = |k: &str, d: f64| sv[k].as_f64().unwrap_or(d) as f32;
+                let rgb = [0, 1, 2].map(|i| sv["fogColor"][i].as_f64().unwrap_or([237.0, 242.0, 247.0][i]) as f32 / 255.0 * n("fogBright", 1.0));
+                let opac = n("fogOpacity", 1.0);
                 let u = FogU { inv: (p * v).inverse().to_cols_array_2d(), rect: [lo.x.max(-1.0), lo.y.max(-1.0), hi.x.min(1.0), hi.y.min(1.0)],
-                    z: [far, step, w, 25.0 * look.fog_k], pz: [p.z_axis.z, p.w_axis.z, p.z_axis.w, p.w_axis.w], b0: [b0.x, b0.y, b0.z, step], e: [e.x, e.y, e.z, g.h * 2.0], sun: [sun.x, sun.y, sun.z, 0.0],
-                    col: if dark { [0.75, 0.78, 0.82, 0.55] } else { [0.93, 0.95, 0.97, 0.45] } };
+                    z: [far, step, w, 25.0 * n("fogDensity", 1.0)], pz: [p.z_axis.z, p.w_axis.z, p.z_axis.w, p.w_axis.w], b0: [b0.x, b0.y, b0.z, step], e: [e.x, e.y, e.z, g.h * 2.0], sun: [sun.x, sun.y, sun.z, 0.0],
+                    col: [rgb[0], rgb[1], rgb[2], 1.0 - n("fogShade", 0.5)], more: [if opac >= 0.999 { 0.0 } else { 0.25 * opac * opac / (1.0 - opac) }, n("fogWisps", 0.0), 0.0, 0.0] };
                 queue.write_buffer(&self.fog_buf, 0, bytemuck::bytes_of(&u));
                 fog_w = w;
             }

@@ -1255,14 +1255,14 @@ impl App {
     /// The View tab's settings stay for next time.
     fn save_look(&self) {
         let l = &self.look;
-        crate::bakeui::set_setting("look", serde_json::json!({ "size": l.size, "vmax": l.vmax, "foam": l.foam, "detail": l.detail, "sprDetail": l.spr_detail, "streak": l.streak, "bg": l.bg, "fog": l.fog, "fogK": l.fog_k, "byType": l.by_type }));
+        crate::bakeui::set_setting("look", serde_json::json!({ "size": l.size, "vmax": l.vmax, "foam": l.foam, "detail": l.detail, "sprDetail": l.spr_detail, "streak": l.streak, "bg": l.bg, "fog": l.fog, "byType": l.by_type }));
     }
     fn load_look(&mut self) {
         let Some(v) = crate::bakeui::setting("look") else { return; };
         let (f, l) = (|k: &str| v[k].as_f64().map(|x| x as f32), &mut self.look);
         if let Some(x) = f("size") { l.size = x; } if let Some(x) = f("vmax") { l.vmax = x; } if let Some(x) = f("foam") { l.foam = x; }
         if let Some(x) = f("detail") { l.detail = x as u32; } if let Some(x) = f("sprDetail") { l.spr_detail = x as u32; } if let Some(x) = f("streak") { l.streak = x; }
-        if let Some(x) = f("bg") { l.bg = x as u8; } if let Some(x) = f("fogK") { l.fog_k = x; }
+        if let Some(x) = f("bg") { l.bg = x as u8; }
         if let Some(x) = v["fog"].as_bool() { l.fog = x; } if let Some(x) = v["byType"].as_bool() { l.by_type = x; }
     }
     /// Offered at start-up when the last run ended without closing properly.
@@ -1842,7 +1842,8 @@ impl App {
                         ch
                     }
                 };
-                if changed { self.edited(); }
+                // how the mist looks changes only the picture: the water stays good
+                if changed { if self.tab == Tab::Sim && !crate::edit::take_sim_change() { self.dirty = true; } else { self.edited(); } }
                 match self.obj_act.take() {
                     Some("dup") => self.duplicate(egui::pos2(0.0, 0.0)),
                     Some("del") => self.delete_selected(),
@@ -1948,8 +1949,7 @@ impl App {
             ui.checkbox(&mut self.look.water, "Water");
             ui.checkbox(&mut self.look.deep, "Deep water");
             ui.checkbox(&mut self.look.whitewater, "Whitewater");
-            ui.checkbox(&mut self.look.fog, "Mist and smoke").on_hover_text("The cloud kept with the bake, drawn as see-through fog.");
-            ui.add(egui::Slider::new(&mut self.look.fog_k, 0.1..=5.0).logarithmic(true).text("Mist look")).on_hover_text("How thick the cloud is drawn. Only changes the picture, not the bake.");
+            ui.checkbox(&mut self.look.fog, "Mist and smoke").on_hover_text("The cloud kept with the bake, drawn as see-through fog. Simulation > Mist and smoke sets how it looks.");
             ui.checkbox(&mut self.look.objects, "Objects");
             ui.horizontal(|ui| {
                 ui.label("Colour by").on_hover_text("Speed: blue to cyan to white as the water speeds up, churned water white. Type: one colour per kind of point: water blue, churned water pale blue, foam white, spray orange, mist lilac, bubbles green, deep water (narrow band) dark blue.");

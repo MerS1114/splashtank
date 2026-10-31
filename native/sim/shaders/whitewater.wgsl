@@ -152,9 +152,11 @@ fn fogAt(p: vec3<f32>) -> vec2<f32> {
 @compute @workgroup_size(256)
 fn fogSplat(@builtin(global_invocation_id) g: vec3<u32>) {
   let j = gid1(g); if (j >= P.smax) { return; }
-  let sp = sPos[j]; if (sp.w <= 0.0 || u32(sVel[j].w + 0.5) != 1u || !inTank(sp.xyz)) { return; }
+  let sp = sPos[j]; if (sp.w <= 0.0 || !inTank(sp.xyz) || sp.y < P.ext8.x || sp.y > P.ext8.y) { return; }
+  let kind = u32(sVel[j].w + 0.5); if (kind > 2u) { return; }
+  let w = select(select(P.ext7.y, P.ext7.x, kind == 1u), P.ext7.z, kind == 2u);
   let c = fogIdx(vec3<i32>(floor((sp.xyz - vec3<f32>(P.x0, P.y0, P.z0)) * 2.0 / P.airH)));
-  atomicAdd(&fogAcc[c], 1);
+  atomicAdd(&fogAcc[c], i32(round(w * 32.0)));
 }
 @compute @workgroup_size(256)
 fn fogStep(@builtin(global_invocation_id) g: vec3<u32>) {
@@ -164,11 +166,11 @@ fn fogStep(@builtin(global_invocation_id) g: vec3<u32>) {
   let dt = P.ext5.w;
   // the outermost cells stay empty: the cloud drifts out of the volume instead of piling up against its edge
   if (any(ci < vec3<i32>(1)) || any(ci >= n - vec3<i32>(1))) { atomicStore(&fogAcc[c], 0); fog2[c] = vec2<f32>(0.0); return; }
-  var f = fogAt(x - dt * airAt(x));
+  var f = fogAt(x - dt * (airAt(x) * P.ext6.y - vec3<f32>(0.0, P.ext6.x, 0.0)));
   let nb = (fog[fogIdx(ci + vec3<i32>(1, 0, 0))] + fog[fogIdx(ci - vec3<i32>(1, 0, 0))] + fog[fogIdx(ci + vec3<i32>(0, 1, 0))] +
             fog[fogIdx(ci - vec3<i32>(0, 1, 0))] + fog[fogIdx(ci + vec3<i32>(0, 0, 1))] + fog[fogIdx(ci - vec3<i32>(0, 0, 1))]) / 6.0;
-  f = mix(f, nb, 0.06);   // single points' specks spread into a cloud
-  f.x += f32(atomicExchange(&fogAcc[c], 0)) * P.ext4.y * dt;
+  f = mix(f, nb, P.ext6.z);   // single points' specks spread into a cloud
+  f.x += f32(atomicExchange(&fogAcc[c], 0)) / 32.0 * P.ext4.y * dt;
   f *= vec2<f32>(exp(-P.ext4.z * dt), exp(-P.ext5.y * dt));
   let bits = bitcast<u32>(P.ext4.w);
   for (var k = 0u; k < P.ncols; k++) {

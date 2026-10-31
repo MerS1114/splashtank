@@ -81,15 +81,46 @@ for (const r of out.rows) if (r.key === 'nbOn') r.label = 'Enabled';
   out.rows.push({ group: ph, kind: 'check', label: 'Smooth walls', key: 'smoothWalls', path: ['solver', 'smoothWalls'], def: true,
     tip: 'Objects cut through grid cells smoothly, so slopes and curves stay slopes and curves to the water, instead of stairs that catch it. The web page ignores this setting.' });
 }
-// native only: the mist and smoke volume (fogStep in native/sim/shaders/whitewater.wgsl), in Air and wind
+// native only: the mist and smoke volume (fogStep in native/sim/shaders/whitewater.wgsl), a group of its own after Air field
 {
-  const ai = out.groups.findIndex((g) => g.id === 'air');
-  const slider = (label, key, min, max, step, def, unit, tip) => out.rows.push({ group: ai, kind: 'slider', label, key, inv: false, min, max, step, log: false, unit, path: ['solver', key], def, tip });
-  out.rows.push({ group: ai, kind: 'check', label: 'Mist and smoke volume', key: 'fogOn', path: ['solver', 'fogOn'], def: true,
-    tip: 'Mist points leave a soft cloud in the air that the air carries and swirls, and objects marked Makes smoke give off smoke. Kept with the bake and drawn as see-through fog (View tab). Only inside the tank. The web page ignores this.' });
-  slider('Mist thickness', 'fogAmount', 0, 5, 0.05, 1, '', 'How much cloud each mist point leaves.');
-  slider('Mist lasts', 'fogLife', 0.2, 20, 0.1, 3, ' s', 'How long the cloud takes to thin away.');
+  // inserted after Air field: every group number after it moves up
+  const af = out.groups.findIndex((g) => g.id === 'airfield') + 1;
+  const names = [['mist', 'Mist and smoke', null, true, 'A soft cloud in the air, made by whitewater points and by objects marked Makes smoke (Objects tab). The air carries and swirls it, and it is kept with the bake. Only inside the tank. The web page ignores all of this.'],
+    ['mist-from', 'Where it comes from', af, false, 'Which whitewater leaves cloud, and at what heights. Bake again to see a change.'],
+    ['mist-move', 'How it moves', af, false, 'Its weight, how closely it follows the air and how it spreads. Bake again to see a change.'],
+    ['mist-look', 'How it looks', af, true, 'These change only the picture: they apply at once, with no new bake.'],
+    ['mist-smoke', 'Smoke', af, false, 'Smoke comes off objects marked Makes smoke, in the same cloud and the same colour as the mist. Bake again to see a change.']];
+  const n = names.length;
+  for (const r of out.rows) if (r.group >= af) r.group += n;
+  for (const g of out.groups) if (g.parent !== null && g.parent >= af) g.parent += n;
+  out.groups.splice(af, 0, ...names.map(([id, title, parent, open, tip]) => ({ id, title, parent, open, tip })));
+  const gr = (id) => out.groups.findIndex((g) => g.id === id);
+  let at = 'mist';
+  const slider = (label, key, min, max, step, def, unit, tip, more) => out.rows.push(Object.assign({ group: gr(at), kind: 'slider', label, key, inv: false, min, max, step, log: false, unit, path: ['solver', key], def, tip }, more));
+  out.rows.push({ group: gr(at), kind: 'check', label: 'Enabled', key: 'fogOn', path: ['solver', 'fogOn'], def: true, tip: 'Keep a cloud of mist and smoke with the bake. Costs little time and about half a megabyte a frame.' });
+  slider('Amount', 'fogAmount', 0, 5, 0.05, 1, '', 'How much cloud whitewater leaves.');
+  slider('How long it lasts', 'fogLife', 0.2, 20, 0.1, 3, 's', 'How long the cloud takes to thin away.');
+  at = 'mist-from';
+  slider('From mist', 'fogFromMist', 0, 5, 0.05, 1, '', 'How much cloud each mist point leaves.');
+  slider('From spray', 'fogFromSpray', 0, 5, 0.05, 0, '', 'How much cloud each spray drop leaves, so flying water trails haze.');
+  slider('From foam', 'fogFromFoam', 0, 2, 0.01, 0, '', 'How much cloud foam leaves, so churned water steams. Foam lasts, so a little goes a long way.');
+  slider('Lowest height', 'fogLow', 0, 1, 0.01, 0, '', 'No cloud is made below this share of the tank\'s height.', { pct: true });
+  slider('Highest height', 'fogHigh', 0, 1, 0.01, 1, '', 'No cloud is made above this share of the tank\'s height.', { pct: true });
+  at = 'mist-move';
+  slider('Weight', 'fogWeight', -10, 10, 0.1, 0, 'm/s', 'Above 0 the cloud sinks at this speed, like cold mist hugging the water. Below 0 it rises like steam. 0 only drifts with the air.');
+  slider('Follows the air', 'fogFollow', 0, 1, 0.01, 1, '', 'How much of the air\'s motion it takes. Lower hangs in place.', { pct: true });
+  slider('Spread', 'fogSpread', 0, 0.5, 0.005, 0.06, '', 'How fast it blurs out. Low keeps fine wisps and specks, high makes soft even haze.');
+  at = 'mist-look';
+  const look = { look: true };
+  slider('Density', 'fogDensity', 0.05, 20, 0.05, 1, '', 'How thick it is drawn.', Object.assign({ log: true }, look));
+  slider('Opacity', 'fogOpacity', 0.05, 1, 0.01, 1, '', 'The most solid it can get: lower keeps even the thickest cloud see-through.', Object.assign({ pct: true }, look));
+  out.rows.push({ group: gr(at), kind: 'color', label: 'Colour', key: 'fogColor', path: ['solver', 'fogColor'], def: [237, 242, 247], look: true, tip: 'The colour of lit cloud, for mist and smoke alike.' });
+  slider('Brightness', 'fogBright', 0, 3, 0.01, 1, '', 'How bright it is drawn. Under 1 it darkens towards smoke.', look);
+  slider('Shading', 'fogShade', 0, 1, 0.01, 0.5, '', 'How dark it goes on the side away from the sun. 0 is flat.', Object.assign({ pct: true }, look));
+  slider('Break-up', 'fogWisps', 0, 1, 0.01, 0, '', 'Cuts fine holes into the cloud so it looks torn into wisps.', Object.assign({ pct: true }, look));
+  at = 'mist-smoke';
   slider('Smoke amount', 'smokeAmount', 0, 5, 0.05, 1, '', 'How much smoke objects marked Makes smoke give off.');
+  slider('Smoke heat lasts', 'smokeHeat', 0.2, 20, 0.1, 3.3, 's', 'How long smoke keeps rising before it only drifts.');
   slider('Smoke rise', 'smokeLift', 0, 50, 0.5, 10, ' m/s\u00b2', 'How hard the heat of smoke lifts the air. 0 gives smoke that only drifts.');
 }
 // native only: drag of the tank's floor (projBody in native/sim/shaders/solver.wgsl), in Physics
