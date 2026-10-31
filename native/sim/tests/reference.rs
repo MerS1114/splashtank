@@ -27,7 +27,8 @@ fn measures() -> Vec<(&'static str, fn(&Value, f64) -> f64, f64, f64)> {
         ("centre z", |d, s| d["center"][2].as_f64().unwrap_or(0.0) / s, 0.005, 0.0),
         ("height 99%", |d, _| high(d), 1.5 / 16.0, 0.0),
         ("mean speed", |d, _| d["meanSpeed"].as_f64().unwrap_or(0.0), 0.05, 0.05),
-        ("substeps", |d, _| d["sub"].as_f64().unwrap_or(0.0), 1.0, 0.0),
+        // (a single thrown particle can double a frame's substeps now and then: the blast's growth, about 1 run in 6)
+        ("substeps", |d, _| d["sub"].as_f64().unwrap_or(0.0), 1.0, 1.5),
         ("water cells", |d, _| d["fluidCells"].as_f64().unwrap_or(0.0), 40.0, 0.03),
         ("spray", |d, _| d["sprayPoints"].as_f64().unwrap_or(0.0), 50.0, 0.1),
     ]
