@@ -177,7 +177,7 @@
    "log": false,
    "unit": "",
    "off": false,
-   "tip": "APIC only: how much of each particle’s own fast motion it keeps on top of the smooth APIC flow (a FLIP part). 0 is pure APIC: smooth, almost glassy crowns and little spray. Higher tears crowns into spray and stirs more mist; 1 is close to FLIP. Needs a GPU that can bind 9 storage buffers (most desktop cards); elsewhere APIC stays pure. Narrow band and ocean scenes use 0.8 at most: above that they gain water.",
+   "tip": "APIC only: how much of each particle’s own fast motion it keeps on top of the smooth APIC flow (a FLIP part). 0 is pure APIC: smooth, almost glassy crowns and little spray. Higher tears crowns into spray and stirs more mist; 1 is close to FLIP. Needs a GPU that can bind 9 storage buffers (most desktop cards); elsewhere APIC stays pure.",
    "path": [
     "solver",
     "apicFlip"
