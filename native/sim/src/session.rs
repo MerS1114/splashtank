@@ -101,7 +101,7 @@ impl<'d> Session<'d> {
             else { say("Tall cells: the water is not deep enough under its band for them here"); }
         }
         sim.opt.apic = desc.apic; sim.opt.sort = sort; sim.opt.p2g_win = desc.p2g_win; sim.opt.ballistic = desc.ballistic; sim.opt.settle = desc.settle;
-        sim.opt.mg = desc.mg; sim.opt.sep = desc.sep; sim.opt.ghost = desc.ghost; sim.opt.smooth = desc.smooth;
+        sim.opt.mg = desc.mg; sim.opt.sep = desc.sep; sim.opt.ghost = desc.ghost; sim.opt.smooth = desc.smooth; sim.opt.wall_drag = desc.wall_drag;
         let acc = desc.accurate;
         if acc { sim.opt.sep_iters = 16; }
         if desc.spr.is_some() && desc.spray_cap > 0 { sim.set_spray_cap(gpu, desc.spray_cap); }

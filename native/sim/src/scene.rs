@@ -75,7 +75,7 @@ pub struct Desc {
     pub g: f32, pub iters: u32, pub flip: f32, pub apic_flip: f32, pub comp: f32, pub sep: f32, pub apic: bool, pub accurate: bool,
     /// live water, not a bake: reserves less room (making the solver's buffers is part of every restart)
     pub live: bool,
-    pub cell_ratio: f32, pub sort: bool, pub p2g_win: bool, pub ballistic: bool, pub settle: bool, pub mg: bool, pub ghost: bool, pub smooth: bool,
+    pub cell_ratio: f32, pub sort: bool, pub p2g_win: bool, pub ballistic: bool, pub settle: bool, pub mg: bool, pub ghost: bool, pub smooth: bool, pub wall_drag: f32,
     pub detail: f32, pub col_max: f32, pub vmax_w: f32, pub scale: f32, pub tear: f32,
     pub size: [f32; 3], pub open: u32, pub org: [f32; 3],
     pub fills: Vec<Fill>, pub events: Vec<Event>, pub objs: Vec<Obj>,
@@ -284,9 +284,10 @@ pub fn desc_from_scene(scene: &Value, o: &BakeOpts) -> Result<Desc, String> {
     let apic = sv.get("xfer").and_then(Value::as_str).unwrap_or("apic") == "apic";
     let mut dsc = Desc {
         d, max_n, max_n_set: o.max_points.is_some(), fps, substeps, max_sub, frames: (dur * fps).round() as u32,
-        g, iters, flip: num(&sv, "flip", 0.95) as f32, apic_flip: num(&sv, "apicFlip", 0.8) as f32, comp: if sep > 0.0 { 0.0 } else { 6.0 }, sep, apic, accurate,
+        g, iters, flip: num(&sv, "flip", 0.95) as f32, // (narrow band water gains water above 0.8: the level ended 1.7% off at 0.8, 6-7% at 0.85-0.9, full depth about 2.5% at all three)
+        apic_flip: { let a = num(&sv, "apicFlip", 0.9) as f32; if nb.is_some() || ocean.is_some() { a.min(0.8) } else { a } }, comp: if sep > 0.0 { 0.0 } else { 6.0 }, sep, apic, accurate,
         // the Speed-ups switches: not in the page's scene files (its defaults then), kept under solver by the native window
-        live: false, cell_ratio, sort: flag(&sv, "sortP", true), p2g_win: flag(&sv, "p2gWin", true), ballistic: flag(&sv, "ballistic", true), settle: flag(&sv, "settle", false), mg: flag(&sv, "mg", true), ghost: flag(&sv, "ghost", true), smooth: flag(&sv, "smoothWalls", true),
+        live: false, wall_drag: num(&sv, "wallDrag", 0.015) as f32, cell_ratio, sort: flag(&sv, "sortP", true), p2g_win: flag(&sv, "p2gWin", true), ballistic: flag(&sv, "ballistic", true), settle: flag(&sv, "settle", false), mg: flag(&sv, "mg", true), ghost: flag(&sv, "ghost", true), smooth: flag(&sv, "smoothWalls", true),
         detail, col_max: num(&sv, "colMax", 100.0) as f32 * k, vmax_w: num(&sv, "vmaxW", 50.0) as f32 * k, scale,
         tear: num(&sv, "tear", 0.5) as f32 * 0.5 * cell_ratio.powi(3),
         size, open, org, fills: box_fills, events, objs,
@@ -297,7 +298,7 @@ pub fn desc_from_scene(scene: &Value, o: &BakeOpts) -> Result<Desc, String> {
     dsc.light = serde_json::json!({
         "d": dsc.d, "maxN": dsc.max_n, "fps": dsc.fps, "substeps": dsc.substeps, "frames": dsc.frames, "g": dsc.g, "iters": dsc.iters,
         "flip": dsc.flip, "apicFlip": dsc.apic_flip, "comp": dsc.comp, "sep": dsc.sep, "apic": dsc.apic, "accurate": dsc.accurate, "cellRatio": dsc.cell_ratio,
-        "sortP": dsc.sort, "p2gWin": dsc.p2g_win, "ballistic": dsc.ballistic, "settle": dsc.settle, "mg": dsc.mg, "ghost": dsc.ghost, "smoothWalls": dsc.smooth, "maxSub": dsc.max_sub, "detail": dsc.detail,
+        "wallDrag": dsc.wall_drag, "sortP": dsc.sort, "p2gWin": dsc.p2g_win, "ballistic": dsc.ballistic, "settle": dsc.settle, "mg": dsc.mg, "ghost": dsc.ghost, "smoothWalls": dsc.smooth, "maxSub": dsc.max_sub, "detail": dsc.detail,
         "colMax": dsc.col_max, "vmaxW": dsc.vmax_w, "scale": dsc.scale, "tear": dsc.tear, "size": dsc.size, "open": dsc.open,
         "wind": dsc.wind, "drag": dsc.drag, "gust": dsc.gust, "foamSens": dsc.foam_sens, "foamTau": dsc.foam_tau,
         "nb": dsc.nb.map(|b| serde_json::json!({ "on": true, "band": b })),

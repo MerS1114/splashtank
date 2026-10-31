@@ -27,7 +27,7 @@ fn scene(w: f64, h: f64, d: f64, fills: Value, g: f64) -> Value {
     // ACC_SOLVER: solver settings to try, e.g. {"sep": 0, "iters": 200} (merged into the scene's solver)
     let extra: Value = std::env::var("ACC_SOLVER").ok().and_then(|v| serde_json::from_str(&v).ok()).unwrap_or(json!({}));
     let mut sc = json!({ "app": "SplashTank", "version": 2, "box": { "min": { "x": -w / 2.0, "y": 0, "z": -d / 2.0 }, "size": { "w": w, "h": h, "d": d }, "open": {} },
-        "solver": { "engine": "flip", "nbOn": false, "sprOn": false, "airOn": false, "dripOn": false, "scale": 1, "subMax": 16, "vmaxW": 50, "colMax": 100, "g": g, "cap": 4000000, "xfer": xfer },
+        "solver": { "engine": "flip", "nbOn": false, "sprOn": false, "airOn": false, "dripOn": false, "scale": 1, "subMax": 16, "vmaxW": 50, "colMax": 100, "g": g, "gust": 0, "cap": 4000000, "xfer": xfer },
         "bake": { "dur": 30, "fps": 60 }, "fills": fills, "events": [], "objs": [] });
     if let Some(m) = extra.as_object() { for (k, v) in m { sc["solver"][k] = v.clone(); } }
     sc
@@ -211,7 +211,10 @@ fn slosh() {
     let pi = std::f64::consts::PI;
     let first = 2.0 * am * (0.2 * pi).sin() / (0.2 * pi);
     let k = pi / l;
-    let tth = 2.0 * pi / (9.8 * k * (k * hd).tanh()).sqrt();
+    // the wave formula, with the correction for a wave this tall (Tadjbakhsh and Keller 1960: tall standing waves run slower)
+    let sg = (k * hd).tanh();
+    let om2 = (9.0 / sg.powi(4) - 12.0 / sg.powi(2) - 3.0 - 2.0 * sg.powi(2)) / 64.0;
+    let tth = 2.0 * pi / (9.8 * k * sg).sqrt() / (1.0 + (k * 0.08).powi(2) * om2);
     let left = pk[pk.len() - 1] / first;
     let nper = ts[ts.len() - 1] / per;
     let lost = 100.0 * (1.0 - left.powf(1.0 / (nper - 0.5).max(1.0)));
@@ -228,7 +231,8 @@ fn swirl() {
     let gpu = Gpu::new().unwrap();
     let (l, dd, u) = (1.0f64, 0.1f64, 0.5f64);
     // no gravity: with it, the thin gap left at the top sloshes and pollutes the vortex
-    let sc = scene(l, l, dd, json!([]), 0.0);
+    let mut sc = scene(l, l, dd, json!([]), 0.0);
+    sc["solver"]["wallDrag"] = json!(0);   // the vortex's answer has no floor
     let d = desc(&sc, sp());
     let mut s = Session::new(&gpu, &d, &|_| {}, None).unwrap();
     let (b, sp) = (s.lay.b, s.lay.d as f64);

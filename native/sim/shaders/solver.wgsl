@@ -392,8 +392,14 @@ fn projBody(f: u32, axis: u32, at: vec3<i32>) {
   if (th == 1u) { ph = pres[cellIdx(hi.x, hi.y, hi.z)]; }
   var k = 1.0;   // to the surface: the gradient over theta of a cell
   if (tl == 1u && th != 1u) { k = 1.0 / faceTheta(lo, hi); } else if (th == 1u && tl != 1u) { k = 1.0 / faceTheta(hi, lo); }
-  gvW(f, gvR(f) - P.dt * P.ih * k * (ph - pl));
+  var v = gvR(f) - P.dt * P.ih * k * (ph - pl);
+  // water sliding along the tank's floor loses speed as the square of it (a drag coefficient, the wall law of open channel flow):
+  // the layer that really does this is far thinner than a cell
+  if (P.ext1.z > 0.0) { v /= 1.0 + P.ext1.z * P.dt * P.ih * abs(v) * wallsBeside(at, axis); }
+  gvW(f, v);
 }
+// the tank's floor under this face (walls standing up carry water mostly up and down, and waves lose height to them)
+fn wallsBeside(at: vec3<i32>, axis: u32) -> f32 { return select(0.0, 1.0, axis != 1u && at.y == 0 && (P.open & 4u) == 0u); }
 @compute @workgroup_size(256)
 fn project(@builtin(global_invocation_id) g: vec3<u32>) {
   let a = acell(gid1(g)); if (!a.ok) { return; }

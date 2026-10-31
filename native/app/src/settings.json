@@ -177,12 +177,12 @@
    "log": false,
    "unit": "",
    "off": false,
-   "tip": "APIC only: how much of each particle’s own fast motion it keeps on top of the smooth APIC flow (a FLIP part). 0 is pure APIC: smooth, almost glassy crowns and little spray. Higher tears crowns into spray and stirs more mist; 1 is close to FLIP. Needs a GPU that can bind 9 storage buffers (most desktop cards); elsewhere APIC stays pure.",
+   "tip": "APIC only: how much of each particle’s own fast motion it keeps on top of the smooth APIC flow (a FLIP part). 0 is pure APIC: smooth, almost glassy crowns and little spray. Higher tears crowns into spray and stirs more mist; 1 is close to FLIP. Needs a GPU that can bind 9 storage buffers (most desktop cards); elsewhere APIC stays pure. Narrow band and ocean scenes use 0.8 at most: above that they gain water.",
    "path": [
     "solver",
     "apicFlip"
    ],
-   "def": 0.8
+   "def": 0.9
   },
   {
    "group": 1,
@@ -1362,6 +1362,24 @@
    ],
    "def": 10,
    "tip": "How hard the heat of smoke lifts the air. 0 gives smoke that only drifts."
+  },
+  {
+   "group": 1,
+   "kind": "slider",
+   "label": "Floor drag",
+   "key": "wallDrag",
+   "inv": false,
+   "min": 0,
+   "max": 0.1,
+   "step": 0.001,
+   "log": false,
+   "unit": "",
+   "path": [
+    "solver",
+    "wallDrag"
+   ],
+   "def": 0.015,
+   "tip": "Water sliding over the tank floor loses speed as the square of it, as over a real floor. It brings a dam break's front within 10% of the measured one. 0 is a perfectly slippery floor. The web page ignores this."
   }
  ],
  "looks": {

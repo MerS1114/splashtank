@@ -92,6 +92,13 @@ for (const r of out.rows) if (r.key === 'nbOn') r.label = 'Enabled';
   slider('Smoke amount', 'smokeAmount', 0, 5, 0.05, 1, '', 'How much smoke objects marked Makes smoke give off.');
   slider('Smoke rise', 'smokeLift', 0, 50, 0.5, 10, ' m/s\u00b2', 'How hard the heat of smoke lifts the air. 0 gives smoke that only drifts.');
 }
+// native only: drag of the tank's floor (projBody in native/sim/shaders/solver.wgsl), in Physics
+{
+  const ph = out.groups.findIndex((g) => g.id === 'phys');
+  out.rows.push({ group: ph, kind: 'slider', label: 'Floor drag', key: 'wallDrag', inv: false, min: 0, max: 0.1, step: 0.001, log: false, unit: '', path: ['solver', 'wallDrag'], def: 0.015,
+    tip: 'Water sliding over the tank floor loses speed as the square of it, as over a real floor. It brings a dam break\'s front within 10% of the measured one. 0 is a perfectly slippery floor. The web page ignores this.' });
+}
+for (const r of out.rows) if (r.key === 'apicFlip') { r.def = 0.9; r.tip += ' Narrow band and ocean scenes use 0.8 at most: above that they gain water.'; }   // waves lost 3.6% of their height a period at the page's 0.8, 1.5% at 0.9, and the crown stayed
 // native defaults that differ from the page's: the grouped transfer (on: with the finer sort it took particle to grid from 6.8 to 2.2 ms a
 // step on Mer's ocean, the same water; the page left it off)
 for (const r of out.rows) if (r.key === 'p2gWin') {

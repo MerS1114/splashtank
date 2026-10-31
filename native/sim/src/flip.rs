@@ -116,9 +116,9 @@ fn sort_keys(n: [u32; 3]) -> (u32, u32) {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Opt { pub apic: bool, pub sort: bool, pub sort_auto: bool, pub p2g_win: bool, pub ballistic: bool, pub settle: bool, pub settle_tol: f32,
-    pub mg: bool, pub sep: f32, pub sep_iters: u32, pub extrap: bool, pub ghost: bool, pub smooth: bool }
+    pub mg: bool, pub sep: f32, pub sep_iters: u32, pub extrap: bool, pub ghost: bool, pub smooth: bool, pub wall_drag: f32 }
 impl Default for Opt {
-    fn default() -> Opt { Opt { apic: true, sort: false, sort_auto: true, p2g_win: false, ballistic: true, settle: false, settle_tol: 0.001, mg: true, sep: 10.0, sep_iters: 8, extrap: true, ghost: true, smooth: true } }
+    fn default() -> Opt { Opt { apic: true, sort: false, sort_auto: true, p2g_win: false, ballistic: true, settle: false, settle_tol: 0.001, mg: true, sep: 10.0, sep_iters: 8, extrap: true, ghost: true, smooth: true, wall_drag: 0.0 } }
 }
 
 /// Three small staging buffers for the ctl counters, read back without waiting (readStats): each step uses the newest that arrived.
@@ -873,6 +873,7 @@ impl FlipSim {
         self.set_f(417, if self.opt.settle { self.opt.settle_tol } else { 0.0 });
         self.set_f(418, if self.opt.sep > 0.0 && !self.ww_only { 1.0 - (-self.opt.sep * dt).exp() } else { 0.0 });
         self.set_f(421, if apic { 1.0 } else { 0.0 });
+        self.set_f(422, self.opt.wall_drag);
         // the sharp water surface (ghost fluid with theta from the surface field each step); off: the page's cell-centred surface
         self.set_f(419, if self.opt.ghost && !self.ww_only { -1.0 } else { 0.0 });
         if self.opt.mg && !self.ww_only {
