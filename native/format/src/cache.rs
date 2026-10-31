@@ -1,18 +1,20 @@
 //! Bake caches (.splc). Mirrors `writeCacheParts`, `parseCache2` and `parseCache` in `src/shared.js`: change both together.
 //!
+//! Version 3 (bakes now): as version 2, with each frame stored smaller, see packed.rs. Only this program reads it.
 //! Version 2: 'SPLC', 2, length of a JSON block, the JSON, padding to 4 bytes, frame count, then per frame: points, flags, and
 //! the frame's data. Flags: 1 white-water levels follow (16-bit layout), 2 whitewater follows, 4 deep water points follow,
 //! 8 compact frame (32-bit positions, 16-bit speed | level << 8), 16 whitewater made by Bake whitewater, 32 the compact frame
 //! has its own box and bits. Every part is padded to 4 bytes.
 //!
 //! The file is memory-mapped and only the frame headers are read on opening, so a cache of any length costs no memory;
-//! a frame's arrays are borrowed straight from the mapping.
+//! a frame's arrays are borrowed straight from the mapping (version 2) or unpacked when asked for (version 3): use Cache::view for them.
 
 use serde_json::Value;
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 pub const FLAG_LEVELS: u32 = 1;
 pub const FLAG_WW: u32 = 2;
@@ -71,6 +73,8 @@ pub struct FrameIndex {
     pub water: Points,
     pub ww: Option<WwPoints>,
     pub deep: Option<Points>,
+    /// version 3: the frame's stored streams; its other ranges are empty until Cache::view unpacks it
+    pub packed: Option<Range<usize>>,
 }
 
 impl FrameIndex {
@@ -102,12 +106,30 @@ pub struct CacheInfo {
 /// Where a cache's bytes are: a memory-mapped file, or memory (the live sim, which grows frame by frame).
 enum Store { Map(memmap2::Mmap), Mem(Vec<u8>) }
 
+/// A frame unpacked, its ranges measured in its own bytes.
+struct Unpacked { bytes: Vec<u8>, fr: FrameIndex }
+/// Frames unpacked lately, newest last: the next frame needs the two before it, and going backwards needs the run from the last full frame.
+#[derive(Default)]
+struct Recent { list: Vec<(usize, Arc<Unpacked>)>, bytes: usize }
+const RECENT_BYTES: usize = 1 << 30;
+
+enum ViewBytes<'a> { File(&'a [u8]), Own(Arc<Unpacked>) }
+/// One frame's data: fr's ranges index bytes().
+pub struct View<'a> { data: ViewBytes<'a>, pub fr: FrameIndex }
+impl View<'_> {
+    pub fn bytes(&self) -> &[u8] { match &self.data { ViewBytes::File(b) => b, ViewBytes::Own(u) => &u.bytes } }
+    pub fn slice(&self, r: &Range<usize>) -> &[u8] { &self.bytes()[r.clone()] }
+}
+
 pub struct Cache {
     map: Store,
     pub info: CacheInfo,
     pub frames: Vec<FrameIndex>,
     /// the file ended inside a frame (a bake cut short); the frames before it are all there
     pub truncated: bool,
+    /// version 3: where each frame starts
+    starts: Vec<usize>,
+    recent: Mutex<Recent>,
 }
 
 fn bad(msg: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, msg.into()) }
@@ -118,17 +140,17 @@ fn q_of(v: &Value) -> Option<[u8; 3]> {
     Some([a[0].as_u64()? as u8, a[1].as_u64()? as u8, a[2].as_u64()? as u8])
 }
 
-struct Rd<'a> { b: &'a [u8], o: usize }
+pub(crate) struct Rd<'a> { pub b: &'a [u8], pub o: usize }
 impl<'a> Rd<'a> {
     fn need(&self, k: usize) -> bool { self.o + k <= self.b.len() }
-    fn u32(&mut self) -> Option<u32> {
+    pub fn u32(&mut self) -> Option<u32> {
         if !self.need(4) { return None; }
         let v = u32::from_le_bytes(self.b[self.o..self.o + 4].try_into().unwrap());
         self.o += 4;
         Some(v)
     }
-    fn f32(&mut self) -> Option<f32> { self.u32().map(f32::from_bits) }
-    fn take(&mut self, k: usize) -> Option<Range<usize>> {
+    pub fn f32(&mut self) -> Option<f32> { self.u32().map(f32::from_bits) }
+    pub fn take(&mut self, k: usize) -> Option<Range<usize>> {
         if !self.need(k) { return None; }
         let r = self.o..self.o + k;
         self.o += k;
@@ -142,13 +164,14 @@ impl Cache {
         // SAFETY: the file is only read; another program truncating it while it is open would be the user's doing.
         let map = unsafe { memmap2::Mmap::map(&file)? };
         let (info, frames, truncated) = index(&map)?;
-        Ok(Cache { map: Store::Map(map), info, frames, truncated })
+        let starts = frames.iter().map(|f: &FrameIndex| f.packed.as_ref().map_or(0, |r| r.start)).collect();
+        Ok(Cache { map: Store::Map(map), info, frames, truncated, starts, recent: Default::default() })
     }
 
     /// A cache in memory from a cache's header (what CacheWriter::to_channel sends first); frames are added with push.
     pub fn from_header(head: Vec<u8>) -> io::Result<Cache> {
         let (info, frames, _) = index(&head)?;
-        Ok(Cache { map: Store::Mem(head), info, frames, truncated: false })
+        Ok(Cache { map: Store::Mem(head), info, frames, truncated: false, starts: Vec::new(), recent: Default::default() })
     }
     /// Adds one frame's bytes (as CacheWriter::to_channel sends them) to a cache in memory.
     pub fn push(&mut self, frame: &[u8]) -> io::Result<()> {
@@ -178,8 +201,42 @@ impl Cache {
 
     /// Point i of a frame's water (like framePoint in shared.js): position in scene units relative to the origin, speed byte, white-water level 0-15.
     pub fn water_point(&self, f: usize, i: usize) -> ([f32; 3], u8, u8) {
+        let v = self.view(f);
+        decode_point(v.bytes(), &v.fr.water, v.fr.q, &self.frame_box(f), i)
+    }
+
+    /// Frames are stored packed (version 3), so a frame costs work to read.
+    pub fn packed(&self) -> bool { self.info.version == 3 }
+
+    /// Frame f's arrays. Version 3 unpacks it, with the frames it depends on unless they were unpacked lately.
+    pub fn view(&self, f: usize) -> View<'_> {
+        if self.frames[f].packed.is_none() { return View { data: ViewBytes::File(self.bytes()), fr: self.frames[f].clone() }; }
+        let u = self.unpacked(f);
+        View { fr: u.fr.clone(), data: ViewBytes::Own(u) }
+    }
+
+    fn unpacked(&self, f: usize) -> Arc<Unpacked> {
+        { let g = self.recent.lock().unwrap(); if let Some(x) = g.list.iter().find(|x| x.0 == f) { return x.1.clone(); } }
         let fr = &self.frames[f];
-        decode_point(self.bytes(), &fr.water, fr.q, &self.frame_box(f), i)
+        let key = fr.flags & crate::packed::FLAG_KEY != 0;
+        let p1 = (!key).then(|| self.unpacked(f - 1));
+        let p2 = p1.as_ref().filter(|_| self.frames[f - 1].flags & crate::packed::FLAG_KEY == 0).map(|_| self.unpacked(f - 2));
+        let prev = |k: usize, u: &'_ Arc<Unpacked>| -> (usize, Box3, Option<[u8; 3]>, Range<usize>, Range<usize>) { (u.fr.water.n as usize, self.frame_box(k), u.fr.q, u.fr.water.pos.clone(), u.fr.water.spd.clone()) };
+        let mut hist = Vec::new();
+        if let Some(u) = &p1 { let (n, bx, q, pos, sf) = prev(f - 1, u); hist.push(crate::packed::Prev { n, q, bx, pos: &u.bytes[pos], sf: &u.bytes[sf] }); }
+        if let Some(u) = &p2 { let (n, bx, q, pos, sf) = prev(f - 2, u); hist.push(crate::packed::Prev { n, q, bx, pos: &u.bytes[pos], sf: &u.bytes[sf] }); }
+        let b = self.bytes();
+        let mut o = self.starts[f];
+        let h = crate::packed::read_head(b, &mut o, self.info.ids.len(), self.info.q).expect("a stored frame");
+        let objs = self.objs(f);
+        let bytes = crate::packed::decode(b, &h, self.info.b, &hist, &objs).expect("A stored frame could not be unpacked.");
+        let fr = frame_v2(&mut Rd { b: &bytes, o: 0 }, self.info.ids.len(), self.info.q).expect("an unpacked frame");
+        let u = Arc::new(Unpacked { bytes, fr });
+        let mut g = self.recent.lock().unwrap();
+        g.bytes += u.bytes.len();
+        g.list.push((f, u.clone()));
+        while g.bytes > RECENT_BYTES && g.list.len() > 4 { let old = g.list.remove(0); g.bytes -= old.1.bytes.len(); }
+        u
     }
 }
 
@@ -211,7 +268,7 @@ fn index(b: &[u8]) -> io::Result<(CacheInfo, Vec<FrameIndex>, bool)> {
     if b.len() < 24 || &b[0..4] != b"SPLC" { return Err(bad("This is not a SplashTank cache file.")); }
     let mut r = Rd { b, o: 4 };
     let ver = r.u32().unwrap();
-    if ver != 2 { return index_v1(b); }
+    if ver != 2 && ver != 3 { return index_v1(b); }
     let ml = r.u32().unwrap() as usize;
     let mj = r.take(ml).ok_or_else(|| bad("The cache file ends inside its header."))?;
     let meta: Value = serde_json::from_slice(&b[mj]).map_err(|e| bad(format!("The cache header is not valid JSON: {e}")))?;
@@ -222,7 +279,7 @@ fn index(b: &[u8]) -> io::Result<(CacheInfo, Vec<FrameIndex>, bool)> {
         [c("x"), c("y"), c("z")]
     }).unwrap_or([0.0; 3]);
     let info = CacheInfo {
-        version: 2,
+        version: ver,
         d: g("d").unwrap_or(0.05) as f32,
         fps: g("fps").unwrap_or(24.0) as f32,
         ids: meta.get("ids").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default(),
@@ -242,7 +299,9 @@ fn index(b: &[u8]) -> io::Result<(CacheInfo, Vec<FrameIndex>, bool)> {
     // A frame count of u32::MAX means "until the end of the file" (a bake still running, or cut short).
     for _ in 0..nf {
         if !r.need(8) { truncated = nf != u32::MAX; break; }
-        match frame_v2(&mut r, nobj, info.q) {
+        let start = r.o;
+        let got = if ver == 3 { crate::packed::read_head(b, &mut r.o, nobj, info.q).map(|h| FrameIndex { packed: Some(start..h.end), ..h.fr }) } else { frame_v2(&mut r, nobj, info.q) };
+        match got {
             Some(fr) => frames.push(fr),
             None => { truncated = true; break; }
         }
@@ -276,7 +335,7 @@ fn frame_v2(r: &mut Rd, nobj: usize, q0: Option<[u8; 3]>) -> Option<FrameIndex> 
             r.take(pad4(nd * 2))?;
             Some(p)
         } else { None };
-        return Some(FrameIndex { flags: fl, q: Some(q?), own_box, objs, water: Points { n, pos, spd, fm: None }, ww, deep });
+        return Some(FrameIndex { flags: fl, q: Some(q?), own_box, objs, water: Points { n, pos, spd, fm: None }, ww, deep, packed: None });
     }
     let objs = r.take(nobj * 24)?;
     let pos = r.take(nu * 6)?;
@@ -295,7 +354,7 @@ fn frame_v2(r: &mut Rd, nobj: usize, q0: Option<[u8; 3]>) -> Option<FrameIndex> 
         r.take(pad4(nd * 7))?;
         Some(p)
     } else { None };
-    Some(FrameIndex { flags: fl, q: None, own_box: None, objs, water: Points { n, pos, spd, fm }, ww, deep })
+    Some(FrameIndex { flags: fl, q: None, own_box: None, objs, water: Points { n, pos, spd, fm }, ww, deep, packed: None })
 }
 
 /// The older format from native/splash.cpp: d, fps, frames, object ids, then per frame points, poses (x y z yaw), positions, speeds.
@@ -314,7 +373,7 @@ fn index_v1(b: &[u8]) -> io::Result<(CacheInfo, Vec<FrameIndex>, bool)> {
         let Some(n) = r.u32() else { truncated = true; break; };
         let nu = n as usize;
         let (Some(objs), Some(pos), Some(spd)) = (r.take(nobj * 16), r.take(nu * 6), r.take(nu)) else { truncated = true; break; };
-        frames.push(FrameIndex { flags: 0x8000_0000, q: None, own_box: None, objs, water: Points { n, pos, spd, fm: None }, ww: None, deep: None });
+        frames.push(FrameIndex { flags: 0x8000_0000, q: None, own_box: None, objs, water: Points { n, pos, spd, fm: None }, ww: None, deep: None, packed: None });
     }
     // splash.cpp's tank: 3 x 2.6 x 3 centred on x and z
     let info = CacheInfo { version: 1, meta: Value::Null, d, fps: fps as f32, ids, b: Box3 { x0: -1.5, x1: 1.5, y0: 0.0, y1: 2.6, z0: -1.5, z1: 1.5 },
@@ -325,7 +384,7 @@ fn index_v1(b: &[u8]) -> io::Result<(CacheInfo, Vec<FrameIndex>, bool)> {
 impl Cache {
     /// Object poses of a frame as 6 floats each, for both versions (version 1 holds x y z yaw with yaw the other way round).
     pub fn poses(&self, f: usize) -> Vec<f32> {
-        if self.info.version == 2 { return self.objs(f); }
+        if self.info.version >= 2 { return self.objs(f); }
         let raw = self.objs(f);
         raw.chunks_exact(4).flat_map(|c| [c[0], c[1], c[2], 0.0, -c[3], 0.0]).collect()
     }
@@ -361,17 +420,23 @@ pub struct CacheWriter {
     room: usize,
     frames: u32,
     path: std::path::PathBuf,
+    /// version 3: the box of frames without one of their own, and the frames since the last full one (at most two, newest first)
+    packed: Option<Box3>,
+    hist: Vec<Kept>,
 }
+
+/// A frame just written, kept to predict the next.
+struct Kept { n: usize, q: Option<[u8; 3]>, bx: Box3, pos: Vec<u8>, sf: Vec<u8> }
 
 /// A file, or a channel to whoever shows the frames as they come (the live sim): the header first, then one message a frame.
 enum Sink { File(BufWriter<File>), Chan(std::sync::mpsc::Sender<Vec<u8>>) }
 
-fn header(meta: &Value, reserve: usize) -> io::Result<(Vec<u8>, usize)> {
+fn header(meta: &Value, reserve: usize, ver: u32) -> io::Result<(Vec<u8>, usize)> {
     let mj = serde_json::to_vec(meta)?;
     let room = (mj.len() + reserve + 3) / 4 * 4;
     let mut h = Vec::with_capacity(16 + room);
     h.extend_from_slice(b"SPLC");
-    h.extend_from_slice(&2u32.to_le_bytes());
+    h.extend_from_slice(&ver.to_le_bytes());
     h.extend_from_slice(&(room as u32).to_le_bytes());
     h.extend_from_slice(&mj);
     h.resize(12 + room, b' ');
@@ -380,17 +445,24 @@ fn header(meta: &Value, reserve: usize) -> io::Result<(Vec<u8>, usize)> {
 }
 
 impl CacheWriter {
+    /// A bake's file, version 3.
     pub fn create(path: &Path, meta: &Value, reserve: usize) -> io::Result<CacheWriter> {
-        let (h, room) = header(meta, reserve)?;
+        let b = meta.get("b").and_then(Box3::from_json).ok_or_else(|| bad("The cache header has no box."))?;
+        Self::start(path, meta, reserve, 3, Some(b))
+    }
+    /// Version 2, which the web page reads too.
+    pub fn create_v2(path: &Path, meta: &Value, reserve: usize) -> io::Result<CacheWriter> { Self::start(path, meta, reserve, 2, None) }
+    fn start(path: &Path, meta: &Value, reserve: usize, ver: u32, packed: Option<Box3>) -> io::Result<CacheWriter> {
+        let (h, room) = header(meta, reserve, ver)?;
         let mut w = BufWriter::with_capacity(8 << 20, File::create(path)?);
         w.write_all(&h)?;
-        Ok(CacheWriter { w: Sink::File(w), buf: Vec::new(), room, frames: 0, path: path.to_owned() })
+        Ok(CacheWriter { w: Sink::File(w), buf: Vec::new(), room, frames: 0, path: path.to_owned(), packed, hist: Vec::new() })
     }
     /// Sends the cache to tx instead of a file: the header now, then each frame (Cache::from_header and push read them).
     pub fn to_channel(meta: &Value, tx: std::sync::mpsc::Sender<Vec<u8>>) -> io::Result<CacheWriter> {
-        let (h, room) = header(meta, 0)?;
+        let (h, room) = header(meta, 0, 2)?;
         tx.send(h).map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "nobody takes the frames"))?;
-        Ok(CacheWriter { w: Sink::Chan(tx), buf: Vec::new(), room, frames: 0, path: Default::default() })
+        Ok(CacheWriter { w: Sink::Chan(tx), buf: Vec::new(), room, frames: 0, path: Default::default(), packed: None, hist: Vec::new() })
     }
     fn file(&mut self) -> io::Result<&mut BufWriter<File>> {
         match &mut self.w { Sink::File(f) => Ok(f), Sink::Chan(_) => Err(io::Error::new(io::ErrorKind::Unsupported, "this cache goes to a channel")) }
@@ -413,6 +485,16 @@ impl CacheWriter {
         let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
         let mut head = [0u8; 12];
         file.read_exact(&mut head)?;
+        let ver = u32::from_le_bytes(head[4..8].try_into().unwrap());
+        let mut packed = None;
+        if ver == 3 {
+            // (the frames before it are not looked at: the next frame is a full one)
+            let room = u32::from_le_bytes(head[8..12].try_into().unwrap()) as usize;
+            let mut j = vec![0u8; room];
+            file.read_exact(&mut j)?;
+            let meta: Value = serde_json::from_slice(&j).map_err(|e| bad(format!("The cache header is not valid JSON: {e}")))?;
+            packed = meta.get("b").and_then(Box3::from_json);
+        }
         if &head[..4] != b"SPLC" { return Err(io::Error::new(io::ErrorKind::InvalidData, "not a SPLC cache")); }
         let room = u32::from_le_bytes(head[8..12].try_into().unwrap()) as usize;
         if file.metadata()?.len() < end { return Err(io::Error::new(io::ErrorKind::InvalidData, "the cache is shorter than the checkpoint says")); }
@@ -421,62 +503,29 @@ impl CacheWriter {
         file.seek(SeekFrom::Start(12 + room as u64))?;
         file.write_all(&u32::MAX.to_le_bytes())?;
         file.seek(SeekFrom::Start(end))?;
-        Ok(CacheWriter { w: Sink::File(BufWriter::with_capacity(8 << 20, file)), buf: Vec::new(), room, frames, path: path.to_owned() })
+        Ok(CacheWriter { w: Sink::File(BufWriter::with_capacity(8 << 20, file)), buf: Vec::new(), room, frames, path: path.to_owned(), packed, hist: Vec::new() })
     }
 
     pub fn append(&mut self, f: &FrameOut) -> io::Result<()> {
         let mut w = std::mem::take(&mut self.buf);
         w.clear();
-        self.frame_bytes(&mut w, f)?;
+        match self.packed {
+            None => frame_bytes(&mut w, f)?,
+            Some(b0) => {
+                if self.frames % crate::packed::KEY_EVERY == 0 { self.hist.clear(); }
+                let prev: Vec<crate::packed::Prev> = self.hist.iter().map(|k| crate::packed::Prev { n: k.n, q: k.q, bx: k.bx, pos: &k.pos, sf: &k.sf }).collect();
+                w = crate::packed::encode(f, b0, &prev)?;
+                drop(prev);
+                self.hist.insert(0, Kept { n: f.n as usize, q: f.q, bx: f.own_box.unwrap_or(b0), pos: f.pos.to_vec(), sf: f.spd.to_vec() });
+                self.hist.truncate(2);
+            }
+        }
         match &mut self.w {
             Sink::File(file) => file.write_all(&w)?,
             Sink::Chan(tx) => { tx.send(w.clone()).map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "nobody takes the frames"))?; }
         }
         self.buf = w;
         self.frames += 1;
-        Ok(())
-    }
-
-    fn frame_bytes(&self, w: &mut Vec<u8>, f: &FrameOut) -> io::Result<()> {
-        let zero = [0u8; 4];
-        let n = f.n as usize;
-        let ww = f.ww.filter(|s| s.0 > 0);
-        let deep = f.deep.filter(|s| s.0 > 0);
-        let fl = |c: bool, v: u32| if c { v } else { 0 };
-        let objs: Vec<u8> = f.objs.iter().flat_map(|v| v.to_le_bytes()).collect();
-        if f.q.is_some() {
-            assert_eq!(f.pos.len(), n * 4); assert_eq!(f.spd.len(), n * 2);
-            let flags = FLAG_COMPACT | fl(ww.is_some(), FLAG_WW) | fl(deep.is_some(), FLAG_DEEP) | fl(f.ww_baked, FLAG_WW_BAKED) | fl(f.own_box.is_some(), FLAG_OWN_BOX);
-            w.write_all(&f.n.to_le_bytes())?; w.write_all(&flags.to_le_bytes())?;
-            if let Some(b) = f.own_box {
-                for v in [b.x0, b.y0, b.z0, b.x1, b.y1, b.z1] { w.write_all(&v.to_le_bytes())?; }
-                let q = f.q.unwrap();
-                w.write_all(&[q[0], q[1], q[2], 0])?;
-            }
-            w.write_all(&objs)?; w.write_all(f.pos)?; w.write_all(f.spd)?; w.write_all(&zero[..pad4(n * 2)])?;
-            if let Some((ns, pos, pk)) = ww {
-                w.write_all(&ns.to_le_bytes())?; w.write_all(pos)?;
-                for c in pk { w.write_all(&c.to_le_bytes())?; }
-            }
-            if let Some((nd, pos, sf)) = deep {
-                w.write_all(&nd.to_le_bytes())?; w.write_all(pos)?; w.write_all(sf)?; w.write_all(&zero[..pad4(nd as usize * 2)])?;
-            }
-        } else {
-            assert_eq!(f.pos.len(), n * 6); assert_eq!(f.spd.len(), n);
-            let flags = fl(f.fm.is_some(), FLAG_LEVELS) | fl(ww.is_some(), FLAG_WW) | fl(deep.is_some(), FLAG_DEEP) | fl(f.ww_baked, FLAG_WW_BAKED);
-            w.write_all(&f.n.to_le_bytes())?; w.write_all(&flags.to_le_bytes())?;
-            w.write_all(&objs)?; w.write_all(f.pos)?; w.write_all(f.spd)?;
-            let mut bytes = n * 7;
-            if let Some(fm) = f.fm { w.write_all(fm)?; bytes += n; }
-            w.write_all(&zero[..pad4(bytes)])?;
-            if let Some((ns, pos, pk)) = ww {
-                w.write_all(&ns.to_le_bytes())?; w.write_all(pos)?; w.write_all(&zero[..pad4(ns as usize * 6)])?;
-                for c in pk { w.write_all(&c.to_le_bytes())?; }
-            }
-            if let Some((nd, pos, spd)) = deep {
-                w.write_all(&nd.to_le_bytes())?; w.write_all(pos)?; w.write_all(spd)?; w.write_all(&zero[..pad4(nd as usize * 7)])?;
-            }
-        }
         Ok(())
     }
 
@@ -503,7 +552,7 @@ impl CacheWriter {
             let body = &map[12 + self.room + 4..];
             let mut out = BufWriter::with_capacity(8 << 20, File::create(&tmp)?);
             out.write_all(b"SPLC")?;
-            out.write_all(&2u32.to_le_bytes())?;
+            out.write_all(&(if self.packed.is_some() { 3u32 } else { 2 }).to_le_bytes())?;
             out.write_all(&(mj.len() as u32).to_le_bytes())?;
             out.write_all(&mj)?;
             out.write_all(&[0u8; 4][..pad4(mj.len())])?;
@@ -513,4 +562,65 @@ impl CacheWriter {
         }
         std::fs::rename(&tmp, &self.path)
     }
+}
+
+/// A frame's bytes in the version 2 layout.
+pub(crate) fn frame_bytes(w: &mut Vec<u8>, f: &FrameOut) -> io::Result<()> {
+    let zero = [0u8; 4];
+    let n = f.n as usize;
+    let ww = f.ww.filter(|s| s.0 > 0);
+    let deep = f.deep.filter(|s| s.0 > 0);
+    let fl = |c: bool, v: u32| if c { v } else { 0 };
+    let objs: Vec<u8> = f.objs.iter().flat_map(|v| v.to_le_bytes()).collect();
+    if f.q.is_some() {
+        assert_eq!(f.pos.len(), n * 4); assert_eq!(f.spd.len(), n * 2);
+        let flags = FLAG_COMPACT | fl(ww.is_some(), FLAG_WW) | fl(deep.is_some(), FLAG_DEEP) | fl(f.ww_baked, FLAG_WW_BAKED) | fl(f.own_box.is_some(), FLAG_OWN_BOX);
+        w.write_all(&f.n.to_le_bytes())?; w.write_all(&flags.to_le_bytes())?;
+        if let Some(b) = f.own_box {
+            for v in [b.x0, b.y0, b.z0, b.x1, b.y1, b.z1] { w.write_all(&v.to_le_bytes())?; }
+            let q = f.q.unwrap();
+            w.write_all(&[q[0], q[1], q[2], 0])?;
+        }
+        w.write_all(&objs)?; w.write_all(f.pos)?; w.write_all(f.spd)?; w.write_all(&zero[..pad4(n * 2)])?;
+        if let Some((ns, pos, pk)) = ww {
+            w.write_all(&ns.to_le_bytes())?; w.write_all(pos)?;
+            for c in pk { w.write_all(&c.to_le_bytes())?; }
+        }
+        if let Some((nd, pos, sf)) = deep {
+            w.write_all(&nd.to_le_bytes())?; w.write_all(pos)?; w.write_all(sf)?; w.write_all(&zero[..pad4(nd as usize * 2)])?;
+        }
+    } else {
+        assert_eq!(f.pos.len(), n * 6); assert_eq!(f.spd.len(), n);
+        let flags = fl(f.fm.is_some(), FLAG_LEVELS) | fl(ww.is_some(), FLAG_WW) | fl(deep.is_some(), FLAG_DEEP) | fl(f.ww_baked, FLAG_WW_BAKED);
+        w.write_all(&f.n.to_le_bytes())?; w.write_all(&flags.to_le_bytes())?;
+        w.write_all(&objs)?; w.write_all(f.pos)?; w.write_all(f.spd)?;
+        let mut bytes = n * 7;
+        if let Some(fm) = f.fm { w.write_all(fm)?; bytes += n; }
+        w.write_all(&zero[..pad4(bytes)])?;
+        if let Some((ns, pos, pk)) = ww {
+            w.write_all(&ns.to_le_bytes())?; w.write_all(pos)?; w.write_all(&zero[..pad4(ns as usize * 6)])?;
+            for c in pk { w.write_all(&c.to_le_bytes())?; }
+        }
+        if let Some((nd, pos, spd)) = deep {
+            w.write_all(&nd.to_le_bytes())?; w.write_all(pos)?; w.write_all(spd)?; w.write_all(&zero[..pad4(nd as usize * 7)])?;
+        }
+    }
+    Ok(())
+}
+
+/// Copies a cache, frame by frame, to version 3, or to version 2 for the web page. Whitewater and deep points may change order.
+pub fn convert(c: &Cache, out: &Path, v2: bool, mut progress: impl FnMut(usize, usize)) -> io::Result<()> {
+    let room = c.info.meta.to_string().len() + 4096;
+    let mut w = if v2 { CacheWriter::create_v2(out, &c.info.meta, room)? } else { CacheWriter::create(out, &c.info.meta, room)? };
+    for f in 0..c.frames.len() {
+        let v = c.view(f);
+        let fr = &v.fr;
+        let objs = c.objs(f);
+        let pk: Option<Vec<u32>> = fr.ww.as_ref().map(|s| v.slice(&s.pk).chunks_exact(4).map(|x| u32::from_le_bytes(x.try_into().unwrap())).collect());
+        w.append(&FrameOut { q: fr.q, own_box: fr.own_box, ww_baked: fr.flags & FLAG_WW_BAKED != 0, objs: &objs, n: fr.water.n, pos: v.slice(&fr.water.pos), spd: v.slice(&fr.water.spd),
+            fm: fr.water.fm.as_ref().map(|r| v.slice(r)), ww: fr.ww.as_ref().map(|s| (s.n, v.slice(&s.pos), &pk.as_ref().unwrap()[..])),
+            deep: fr.deep.as_ref().map(|d| (d.n, v.slice(&d.pos), v.slice(&d.spd))) })?;
+        progress(f, c.frames.len());
+    }
+    w.finish(&c.info.meta)
 }

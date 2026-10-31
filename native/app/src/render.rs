@@ -4,7 +4,7 @@
 use eframe::wgpu;
 use eframe::wgpu::util::DeviceExt;
 use glam::{Mat3, Mat4, Vec3};
-use splash_format::cache::{Points, FLAG_DEEP};
+use splash_format::cache::{Points, View, FLAG_DEEP};
 use splash_format::{Box3, Cache, Scene};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -257,7 +257,7 @@ impl Renderer {
     }
     pub fn kept_frames(&self) -> usize { self.frames.len() }
 
-    fn layer(&self, device: &wgpu::Device, c: &Cache, p: &Points, q: Option<[u8; 3]>, bx: Box3, ww_codes: Option<&std::ops::Range<usize>>) -> (GpuLayer, u64) {
+    fn layer(&self, device: &wgpu::Device, c: &View, p: &Points, q: Option<[u8; 3]>, bx: Box3, ww_codes: Option<&std::ops::Range<usize>>) -> (GpuLayer, u64) {
         let buf = |label: &str, r: &std::ops::Range<usize>| device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label), contents: c.slice(r), usage: wgpu::BufferUsages::STORAGE });
         let pos = buf("pos", &p.pos);
@@ -289,14 +289,15 @@ impl Renderer {
             self.lru.push_back(key);
             return;
         }
-        let fr = &c.frames[f];
+        let v = c.view(f);
+        let fr = &v.fr;
         let mut bytes = 0;
-        let water = (fr.water.n > 0).then(|| { let (l, b) = self.layer(device, c, &fr.water, fr.q, c.frame_box(f), None); bytes += b; l });
+        let water = (fr.water.n > 0).then(|| { let (l, b) = self.layer(device, &v, &fr.water, fr.q, c.frame_box(f), None); bytes += b; l });
         let deep = fr.deep.as_ref().filter(|p| p.n > 0 && fr.flags & FLAG_DEEP != 0).map(|p| {
-            let (l, b) = self.layer(device, c, p, fr.q, c.frame_box(f), None); bytes += b; l });
+            let (l, b) = self.layer(device, &v, p, fr.q, c.frame_box(f), None); bytes += b; l });
         let ww = fr.ww.as_ref().filter(|w| w.n > 0).map(|w| {
             let p = Points { n: w.n, pos: w.pos.clone(), spd: w.pk.clone(), fm: None };
-            let (l, b) = self.layer(device, c, &p, fr.q, c.ww_box(), Some(&w.pk)); bytes += b; l });
+            let (l, b) = self.layer(device, &v, &p, fr.q, c.ww_box(), Some(&w.pk)); bytes += b; l });
         self.uploads += 1;
         self.frames.insert(key, GpuFrame { water, deep, ww, bytes });
         self.lru.push_back(key);

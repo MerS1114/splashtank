@@ -14,6 +14,8 @@
 //!       the benchmark on the fixed set of scenes (SPLASH_BACKEND=dx12 or vulkan picks the graphics API).
 //!   splashtank --export bake.splc --out folder [--no-mesh]
 //!       PLY files for Blender: points, whitewater and the water's surface as a mesh, one file a frame, in metres.
+//!   splashtank --convert in.splc out.splc [--v2]
+//!       copies a bake to the smaller version 3 file, or with --v2 to the version the web page reads.
 //!   splashtank --resume out.splc
 //!       carries on a bake that stopped, from its last checkpoint.
 //!   splashtank --bake-whitewater in.splc out.splc [--scene scene.json]
@@ -87,6 +89,15 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     if args.iter().any(|a| a.starts_with("--")) { attach_console(); }
+    if let Some(inp) = flag("--convert") {
+        let out = args.iter().position(|a| a == "--convert").and_then(|i| args.get(i + 2)).cloned().unwrap_or_default();
+        let t = std::time::Instant::now();
+        let r = Cache::open(Path::new(&inp)).and_then(|c| splash_format::cache::convert(&c, Path::new(&out), args.iter().any(|a| a == "--v2"), |_, _| {}));
+        if let Err(e) = r { eprintln!("{e}"); std::process::exit(1); }
+        let size = |p: &str| std::fs::metadata(p).map(|m| m.len() as f64 / 1048576.0).unwrap_or(0.0);
+        eprintln!("{:.0} MB to {:.0} MB in {:.1} s", size(&inp), size(&out), t.elapsed().as_secs_f32());
+        return;
+    }
     if args.iter().any(|a| a == "--bake" || a == "--bake-whitewater" || a == "--detail-pass" || a == "--resume" || a == "--benchmark" || a == "--benchmark-set" || a == "--export") {
         if let Err(e) = bake_cli::run(&args) { eprintln!("{e}"); std::process::exit(1); }
         return;

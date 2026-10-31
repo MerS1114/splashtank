@@ -63,7 +63,6 @@ pub fn run(gpu: &Gpu, c: &Cache, desc: &Desc, o: &DetailOpts, out: &Path, mut pr
     let spd_k = if c.info.spd_ms { 1.0 / 16.0 / c.info.scale } else { 1.0 / 16.0 };
     let nb_bake = cd.pointer("/nb/on").and_then(Value::as_bool).unwrap_or(false) && cd.pointer("/nb/band").and_then(Value::as_f64).unwrap_or(0.0) < 1e4
         || cd.pointer("/ocean/on").and_then(Value::as_bool).unwrap_or(false);
-    let bytes = c.bytes();
     let mut gr = {
         let g0 = [r0.x0 - hc, r0.y0 - hc, r0.z0 - hc];
         let e = r0.size();
@@ -73,16 +72,18 @@ pub fn run(gpu: &Gpu, c: &Cache, desc: &Desc, o: &DetailOpts, out: &Path, mut pr
     };
     let occupy = |gr: &mut Grid, fa: usize, fbn: Option<usize>| {
         gr.cnt.fill(0.0); gr.vel.fill(0.0); gr.deep.fill(0);
-        let (a, ba) = (&src[fa], c.frame_box(fa));
+        let (va, vb) = (c.view(fa), fbn.map(|fb| c.view(fb)));
+        let (a, ba, bytes) = (&va.fr, c.frame_box(fa), va.bytes());
         for i in 0..a.water.n as usize {
             let (pa, sa, _) = decode_point(bytes, &a.water, a.q, &ba, i);
             if sa == 255 { continue; }
             let Some(ci) = gr.cell_at(pa[0], pa[1], pa[2]) else { continue; };
             gr.cnt[ci] += 1.0;
             if let Some(fb) = fbn {
-                let bf = &src[fb];
+                let vb = vb.as_ref().unwrap();
+                let bf = &vb.fr;
                 if i >= bf.water.n as usize { continue; }
-                let (pb, sb, _) = decode_point(bytes, &bf.water, bf.q, &c.frame_box(fb), i);
+                let (pb, sb, _) = decode_point(vb.bytes(), &bf.water, bf.q, &c.frame_box(fb), i);
                 if sb == 255 { continue; }
                 let v = [(pb[0] - pa[0]) * fps, (pb[1] - pa[1]) * fps, (pb[2] - pa[2]) * fps];
                 let u = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
@@ -182,7 +183,8 @@ pub fn run(gpu: &Gpu, c: &Cache, desc: &Desc, o: &DetailOpts, out: &Path, mut pr
     let q16 = |p: [f32; 3]| [0, 1, 2].map(|i| ((p[i] - [b.x0, b.y0, b.z0][i]) * kq[i]).round().clamp(0.0, 65535.0) as u16);
     let q_out = compact_bits(&b, df);
     let merge = |f: usize, fine: &[f32], nfine: usize| -> crate::bake::Packed {
-        let (a, ba) = (&src[f], c.frame_box(f));
+        let va = c.view(f);
+        let (a, ba, bytes) = (&va.fr, c.frame_box(f), va.bytes());
         // the fine water as packFrameBuf has it, 16-bit across the tank
         let ks = 16.0 * scale;
         let mut last = 0;
@@ -207,7 +209,7 @@ pub fn run(gpu: &Gpu, c: &Cache, desc: &Desc, o: &DetailOpts, out: &Path, mut pr
         }
         // the bake's whitewater as it was (16-bit across the whitewater area), its deep water outside the region
         let ww = a.ww.as_ref().filter(|w| w.n > 0).map(|w| {
-            let raw = c.slice(&w.pos);
+            let raw = va.slice(&w.pos);
             let nn = w.n as usize;
             let pos: Vec<u16> = match a.q.or(c.info.q) {
                 Some(q) if a.compact() => {
@@ -220,7 +222,7 @@ pub fn run(gpu: &Gpu, c: &Cache, desc: &Desc, o: &DetailOpts, out: &Path, mut pr
                 }
                 _ => bytemuck::pod_collect_to_vec::<u8, u16>(&raw[..nn * 6]),
             };
-            let pk: Vec<u32> = bytemuck::pod_collect_to_vec::<u8, u32>(c.slice(&w.pk));
+            let pk: Vec<u32> = bytemuck::pod_collect_to_vec::<u8, u32>(va.slice(&w.pk));
             (nn, pos, pk)
         });
         let deep = a.deep.as_ref().filter(|d| d.n > 0).map(|dp| {

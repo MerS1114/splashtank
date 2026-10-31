@@ -7,3 +7,6 @@ description = "SplashTank scene files (.json) and bake caches (.splc), the same 
 [dependencies]
 serde_json = { version = "1", features = ["float_roundtrip"] }  # numbers read back exactly as the page wrote them
 memmap2 = "0.9"
+zstd = "0.13"
+rayon = "1"
+bytemuck = "1"

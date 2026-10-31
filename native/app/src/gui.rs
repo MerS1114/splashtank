@@ -298,6 +298,7 @@ impl App {
             while let Ok((c, frames)) = rx.recv() {
                 for f in frames {
                     let Some(fr) = c.frames.get(f) else { continue; };
+                    if c.packed() { c.view(f); continue; }
                     let end = fr.ww.as_ref().map(|w| w.pk.end).into_iter().chain(fr.deep.as_ref().map(|d| d.spd.end)).fold(fr.water.spd.end, usize::max);
                     let b = c.bytes();
                     for i in (fr.objs.start..end.min(b.len())).step_by(4096) { sum = sum.wrapping_add(b[i] as u64); }

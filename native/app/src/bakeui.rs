@@ -296,7 +296,7 @@ impl BakeUi {
     }
 
 /// The page's bake estimate: the water the bake starts with (the narrow band seeds just as the bake will, else the volume of the starting
-    /// water over the spacing cubed), the video memory that takes, and the cache's size on disk (compact frames: 6 bytes a point).
+    /// water over the spacing cubed), the video memory that takes, and the cache's size on disk (measured on version 3 files: about 1.3 bytes a water point, 3 a whitewater point).
     fn estimate_now(scene: &serde_json::Value, o: &BakeOpts) -> String {
         match splash_sim::scene::desc_from_scene(scene, o) {
             Err(e) => e,
@@ -317,7 +317,7 @@ impl BakeUi {
                 // Max points as the bake will pick it (session.rs): unless given, at least 4M or 1.3 times the start; a narrow band 2.5 times
                 let max_n = if d.max_n_set { d.max_n as u64 } else if d.nb.is_some() || d.ocean.is_some() { (d.max_n as u64).max(start * 5 / 2) } else { (d.max_n as u64).max(4_000_000).max(start * 13 / 10) };
                 let mem = splash_sim::bake::estimate_bytes(max_n, d.apic, d.cell_ratio, d.spray_cap as u64, d.sort);
-                let per = start as f64 * 6.0 + if d.spray_cap > 0 { 200_000.0 * 10.0 } else { 0.0 };
+                let per = start as f64 * 1.3 + if d.spray_cap > 0 { 200_000.0 * 3.0 } else { 0.0 };
                 format!("About {:.2} M points to start (Max points {:.1} M), about {:.1} GB of video memory, about {:.0} MB a frame, {:.1} GB for {} frames.",
                     start as f64 / 1e6, max_n as f64 / 1e6, mem as f64 / 1e9, per / 1048576.0, per * (d.frames + 1) as f64 / 1073741824.0, d.frames + 1)
             }
@@ -388,7 +388,7 @@ impl BakeUi {
                 ui.end_row();
             });
             let est = self.estimate(scene, rev, ui.ctx());
-            ui.label(egui::RichText::new(est).small()).on_hover_text("The water a narrow band bake starts with is counted exactly; it can grow after impacts (Max points Auto allows for that). Sizes on disk assume compact frames.");
+            ui.label(egui::RichText::new(est).small()).on_hover_text("The water a narrow band bake starts with is counted exactly; it can grow after impacts (Max points Auto allows for that). Sizes on disk are typical: fast, broken-up water takes more.");
             if ui.add_sized([120.0, 26.0], egui::Button::new(egui::RichText::new("Bake").strong())).on_hover_text("Bake now. The bake is temporary (in the bake folder) until File > Save bake keeps it: a new bake replaces it, and leaving it (another scene, closing) deletes it after asking.").clicked() {
                 act = self.start_bake(Some(scene));
             }

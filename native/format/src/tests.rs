@@ -11,9 +11,10 @@ fn tmp(name: &str) -> PathBuf {
 fn b() -> Box3 { Box3 { x0: -1.5, x1: 1.5, y0: 0.0, y1: 2.6, z0: -1.5, z1: 1.5 } }
 
 /// Writes a small cache with one frame in each layout: compact with its own box, whitewater and deep water; 16-bit with levels.
-pub(crate) fn write_sample(path: &std::path::Path, reserve: usize, meta_extra: usize) -> Vec<([f32; 3], u8, u8)> {
+pub(crate) fn write_sample(path: &std::path::Path, reserve: usize, meta_extra: usize) -> Vec<([f32; 3], u8, u8)> { write_sample_v(path, reserve, meta_extra, false) }
+fn write_sample_v(path: &std::path::Path, reserve: usize, meta_extra: usize, v2: bool) -> Vec<([f32; 3], u8, u8)> {
     let meta = json!({ "d": 0.05, "fps": 24, "ids": [7], "b": b().to_json(), "org": { "x": 0.5, "y": 0.1, "z": 0 }, "scale": 2, "spdMs": true, "q": null, "sb": null, "stableIds": true });
-    let mut w = CacheWriter::create(path, &meta, reserve).unwrap();
+    let mut w = if v2 { CacheWriter::create_v2(path, &meta, reserve) } else { CacheWriter::create(path, &meta, reserve) }.unwrap();
     let q = [11u8, 10, 11];
     let own = Box3 { x0: -1.0, x1: 1.0, y0: 0.0, y1: 0.5, z0: -1.0, z1: 1.0 };
     // compact: three points, one gone, one buried
@@ -92,11 +93,66 @@ fn cut_short_still_opens() {
     assert!(c.truncated);
 }
 
+/// A moving version 3 cache reads back exactly: full frames, predicted frames with boxes of their own, points that go, a seek, going backwards, a resumed file.
+#[test]
+fn packed_exact() {
+    let (p, meta) = (tmp("packed.splc"), json!({ "d": 0.05, "fps": 24, "ids": [], "b": b().to_json(), "org": { "x": 0, "y": 0, "z": 0 }, "scale": 1, "spdMs": true, "q": [11, 10, 11], "sb": null, "stableIds": true }));
+    let q = [11u8, 10, 11];
+    let frame = |f: u32| {
+        let n = 5000 + f * 3;
+        let pos: Vec<u32> = (0..n).map(|i| {
+            let a = (i * 37 + f * (i % 7)) % 2048; let c = (i * 11 + f) % 1024; let d = (i * 5 + f * f) % 2048;
+            a | c << 11 | d << 21 }).collect();
+        let sf: Vec<u16> = (0..n).map(|i| if (i + f) % 97 == 0 { 255 } else { ((i + f) % 180) as u16 | ((i % 16) as u16) << 8 }).collect();
+        let ww: Vec<(u32, u32)> = (0..200 + f).map(|i| (i.wrapping_mul(2654435761) ^ f, 0x8000_0000 | i)).collect();
+        let deep: Vec<(u32, u16)> = (0..90).map(|i| ((i * 977 + f) << 3, (i % 40) as u16)).collect();
+        let own = (f % 3 > 0).then_some(Box3 { x0: -1.0 - f as f32 * 0.01, x1: 1.0, y0: 0.0, y1: 1.0, z0: -1.0, z1: 1.0 });
+        (pos, sf, ww, deep, own)
+    };
+    let mut w = CacheWriter::create(&p, &meta, 4096).unwrap();
+    let put = |w: &mut CacheWriter, f: u32| {
+        let (pos, sf, ww, deep, own) = frame(f);
+        let (wp, wk): (Vec<u32>, Vec<u32>) = ww.into_iter().unzip();
+        let (dp, ds): (Vec<u32>, Vec<u16>) = deep.into_iter().unzip();
+        w.append(&FrameOut { q: Some(q), own_box: own, ww_baked: false, objs: &[], n: pos.len() as u32, pos: bytemuck::cast_slice(&pos), spd: bytemuck::cast_slice(&sf), fm: None,
+            ww: Some((wp.len() as u32, bytemuck::cast_slice(&wp), &wk)), deep: Some((dp.len() as u32, bytemuck::cast_slice(&dp), bytemuck::cast_slice(&ds))) }).unwrap();
+    };
+    for f in 0..30 { put(&mut w, f); }
+    let end = w.flush_point().unwrap();
+    drop(w);
+    let mut w = CacheWriter::reopen(&p, 30, end).unwrap();
+    for f in 30..60 { put(&mut w, f); }
+    w.finish(&meta).unwrap();
+    let c = Cache::open(&p).unwrap();
+    assert!(c.packed());
+    assert_eq!(c.frames.len(), 60);
+    for f in [59usize, 0, 1, 2, 30, 31, 26, 25, 24, 23, 40] {
+        let (pos, sf, ww, deep, _) = frame(f as u32);
+        let v = c.view(f);
+        assert_eq!(v.slice(&v.fr.water.pos), bytemuck::cast_slice::<u32, u8>(&pos), "positions of frame {f}");
+        assert_eq!(v.slice(&v.fr.water.spd), bytemuck::cast_slice::<u16, u8>(&sf), "speeds of frame {f}");
+        let w = v.fr.ww.as_ref().unwrap();
+        let mut got: Vec<(u32, u32)> = v.slice(&w.pos).chunks_exact(4).zip(v.slice(&w.pk).chunks_exact(4)).map(|(a, b)| (u32::from_le_bytes(a.try_into().unwrap()), u32::from_le_bytes(b.try_into().unwrap()))).collect();
+        let mut want = ww; got.sort(); want.sort();
+        assert_eq!(got, want, "whitewater of frame {f}");
+        let d = v.fr.deep.as_ref().unwrap();
+        let mut got: Vec<(u32, u16)> = v.slice(&d.pos).chunks_exact(4).zip(v.slice(&d.spd).chunks_exact(2)).map(|(a, b)| (u32::from_le_bytes(a.try_into().unwrap()), u16::from_le_bytes(b.try_into().unwrap()))).collect();
+        let mut want = deep; got.sort(); want.sort();
+        assert_eq!(got, want, "deep water of frame {f}");
+    }
+    // and back to a file the page can read
+    let p2 = tmp("packed-v2.splc");
+    convert(&c, &p2, true, |_, _| {}).unwrap();
+    let c2 = Cache::open(&p2).unwrap();
+    assert!(!c2.packed());
+    assert_eq!(c2.water_point(47, 321), c.water_point(47, 321));
+}
+
 /// The page's own reader (parseCache in src/shared.js, run in Node) must read what this writer writes, point for point.
 #[test]
 fn page_reads_native_cache() {
     let p = tmp("page.splc");
-    let want = write_sample(&p, 4096, 0);
+    let want = write_sample_v(&p, 4096, 0, true);
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tools/read-cache.js");
     let Ok(out) = std::process::Command::new("node").arg(&script).arg(&p).arg("5").output() else {
         eprintln!("node not found, skipped");
@@ -124,6 +180,7 @@ fn real_cache() {
     assert!(!c.frames.is_empty());
     let last = c.frames.last().unwrap();
     let end = [Some(last.water.spd.end), last.ww.as_ref().map(|w| w.pk.end), last.deep.as_ref().map(|d| d.spd.end)].into_iter().flatten().max().unwrap();
+    if c.packed() { return; }
     assert!(c.bytes().len() - end < 4, "file has {} bytes after the last frame", c.bytes().len() - end);
     eprintln!("{} frames, {} points in frame 0", c.frames.len(), c.frames[0].water.n);
     // the first points of frame 0 decode the same as the page's framePoint

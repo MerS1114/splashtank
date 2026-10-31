@@ -1,6 +1,7 @@
 //! SplashTank's file formats, shared with the web page: scene files (.json) and bake caches (.splc).
 
 pub mod cache;
+pub mod packed;
 pub mod scene;
 
 pub use cache::{Box3, Cache, CacheWriter, FrameOut};

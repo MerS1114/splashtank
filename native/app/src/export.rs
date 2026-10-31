@@ -152,12 +152,14 @@ bpy.context.scene.render.fps = FPS
 /// Writes every frame of the bake into dir. mesh: the surface too (the slow part). progress(frame, frames, points): false stops.
 pub fn run(c: &Cache, dir: &Path, mesh: bool, mut progress: impl FnMut(usize, usize, u32) -> bool) -> Result<String, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("Could not make {}: {e}", dir.display()))?;
-    let (b, sc) = (c.bytes(), c.info.scale);
+    let sc = c.info.scale;
     let nf = c.frames.len();
     let tank = c.info.b;
     let spd_k = if c.info.spd_ms { 1.0 / 16.0 } else { sc / 16.0 };
     let mut done = 0;
-    for (f, fr) in c.frames.iter().enumerate() {
+    for f in 0..nf {
+        let v = c.view(f);
+        let (b, fr) = (v.bytes(), &v.fr);
         let bx = c.frame_box(f);
         let mut pts: Vec<[f32; 3]> = Vec::with_capacity(fr.water.n as usize);
         let mut w = out(&dir.join(format!("water_{f:04}.ply")))?;

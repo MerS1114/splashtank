@@ -576,19 +576,19 @@ pub fn whitewater_pass(gpu: &Gpu, c: &splash_format::Cache, desc: &Desc, out: &P
     let mut meta = c.info.meta.clone();
     meta["sb"] = ab.to_json();
     let mut w = CacheWriter::create(out, &meta, 64 * 1024 + meta.to_string().len()).map_err(|e| format!("Could not write {}: {e}", out.display()))?;
-    let bytes = c.bytes();
     // a frame copied as it is, with new whitewater (16-bit across the whitewater area; compact with the frame's bits)
     let write = |w: &mut CacheWriter, f: usize, ww: Option<(usize, Vec<u16>, Vec<u32>)>| -> Result<(), String> {
-        let x = &fr[f];
+        let v = c.view(f);
+        let x = &v.fr;
         let fq = x.q;
         let ww: Option<(u32, Vec<u8>, Vec<u32>)> = ww.filter(|s| s.0 > 0).map(|(n, p, pk)| match fq {
             Some(q) => (n as u32, bytemuck::cast_slice(&pack_pos32(&p, n, q)).to_vec(), pk),
             None => (n as u32, bytemuck::cast_slice(&p).to_vec(), pk),
         });
         let objs = c.objs(f);
-        w.append(&FrameOut { q: x.q, own_box: x.own_box, ww_baked: true, objs: &objs, n: x.water.n, pos: c.slice(&x.water.pos), spd: c.slice(&x.water.spd),
-            fm: x.water.fm.as_ref().map(|r| c.slice(r)), ww: ww.as_ref().map(|(n, p, pk)| (*n, &p[..], &pk[..])),
-            deep: x.deep.as_ref().map(|d| (d.n, c.slice(&d.pos), c.slice(&d.spd))) }).map_err(|e| format!("Writing the cache failed: {e}"))
+        w.append(&FrameOut { q: x.q, own_box: x.own_box, ww_baked: true, objs: &objs, n: x.water.n, pos: v.slice(&x.water.pos), spd: v.slice(&x.water.spd),
+            fm: x.water.fm.as_ref().map(|r| v.slice(r)), ww: ww.as_ref().map(|(n, p, pk)| (*n, &p[..], &pk[..])),
+            deep: x.deep.as_ref().map(|d| (d.n, v.slice(&d.pos), v.slice(&d.spd))) }).map_err(|e| format!("Writing the cache failed: {e}"))
     };
     write(&mut w, 0, None)?;
     let t0 = Instant::now();
@@ -596,16 +596,17 @@ pub fn whitewater_pass(gpu: &Gpu, c: &splash_format::Cache, desc: &Desc, out: &P
     let mut stopped = false;
     for f in 1..nf {
         let tf0 = Instant::now();
-        let (a, bf) = (&fr[f - 1], &fr[f]);
+        let (va, vb) = (c.view(f - 1), c.view(f));
+        let (a, bf) = (&va.fr, &vb.fr);
         let (ba, bb) = (c.frame_box(f - 1), c.frame_box(f));
         ps.clear(); vs.clear();
         let mut vmax: f32 = 0.0;
         for i in 0..a.water.n as usize {
-            let (pa, sa, la) = decode_point(bytes, &a.water, a.q, &ba, i);
+            let (pa, sa, la) = decode_point(va.bytes(), &a.water, a.q, &ba, i);
             if sa == 255 { ps.extend_from_slice(&[0.0, -1e6, 0.0, 0.0]); vs.extend_from_slice(&[0.0; 4]); continue; }
             let mut v = [0f32; 3];
             if i < bf.water.n as usize {
-                let (pb, sb, _) = decode_point(bytes, &bf.water, bf.q, &bb, i);
+                let (pb, sb, _) = decode_point(vb.bytes(), &bf.water, bf.q, &bb, i);
                 if sb != 255 {
                     v = [(pb[0] - pa[0]) * fps, (pb[1] - pa[1]) * fps, (pb[2] - pa[2]) * fps];
                     // a slot the narrow band gave to another particle jumps further than either speed allows: no velocity for that frame
@@ -621,7 +622,7 @@ pub fn whitewater_pass(gpu: &Gpu, c: &splash_format::Cache, desc: &Desc, out: &P
         }
         if let Some(dp) = &a.deep {
             for i in 0..dp.n as usize {
-                let (pd, sd, _) = decode_point(bytes, dp, a.q, &ba, i);
+                let (pd, sd, _) = decode_point(va.bytes(), dp, a.q, &ba, i);
                 if sd == 255 { continue; }
                 for m in 0..copies {
                     let o = |bit: usize| if m & bit != 0 { jit } else { -jit };
