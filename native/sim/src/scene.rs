@@ -44,6 +44,8 @@ pub struct Obj {
     pub rx: f32, pub yaw: f32, pub rz: f32,
     pub sx: f32, pub sy: f32, pub sz: f32,
     pub spin: f32,
+    /// makes smoke (Objects tab)
+    pub smoke: bool,
     pub sdf: Option<Arc<Sdf>>,
     // emitters
     pub az: f32, pub el: f32, pub speed: f32, pub radius: f32, pub on: bool, pub random: bool, pub spread: f32, pub density: f32, pub turb: f32,
@@ -194,7 +196,10 @@ pub fn desc_from_scene(scene: &Value, o: &BakeOpts) -> Result<Desc, String> {
     let air = flag(&sv, "airOn", true).then(|| Air {
         couple: num(&sv, "airCouple", 3.0) as f32, decay: num(&sv, "airDecay", 0.6) as f32, real: flag(&sv, "airReal", true), feel: flag(&sv, "airFeel", true),
         size: num(&sv, "turbSize", 3.0) as f32 * k, oct: num(&sv, "turbOct", 3.0) as f32, speed: num(&sv, "turbSpeed", 0.4) as f32, swirl: num(&sv, "airSwirl", 0.5) as f32,
-        iters: 20, blur: 0.35 });
+        iters: 20, blur: 0.35,
+        // native only (the page has no volume)
+        fog: flag(&sv, "fogOn", true), fog_add: 0.1 * num(&sv, "fogAmount", 1.0) as f32, fog_fade: 1.0 / (num(&sv, "fogLife", 3.0) as f32).max(0.05),
+        lift: num(&sv, "smokeLift", 10.0) as f32 * k, heat_fade: 0.3, smoke: 3.0 * num(&sv, "smokeAmount", 1.0) as f32 });
     let drip = (spr_on && flag(&sv, "dripOn", true)).then(|| Drip { rate: num(&sv, "dripRate", 2.0) as f32, dry: num(&sv, "dripDry", 3.0) as f32 });
     let spray_cap = if spr_on { num(&sv, "sprCap", 600000.0) as u32 } else { 0 };
     let nb_look = flag(&sv, "nbLook", false) && nb_active;
@@ -224,7 +229,7 @@ pub fn desc_from_scene(scene: &Value, o: &BakeOpts) -> Result<Desc, String> {
             x: g("x", 0.0) - org[0], y: g("y", 0.0) - org[1], z: g("z", 0.0) - org[2],
             rx: g("rx", 0.0), yaw: g("yaw", 0.0), rz: g("rz", 0.0),
             sx: if g("sx", 1.0) > 0.0 { g("sx", 1.0) } else { 1.0 }, sy: if g("sy", 1.0) > 0.0 { g("sy", 1.0) } else { 1.0 }, sz: if g("sz", 1.0) > 0.0 { g("sz", 1.0) } else { 1.0 },
-            spin: g("spin", 0.0), sdf,
+            spin: g("spin", 0.0), smoke: flag(&ov, "smoke", false), sdf,
             az: g("az", 0.0), el: g("el", -30.0), speed: g("speed", 4.0), radius: g("radius", 0.15), on: flag(&ov, "on", true),
             random: ov.get("mode").and_then(Value::as_str) == Some("random"), spread: g("spread", 0.0), density: g("density", 1.0), turb: g("turb", 0.0),
             keys: keys_of(&ov, org), smooth,
@@ -395,4 +400,5 @@ pub struct Col {
     pub v: [f32; 3],
     pub w: [f32; 3],
     pub g: [f32; 3],
+    pub smoke: bool,
 }

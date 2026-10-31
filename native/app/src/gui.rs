@@ -1864,6 +1864,8 @@ impl App {
             ui.checkbox(&mut self.look.water, "Water");
             ui.checkbox(&mut self.look.deep, "Deep water");
             ui.checkbox(&mut self.look.whitewater, "Whitewater");
+            ui.checkbox(&mut self.look.fog, "Mist and smoke").on_hover_text("The cloud kept with the bake, drawn as see-through fog.");
+            ui.add(egui::Slider::new(&mut self.look.fog_k, 0.1..=5.0).logarithmic(true).text("Mist look")).on_hover_text("How thick the cloud is drawn. Only changes the picture, not the bake.");
             ui.checkbox(&mut self.look.objects, "Objects");
             ui.horizontal(|ui| {
                 ui.label("Colour by").on_hover_text("Speed: blue to cyan to white as the water speeds up, churned water white. Type: one colour per kind of point: water blue, churned water pale blue, foam white, spray orange, mist lilac, bubbles green, deep water (narrow band) dark blue.");
@@ -2045,7 +2047,7 @@ impl eframe::App for App {
             if ui.input(|i| !i.events.is_empty() || i.pointer.is_moving()) { self.last_input = now; }
             if !self.splay && n > 1 && self.r.kept_bytes < self.r.budget * 9 / 10 && self.last_input.elapsed().as_secs_f32() > 0.5 {
                 if let Some(k) = (1..n).map(|k| (f + k) % n).find(|&k| !self.r.is_kept(k)) {
-                    self.r.load(&rs.device, &self.doc, k);
+                    self.r.load(&rs.device, &rs.queue, &self.doc, k);
                     ui.ctx().request_repaint();
                 }
             }

@@ -327,6 +327,8 @@ pub fn objects(ui: &mut egui::Ui, j: &mut Value, sel: &mut Option<usize>, t: f64
         if ui.checkbox(&mut lk, "Lock proportions").on_hover_text("Typing one Scale or Dimensions value changes the other two by the same factor, and S scales evenly.").changed() { o["lockScale"] = json!(lk); changed = true; }
         let mut water = o["water"].as_bool().unwrap_or(false);
         if ui.checkbox(&mut water, "Water volume").on_hover_text("The shape is filled with water instead of colliding.").changed() { o["water"] = json!(water); changed = true; }
+        let mut smoke = o["smoke"].as_bool().unwrap_or(false);
+        if ui.checkbox(&mut smoke, "Makes smoke").on_hover_text("Smoke comes off this object, rises with its heat and is carried by the air. Needs Air field and Mist and smoke volume on. Set how much and how it rises under Simulation > Air and wind. The web page ignores this.").changed() { o["smoke"] = json!(smoke); changed = true; }
         let mut spin = num(o, "spin", 0.0);
         ui.horizontal(|ui| { ui.label("Spin"); if ui.add(egui::Slider::new(&mut spin, -6.0..=6.0).step_by(0.1).suffix("/s")).changed() { o["spin"] = json!(spin); changed = true; } });
     } else {

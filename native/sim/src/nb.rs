@@ -159,7 +159,7 @@ pub fn seed(l: &Layout, fills: &[Fill], band_cells: f32, oc: Option<(&Ocean, &[f
                     }
                     y += d;
                 }
-                s.vols.push(Col { sdf: sd.clone(), pos: *pos, r: *r, s: sc.unwrap_or([1.0; 3]), v: [0.0; 3], w: [0.0; 3], g: [0.0; 3] });
+                s.vols.push(Col { sdf: sd.clone(), pos: *pos, r: *r, s: sc.unwrap_or([1.0; 3]), v: [0.0; 3], w: [0.0; 3], g: [0.0; 3], smoke: false });
             }
             Fill::Sphere { x: cx, y: cy, z: cz, r, vy } => {
                 let r = *r;

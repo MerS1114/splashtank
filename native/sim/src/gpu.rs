@@ -16,7 +16,7 @@ pub const SHADER_PARTS: [(&str, &str); 7] = [
 ];
 pub const SUBGROUPS_WGSL: &str = include_str!("../shaders/subgroups.wgsl");
 /// Size of the uniform block Params (core.wgsl); checked against the shader in the tests.
-pub const PARAMS_BYTES: u64 = 1792;
+pub const PARAMS_BYTES: u64 = 1824;
 
 /// The shader text for this device.
 pub fn flip_source(sg: bool) -> String {

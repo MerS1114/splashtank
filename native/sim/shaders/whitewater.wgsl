@@ -120,6 +120,7 @@ fn airUpdate(@builtin(global_invocation_id) g: vec3<u32>) {
     a = mix(a, vt, 1.0 - exp(-P.airCouple * min(w, 8.0) * P.dt));
   }
   a = mix(a, vec3<f32>(P.q1, P.q2, P.q3) + turbAt(x), 1.0 - exp(-P.airDecay * P.dt));
+  if (P.ext4.x > 0.5) { a.y += P.dt * P.ext5.x * fogAt(x).y; }   // hot smoke lifts the air
   var wall = 0.0;
   for (var k = 0u; k < P.ncols; k++) {
     if (colNear(k, x) && sdfEval(k, x).x < 0.6 * P.airH) { a = colSurfVel(k, x); wall = 1.0; break; }
@@ -129,6 +130,64 @@ fn airUpdate(@builtin(global_invocation_id) g: vec3<u32>) {
     if (hasStorage(wc) && ctypeOf(wc.x, wc.y, wc.z) == 1u) { a = sampleNew(x); wall = 1.0; }
   }
   air2[c] = vec4<f32>(a, wall);
+}
+// The mist and smoke volume: a density and a heat on a grid twice as fine as the air's, carried by the air, filled by mist points and by
+// objects that make smoke, fading with time and gone in water. It costs little because it updates about once a frame, not every substep.
+fn fogDims() -> vec3<i32> { return vec3<i32>(i32(P.aNx) * 2, i32(P.aNy) * 2, i32(P.aNz) * 2); }
+fn fogIdx(c: vec3<i32>) -> u32 {
+  let n = fogDims(); let q = clamp(c, vec3<i32>(0), n - vec3<i32>(1));
+  return u32(q.x) + u32(n.x) * (u32(q.y) + u32(n.y) * u32(q.z));
+}
+fn fogAt(p: vec3<f32>) -> vec2<f32> {
+  let g = (p - vec3<f32>(P.x0, P.y0, P.z0)) * 2.0 / P.airH - vec3<f32>(0.5);
+  let f0 = floor(g); let fr = g - f0; let i0 = vec3<i32>(f0);
+  var s = vec2<f32>(0.0);
+  for (var c = 0u; c < 8u; c++) {
+    let dx = i32(c & 1u); let dy = i32((c >> 1u) & 1u); let dz = i32((c >> 2u) & 1u);
+    let w = select(1.0 - fr.x, fr.x, dx == 1) * select(1.0 - fr.y, fr.y, dy == 1) * select(1.0 - fr.z, fr.z, dz == 1);
+    s += w * fog[fogIdx(i0 + vec3<i32>(dx, dy, dz))];
+  }
+  return s;
+}
+@compute @workgroup_size(256)
+fn fogSplat(@builtin(global_invocation_id) g: vec3<u32>) {
+  let j = gid1(g); if (j >= P.smax) { return; }
+  let sp = sPos[j]; if (sp.w <= 0.0 || u32(sVel[j].w + 0.5) != 1u || !inTank(sp.xyz)) { return; }
+  let c = fogIdx(vec3<i32>(floor((sp.xyz - vec3<f32>(P.x0, P.y0, P.z0)) * 2.0 / P.airH)));
+  atomicAdd(&fogAcc[c], 1);
+}
+@compute @workgroup_size(256)
+fn fogStep(@builtin(global_invocation_id) g: vec3<u32>) {
+  let n = fogDims(); let c = gid1(g); if (c >= u32(n.x * n.y * n.z)) { return; }
+  let ci = vec3<i32>(i32(c) % n.x, (i32(c) / n.x) % n.y, i32(c) / (n.x * n.y));
+  let x = vec3<f32>(P.x0, P.y0, P.z0) + (vec3<f32>(ci) + vec3<f32>(0.5)) * P.airH * 0.5;
+  let dt = P.ext5.w;
+  // the outermost cells stay empty: the cloud drifts out of the volume instead of piling up against its edge
+  if (any(ci < vec3<i32>(1)) || any(ci >= n - vec3<i32>(1))) { atomicStore(&fogAcc[c], 0); fog2[c] = vec2<f32>(0.0); return; }
+  var f = fogAt(x - dt * airAt(x));
+  let nb = (fog[fogIdx(ci + vec3<i32>(1, 0, 0))] + fog[fogIdx(ci - vec3<i32>(1, 0, 0))] + fog[fogIdx(ci + vec3<i32>(0, 1, 0))] +
+            fog[fogIdx(ci - vec3<i32>(0, 1, 0))] + fog[fogIdx(ci + vec3<i32>(0, 0, 1))] + fog[fogIdx(ci - vec3<i32>(0, 0, 1))]) / 6.0;
+  f = mix(f, nb, 0.06);   // single points' specks spread into a cloud
+  f.x += f32(atomicExchange(&fogAcc[c], 0)) * P.ext4.y * dt;
+  f *= vec2<f32>(exp(-P.ext4.z * dt), exp(-P.ext5.y * dt));
+  let bits = bitcast<u32>(P.ext4.w);
+  for (var k = 0u; k < P.ncols; k++) {
+    if (!colNear(k, x)) { continue; }
+    let sd = sdfEval(k, x).x;
+    // smoke comes off a shell around the object, out where the air is free to lift it (air inside an object is a wall)
+    if (k < 32u && (bits & (1u << k)) != 0u) {
+      if (sd < 1.6 * P.airH) { f = vec2<f32>(f.x + P.ext5.z * dt, 1.0); break; }
+    } else if (sd < 0.0) { f = vec2<f32>(0.0); break; }
+  }
+  if (inTank(x)) {   // gone in water
+    let wc = particleCell(x);
+    if (hasStorage(wc) && ctypeOf(wc.x, wc.y, wc.z) == 1u) { f = vec2<f32>(0.0); }
+  }
+  fog2[c] = vec2<f32>(min(f.x, 1.0), f.y);
+}
+@compute @workgroup_size(256)
+fn fogCopy(@builtin(global_invocation_id) g: vec3<u32>) {
+  let n = fogDims(); let c = gid1(g); if (c >= u32(n.x * n.y * n.z)) { return; } fog[c] = fog2[c];
 }
 // Real air flow: the air is made incompressible on its grid, so it flows around the water and objects instead of piling into them (a
 // falling body pushes air out ahead and draws it in behind; spray drags air along and the air around makes way). Velocities sit at cell

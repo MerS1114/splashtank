@@ -1278,6 +1278,90 @@
    ],
    "def": true,
    "tip": "Objects cut through grid cells smoothly, so slopes and curves stay slopes and curves to the water, instead of stairs that catch it. The web page ignores this setting."
+  },
+  {
+   "group": 2,
+   "kind": "check",
+   "label": "Mist and smoke volume",
+   "key": "fogOn",
+   "path": [
+    "solver",
+    "fogOn"
+   ],
+   "def": true,
+   "tip": "Mist points leave a soft cloud in the air that the air carries and swirls, and objects marked Makes smoke give off smoke. Kept with the bake and drawn as see-through fog (View tab). Only inside the tank. The web page ignores this."
+  },
+  {
+   "group": 2,
+   "kind": "slider",
+   "label": "Mist thickness",
+   "key": "fogAmount",
+   "inv": false,
+   "min": 0,
+   "max": 5,
+   "step": 0.05,
+   "log": false,
+   "unit": "",
+   "path": [
+    "solver",
+    "fogAmount"
+   ],
+   "def": 1,
+   "tip": "How much cloud each mist point leaves."
+  },
+  {
+   "group": 2,
+   "kind": "slider",
+   "label": "Mist lasts",
+   "key": "fogLife",
+   "inv": false,
+   "min": 0.2,
+   "max": 20,
+   "step": 0.1,
+   "log": false,
+   "unit": " s",
+   "path": [
+    "solver",
+    "fogLife"
+   ],
+   "def": 3,
+   "tip": "How long the cloud takes to thin away."
+  },
+  {
+   "group": 2,
+   "kind": "slider",
+   "label": "Smoke amount",
+   "key": "smokeAmount",
+   "inv": false,
+   "min": 0,
+   "max": 5,
+   "step": 0.05,
+   "log": false,
+   "unit": "",
+   "path": [
+    "solver",
+    "smokeAmount"
+   ],
+   "def": 1,
+   "tip": "How much smoke objects marked Makes smoke give off."
+  },
+  {
+   "group": 2,
+   "kind": "slider",
+   "label": "Smoke rise",
+   "key": "smokeLift",
+   "inv": false,
+   "min": 0,
+   "max": 50,
+   "step": 0.5,
+   "log": false,
+   "unit": " m/s²",
+   "path": [
+    "solver",
+    "smokeLift"
+   ],
+   "def": 10,
+   "tip": "How hard the heat of smoke lifts the air. 0 gives smoke that only drifts."
   }
  ],
  "looks": {

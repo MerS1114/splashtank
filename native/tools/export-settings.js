@@ -81,6 +81,17 @@ for (const r of out.rows) if (r.key === 'nbOn') r.label = 'Enabled';
   out.rows.push({ group: ph, kind: 'check', label: 'Smooth walls', key: 'smoothWalls', path: ['solver', 'smoothWalls'], def: true,
     tip: 'Objects cut through grid cells smoothly, so slopes and curves stay slopes and curves to the water, instead of stairs that catch it. The web page ignores this setting.' });
 }
+// native only: the mist and smoke volume (fogStep in native/sim/shaders/whitewater.wgsl), in Air and wind
+{
+  const ai = out.groups.findIndex((g) => g.id === 'air');
+  const slider = (label, key, min, max, step, def, unit, tip) => out.rows.push({ group: ai, kind: 'slider', label, key, inv: false, min, max, step, log: false, unit, path: ['solver', key], def, tip });
+  out.rows.push({ group: ai, kind: 'check', label: 'Mist and smoke volume', key: 'fogOn', path: ['solver', 'fogOn'], def: true,
+    tip: 'Mist points leave a soft cloud in the air that the air carries and swirls, and objects marked Makes smoke give off smoke. Kept with the bake and drawn as see-through fog (View tab). Only inside the tank. The web page ignores this.' });
+  slider('Mist thickness', 'fogAmount', 0, 5, 0.05, 1, '', 'How much cloud each mist point leaves.');
+  slider('Mist lasts', 'fogLife', 0.2, 20, 0.1, 3, ' s', 'How long the cloud takes to thin away.');
+  slider('Smoke amount', 'smokeAmount', 0, 5, 0.05, 1, '', 'How much smoke objects marked Makes smoke give off.');
+  slider('Smoke rise', 'smokeLift', 0, 50, 0.5, 10, ' m/s\u00b2', 'How hard the heat of smoke lifts the air. 0 gives smoke that only drifts.');
+}
 // native defaults that differ from the page's: the grouped transfer (on: with the finer sort it took particle to grid from 6.8 to 2.2 ms a
 // step on Mer's ocean, the same water; the page left it off)
 for (const r of out.rows) if (r.key === 'p2gWin') {

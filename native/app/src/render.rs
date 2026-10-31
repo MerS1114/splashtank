@@ -132,9 +132,12 @@ pub struct Look {
     pub region: Option<([f32; 3], [f32; 3])>,
     /// objects where the scene has them now, not where the cache's frame recorded them (the live sim while editing)
     pub scene_objs: bool,
+    /// the mist and smoke volume, and how thick it is drawn
+    pub fog: bool,
+    pub fog_k: f32,
 }
 impl Default for Look {
-    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None, scene_objs: false, by_type: false, time: 0.0, bg: 0 } }
+    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None, scene_objs: false, by_type: false, time: 0.0, bg: 0, fog: true, fog_k: 1.0 } }
 }
 
 #[repr(C)]
@@ -150,7 +153,12 @@ struct LayerU { b0: [f32; 4], e: [f32; 4], q: [u32; 4], n: [u32; 4] }
 struct Vert { p: [f32; 3], n: [f32; 3], c: [f32; 4] }
 
 struct GpuLayer { n: u32, bg: wgpu::BindGroup }
-struct GpuFrame { water: Option<GpuLayer>, deep: Option<GpuLayer>, ww: Option<GpuLayer>, bytes: u64 }
+struct GpuFogT { n: [u32; 3], h: f32, bg: wgpu::BindGroup }
+struct GpuFrame { water: Option<GpuLayer>, deep: Option<GpuLayer>, ww: Option<GpuLayer>, fog: Option<GpuFogT>, bytes: u64 }
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct FogU { inv: [[f32; 4]; 4], rect: [f32; 4], z: [f32; 4], pz: [f32; 4], b0: [f32; 4], e: [f32; 4], sun: [f32; 4], col: [f32; 4] }
 
 /// One camera block per draw (water, deep water, whitewater, the rest): they differ in how many copies a point gets.
 struct CamSlot { buf: wgpu::Buffer, bg: wgpu::BindGroup }
@@ -160,6 +168,11 @@ pub struct Renderer {
     water: wgpu::RenderPipeline,
     deep: wgpu::RenderPipeline,
     ww: wgpu::RenderPipeline,
+    fog: wgpu::RenderPipeline,
+    fog_bgl: wgpu::BindGroupLayout,
+    fog_u: wgpu::BindGroup,
+    fog_buf: wgpu::Buffer,
+    fog_smp: wgpu::Sampler,
     tris: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
     cams: Vec<CamSlot>,
@@ -228,6 +241,24 @@ impl Renderer {
         // whitewater is see-through: it is tested against the water but does not hide what is behind it
         let ww = pipe("whitewater", "vs_ww", "fs_ww", &blended, depth(false, less));
 
+        // the mist and smoke volume
+        let fm = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("fog"), source: wgpu::ShaderSource::Wgsl(include_str!("fog.wgsl").into()) });
+        let fog_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("fog frame"), entries: &[
+            wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D3, multisampled: false }, count: None },
+            wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None } ] });
+        let fog_ul = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("fog"), entries: &[
+            wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX_FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None } ] });
+        let fog_buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("fog"), size: std::mem::size_of::<FogU>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let fog_u = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("fog"), layout: &fog_ul, entries: &[wgpu::BindGroupEntry { binding: 0, resource: fog_buf.as_entire_binding() }] });
+        let fog_smp = device.create_sampler(&wgpu::SamplerDescriptor { label: Some("fog"), mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() });
+        let fog_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("fog"), bind_group_layouts: &[Some(&fog_ul), Some(&fog_bgl), Some(&fog_bgl)], immediate_size: 0 });
+        let fog = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor { label: Some("fog"), layout: Some(&fog_pl),
+            vertex: wgpu::VertexState { module: &fm, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+            primitive: wgpu::PrimitiveState::default(), depth_stencil: depth(false, less),
+            multisample: wgpu::MultisampleState { count: SAMPLES, ..Default::default() },
+            fragment: Some(wgpu::FragmentState { module: &fm, entry_point: Some("fs"), compilation_options: Default::default(), targets: &blended }),
+            multiview_mask: None, cache: None });
+
         let lm = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("lines"), source: wgpu::ShaderSource::Wgsl(include_str!("lines.wgsl").into()) });
         let ll = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("lines"), bind_group_layouts: &[Some(&cam_bgl)], immediate_size: 0 });
         let attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4];
@@ -243,7 +274,7 @@ impl Renderer {
         });
         let tris = geo(wgpu::PrimitiveTopology::TriangleList, &opaque, depth(true, less));
         let lines = geo(wgpu::PrimitiveTopology::LineList, &blended, depth(false, less));
-        Renderer { bg, water, deep, ww, tris, lines, cams, msaa: None, layer_bgl, empty, dummy, frames: HashMap::new(), lru: VecDeque::new(), gen: u64::MAX,
+        Renderer { bg, water, deep, ww, fog, fog_bgl, fog_u, fog_buf, fog_smp, tris, lines, cams, msaa: None, layer_bgl, empty, dummy, frames: HashMap::new(), lru: VecDeque::new(), gen: u64::MAX,
             kept_bytes: 0, budget: 2 << 30, uploads: 0 }
     }
 
@@ -279,7 +310,7 @@ impl Renderer {
     }
 
     /// Puts frame f on the GPU unless it is there already; drops the least recently used frames beyond the budget.
-    pub fn load(&mut self, device: &wgpu::Device, doc: &Doc, f: usize) {
+    pub fn load(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, doc: &Doc, f: usize) {
         let Some(c) = &doc.cache else { return; };
         self.gen = doc.gen;
         if f >= c.frames.len() { return; }
@@ -298,8 +329,18 @@ impl Renderer {
         let ww = fr.ww.as_ref().filter(|w| w.n > 0).map(|w| {
             let p = Points { n: w.n, pos: w.pos.clone(), spd: w.pk.clone(), fm: None };
             let (l, b) = self.layer(device, &v, &p, fr.q, c.ww_box(), Some(&w.pk)); bytes += b; l });
+        let fog = fr.fog.as_ref().map(|g| {
+            let tex = device.create_texture_with_data(queue, &wgpu::TextureDescriptor { label: Some("fog"), size: wgpu::Extent3d { width: g.n[0], height: g.n[1], depth_or_array_layers: g.n[2] },
+                mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D3, format: wgpu::TextureFormat::R8Unorm, usage: wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[] },
+                wgpu::util::TextureDataOrder::LayerMajor, v.slice(&g.d));
+            bytes += g.d.len() as u64;
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("fog frame"), layout: &self.fog_bgl, entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&tex.create_view(&Default::default())) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.fog_smp) } ] });
+            GpuFogT { n: g.n, h: g.h, bg }
+        });
         self.uploads += 1;
-        self.frames.insert(key, GpuFrame { water, deep, ww, bytes });
+        self.frames.insert(key, GpuFrame { water, deep, ww, fog, bytes });
         self.lru.push_back(key);
         self.kept_bytes += bytes;
         while self.kept_bytes > self.budget && self.lru.len() > 2 {
@@ -314,7 +355,7 @@ impl Renderer {
                 size: [u32; 2], cam: &Orbit, doc: &Doc, a: usize, b: usize, w: f32, look: &Look) {
         let (wd, ht) = (size[0] as f32, size[1].max(1) as f32);
         let w = if look.blend && a != b { w.clamp(0.0, 1.0) } else { 0.0 };
-        if doc.cache.is_some() { self.load(device, doc, a); if w > 0.0 { self.load(device, doc, b); } }
+        if doc.cache.is_some() { self.load(device, queue, doc, a); if w > 0.0 { self.load(device, queue, doc, b); } }
         let c = doc.cache.as_ref();
         let org = c.map(|c| c.info.org).unwrap_or([0.0; 3]);
         let d = c.map(|c| c.info.d).unwrap_or(0.04);
@@ -356,6 +397,37 @@ impl Renderer {
         pass.set_pipeline(&self.bg);
         pass.draw(0..3, 0..1);
         if let Some(bf) = &tb { pass.set_pipeline(&self.tris); pass.set_vertex_buffer(0, bf.slice(..)); pass.draw(0..tris.len() as u32, 0..1); }
+        let fog_on = look.fog && c.is_some();
+        let (mut fog_layers, mut fog_w) = (0u32, 0.0);
+        if fog_on {
+            if let (Some(c), Some(g)) = (c, self.frames.get(&(self.gen, a)).and_then(|g| g.fog.as_ref())) {
+                // the layers evenly across the box along the view, inside the rectangle of the screen it covers
+                let b0 = Vec3::new(c.info.b.x0, c.info.b.y0, c.info.b.z0) + Vec3::from(c.info.org);
+                let e = Vec3::new(g.n[0] as f32, g.n[1] as f32, g.n[2] as f32) * g.h;
+                let (v, p) = (cam.view(), cam.proj(wd / ht));
+                let (mut near, mut far, mut lo, mut hi) = (f32::MAX, f32::MIN, glam::Vec2::splat(1.0), glam::Vec2::splat(-1.0));
+                let mut behind = false;
+                for i in 0..8u32 {
+                    let q = b0 + e * Vec3::new((i & 1) as f32, ((i >> 1) & 1) as f32, ((i >> 2) & 1) as f32);
+                    let vq = v.transform_point3(q);
+                    near = near.min(-vq.z); far = far.max(-vq.z);
+                    if -vq.z < 0.05 { behind = true; continue; }
+                    let n = p.project_point3(vq);
+                    lo = lo.min(n.truncate()); hi = hi.max(n.truncate());
+                }
+                if behind { lo = glam::Vec2::splat(-1.0); hi = glam::Vec2::splat(1.0); }
+                near = near.max(0.05);
+                fog_layers = if far > near { 96 } else { 0 };
+                let step = (far - near) / fog_layers.max(1) as f32;
+                let sun = Vec3::new(2.0, 5.0, 3.0).normalize() / e;
+                let dark = look.bg == 1;
+                let u = FogU { inv: (p * v).inverse().to_cols_array_2d(), rect: [lo.x.max(-1.0), lo.y.max(-1.0), hi.x.min(1.0), hi.y.min(1.0)],
+                    z: [far, step, w, 25.0 * look.fog_k], pz: [p.z_axis.z, p.w_axis.z, p.z_axis.w, p.w_axis.w], b0: [b0.x, b0.y, b0.z, step], e: [e.x, e.y, e.z, g.h * 2.0], sun: [sun.x, sun.y, sun.z, 0.0],
+                    col: if dark { [0.75, 0.78, 0.82, 0.55] } else { [0.93, 0.95, 0.97, 0.45] } };
+                queue.write_buffer(&self.fog_buf, 0, bytemuck::bytes_of(&u));
+                fog_w = w;
+            }
+        }
         let (fa, fb) = (self.frames.get(&(self.gen, a)).filter(|_| c.is_some()), self.frames.get(&(self.gen, b)).filter(|_| c.is_some() && w > 0.0));
         // deep water and whitewater from the nearer frame
         let near = if w >= 0.5 { fb } else { fa };
@@ -385,6 +457,16 @@ impl Renderer {
             pass.set_bind_group(1, &l.bg, &[]);
             pass.set_bind_group(2, &self.empty, &[]);
             pass.draw(0..l.n * k[2] * 6, 0..1);
+        }
+        if fog_layers > 0 {
+            if let Some(ga) = fa.and_then(|g| g.fog.as_ref()) {
+                let gb = fb.and_then(|g| g.fog.as_ref()).filter(|_| fog_w > 0.0).unwrap_or(ga);
+                pass.set_pipeline(&self.fog);
+                pass.set_bind_group(0, &self.fog_u, &[]);
+                pass.set_bind_group(1, &ga.bg, &[]);
+                pass.set_bind_group(2, &gb.bg, &[]);
+                pass.draw(0..6, 0..fog_layers);
+            }
         }
     }
 }

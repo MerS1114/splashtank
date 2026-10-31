@@ -70,7 +70,7 @@ impl Runner {
             let r = euler_mat(o.rx, o.yaw, o.rz);
             let sz = [o.sx, o.sy, o.sz];
             let p = self.prev.insert(o.id, Prev { pos: [o.x, o.y, o.z], r, sz });
-            let mut c = Col { sdf: sdf.clone(), pos: [o.x, o.y, o.z], r, s: sz, v: [0.0; 3], w: [0.0; 3], g: [0.0; 3] };
+            let mut c = Col { sdf: sdf.clone(), pos: [o.x, o.y, o.z], r, s: sz, v: [0.0; 3], w: [0.0; 3], g: [0.0; 3], smoke: o.smoke };
             if let Some(p) = p {
                 let v = [(o.x - p.pos[0]) / dt, (o.y - p.pos[1]) / dt, (o.z - p.pos[2]) / dt];
                 if v[0] * v[0] + v[1] * v[1] + v[2] * v[2] < lim2 { c.v = v; }

@@ -63,7 +63,9 @@ pub struct Spr {
 }
 /// The air field (simPar().air).
 #[derive(Clone, Copy, Debug)]
-pub struct Air { pub couple: f32, pub decay: f32, pub real: bool, pub feel: bool, pub size: f32, pub oct: f32, pub speed: f32, pub swirl: f32, pub iters: u32, pub blur: f32 }
+pub struct Air { pub couple: f32, pub decay: f32, pub real: bool, pub feel: bool, pub size: f32, pub oct: f32, pub speed: f32, pub swirl: f32, pub iters: u32, pub blur: f32,
+    /// the mist and smoke volume: on, density a mist point adds a second, fade a second, heat's lift (solver units), heat's fade, smoke made a second
+    pub fog: bool, pub fog_add: f32, pub fog_fade: f32, pub lift: f32, pub heat_fade: f32, pub smoke: f32 }
 /// Dripping off wet colliders (simPar().drip).
 #[derive(Clone, Copy, Debug)]
 pub struct Drip { pub rate: f32, pub dry: f32 }
@@ -201,6 +203,11 @@ pub struct FlipSim {
     air_feel: bool,
     air_iters: u32,
     air_on_step: bool,
+    fog_on: bool,
+    fog_stage: Option<wgpu::Buffer>,
+    /// time since the volume last updated, and whether this step updates it
+    fog_wait: f32,
+    fog_now: bool,
     drip_on_step: bool,
     spr_on_step: bool,
     /// the whitewater area of the last step
@@ -227,7 +234,7 @@ impl FlipSim {
         buf.insert(1, mk(m * 16)); buf.insert(2, mk(m * 16)); buf.insert(42, mk(16));
         buf.insert(26, mk(m * 4)); buf.insert(27, mk(16));
         buf.insert(28, mk(16)); buf.insert(29, mk(16)); buf.insert(30, mk(16)); buf.insert(33, mk(16));
-        buf.insert(32, mk(16)); buf.insert(35, mk(16)); buf.insert(34, mk(16)); buf.insert(36, mk(32));
+        buf.insert(32, mk(16)); buf.insert(35, mk(16)); buf.insert(34, mk(16)); buf.insert(36, mk(32)); for k in [51, 52, 53] { buf.insert(k, mk(16)); }
         buf.insert(16, mk(ntiles as u64 * 4)); buf.insert(17, mk(ntiles as u64 * 4)); buf.insert(21, mk(ntiles as u64 * 8));
         buf.insert(40, mk(16));
         buf.insert(43, mk(32));   // tall cells: off (T = 0) until enable_tall
@@ -249,7 +256,7 @@ impl FlipSim {
             last_dt: 0.0, mg_size: 0, mg_dense: Vec::new(), mg_top: 0, only_tiles: false, stats_ring, stats: None, ovf_total: 0, stage: None, pending: None, fstage: None, fmapped: false, grew: 0, ww_only: false, tall_t0: 0, prof: None, prof_acc: Vec::new(), prof_steps: 0,
             vel_g_on: false, nb_init: 0, nb_fills: Vec::new(), nb_vols: Vec::new(), nb_band: None, ocean: None, ocean_w: Vec::new(), nb_on: false, init_step: 0,
             spray_cap: 0, spr_disp_max: 0, deep_on: false, air_dims: None, ndrip: 0, drip_sig: vec![u32::MAX], drip_cache: HashMap::new(),
-            air_real: false, air_feel: false, air_iters: 20, air_on_step: false, drip_on_step: false, spr_on_step: false, ab: l.b,
+            air_real: false, air_feel: false, air_iters: 20, air_on_step: false, fog_on: false, fog_stage: None, fog_wait: 0.0, fog_now: false, drip_on_step: false, spr_on_step: false, ab: l.b,
             sctl_stage: None, sstage: None, dstage: None,
         };
         // slot k starts as particle k (written in chunks: 44M ids are 176 MB)
@@ -534,6 +541,8 @@ impl FlipSim {
         let n = self.l.n.map(|v| v.div_ceil(r) + 1);
         let cells = n[0] * n[1] * n[2];
         for k in [32, 35, 34] { self.buf.insert(k, Self::mk(gpu, cells as u64 * 16)); }
+        for k in [51, 52] { self.buf.insert(k, Self::mk(gpu, cells as u64 * 8 * 8)); }
+        self.buf.insert(53, Self::mk(gpu, cells as u64 * 8 * 4));
         self.air_dims = Some(AirDims { n, cells, h: self.l.h * r as f32 });
         self.groups_dirty = true;
     }
@@ -842,6 +851,15 @@ impl FlipSim {
         self.set_f(440, airo.map_or(0.0, |a| a.size)); self.set_f(441, airo.map_or(3.0, |a| if a.oct != 0.0 { a.oct } else { 3.0 }));
         self.set_f(442, airo.map_or(0.0, |a| a.speed)); self.set_f(443, if self.air_real { airo.map_or(0.0, |a| a.swirl) } else { 0.0 });
         self.set_f(444, self.air_real as u32 as f32); self.set_f(445, self.air_feel as u32 as f32); self.set_f(446, o.drag); self.set_f(447, self.air_iters as f32);
+        self.fog_on = airo.is_some_and(|a| a.fog) && ad.is_some();
+        self.set_f(448, self.fog_on as u32 as f32); self.set_f(449, airo.map_or(0.0, |a| a.fog_add)); self.set_f(450, airo.map_or(0.0, |a| a.fog_fade));
+        self.pu[451] = cols[..nc].iter().take(32).enumerate().fold(0u32, |m, (k, c)| m | (c.smoke as u32) << k);
+        self.set_f(452, airo.map_or(0.0, |a| a.lift)); self.set_f(453, airo.map_or(0.0, |a| a.heat_fade)); self.set_f(454, airo.map_or(0.0, |a| a.smoke));
+        // about once a 48th of a second: the air moves slowly next to the water's substeps
+        self.fog_wait += dt;
+        self.fog_now = self.fog_on && self.fog_wait >= 1.0 / 48.0;
+        self.set_f(455, self.fog_wait);
+        if self.fog_now { self.fog_wait = 0.0; }
         let area = o.spr.map_or([1.0, 1.0], |s| s.area);
         self.ab = ww_area_box(&b, area[0], area[1]);
         let ab = self.ab;
@@ -968,6 +986,10 @@ impl FlipSim {
             }
             dispatch(ps, "airCopy", na);
             if self.air_feel { dispatch(ps, "airDragW", n); }   // the water feels this step's air
+            if self.fog_on {
+                indirect(ps, "fogSplat", 112);
+                if self.fog_now { dispatch(ps, "fogStep", na * 8); dispatch(ps, "fogCopy", na * 8); }
+            }
             mk(ps, "air");
         }
         // whitewater: sampling the water at each point, moving the points, and making new ones from the water
@@ -1166,6 +1188,16 @@ impl FlipSim {
         let p: Vec<f32> = bytemuck::cast_slice(&Self::read_into(gpu, &self.buf[&28], 0, n * 16, &mut self.sstage, None)).to_vec();
         let v: Vec<f32> = bytemuck::cast_slice(&Self::read_into(gpu, &self.buf[&29], 0, n * 16, &mut self.sstage, None)).to_vec();
         Some((n as usize, p, v))
+    }
+
+    /// The mist and smoke volume as a frame keeps it: grid size, cell size, density as bytes (the square root, so thin mist keeps its steps).
+    pub fn read_fog(&mut self, gpu: &Gpu) -> Option<([u32; 3], f32, Vec<u8>)> {
+        if !self.fog_on { return None; }
+        let a = self.air_dims?;
+        let cells = a.cells as u64 * 8;
+        let raw = Self::read_into(gpu, &self.buf[&51], 0, cells * 8, &mut self.fog_stage, None);
+        let v: &[f32] = bytemuck::cast_slice(&raw);
+        Some((a.n.map(|x| x * 2), a.h * 0.5, v.chunks_exact(2).map(|c| (c[0].clamp(0.0, 1.0).sqrt() * 255.0).round() as u8).collect()))
     }
 
     /// The deep water points of the last step (narrow band look; x y z, 4096 + speed), the empty ones dropped (readDeep).

@@ -159,6 +159,7 @@ pub fn encode(f: &FrameOut, b0: Box3, hist: &[Prev]) -> std::io::Result<Vec<u8>>
             for k in 0..6 { streams.push(plane(dp, 6, k)); }
             streams.push(ds.to_vec());
         }
+        if let Some((_, _, d)) = f.fog { streams.push(d.to_vec()); }
     }
     let comp: Vec<Vec<u8>> = streams.par_iter().map(|s| if s.is_empty() { Ok(Vec::new()) } else { zstd::bulk::compress(s, LEVEL) }).collect::<Result<_, _>>()?;
     let mut w = Vec::with_capacity(comp.iter().map(Vec::len).sum::<usize>() + 256);
@@ -171,6 +172,7 @@ pub fn encode(f: &FrameOut, b0: Box3, hist: &[Prev]) -> std::io::Result<Vec<u8>>
     for v in f.objs { head.extend_from_slice(&v.to_le_bytes()); }
     head.extend_from_slice(&ns.to_le_bytes());
     head.extend_from_slice(&nd.to_le_bytes());
+    if let Some((n, h, _)) = f.fog { for v in n { head.extend_from_slice(&v.to_le_bytes()); } head.extend_from_slice(&h.to_le_bytes()); }
     for c in &comp { head.extend_from_slice(&(c.len() as u32).to_le_bytes()); }
     w.extend_from_slice(&f.n.to_le_bytes());
     w.extend_from_slice(&flags.to_le_bytes());
@@ -200,14 +202,15 @@ pub fn read_head(b: &[u8], o: &mut usize, nobj: usize, q0: Option<[u8; 3]>) -> O
     }
     let objs = r.take(nobj * 24)?;
     let (ns, nd) = (r.u32()?, r.u32()?);
-    let lens = (0..if compact { STREAMS } else { STREAMS16 }).map(|_| r.u32()).collect::<Option<Vec<_>>>()?;
+    let fog = if fl & FLAG_FOG != 0 { Some(FogIndex { n: [r.u32()?, r.u32()?, r.u32()?], h: r.f32()?, d: 0..0 }) } else { None };
+    let lens = (0..if compact { STREAMS } else { STREAMS16 } + fog.is_some() as usize).map(|_| r.u32()).collect::<Option<Vec<_>>>()?;
     if compact && q.is_none() { return None; }
     let water = Points { n, ..Default::default() };
     let ww = (ns > 0).then(|| WwPoints { n: ns, pos: 0..0, pk: 0..0 });
     let deep = (nd > 0).then(|| Points { n: nd, ..Default::default() });
     let data = r.o;
     *o = end;
-    Some(Head { fr: FrameIndex { flags: fl, q, own_box, objs, water, ww, deep, packed: Some(data..end) }, lens, data, end })
+    Some(Head { fr: FrameIndex { flags: fl, q, own_box, objs, water, ww, deep, fog, packed: Some(data..end) }, lens, data, end })
 }
 
 /// A version 2 frame's bytes from a stored frame. hist as for encode (what its flags say it needs).
@@ -218,7 +221,10 @@ pub fn decode(b: &[u8], h: &Head, b0: Box3, hist: &[Prev], objs: &[f32]) -> std:
     let (n, ns, nd) = (fr.water.n as usize, fr.ww.as_ref().map_or(0, |w| w.n as usize), fr.deep.as_ref().map_or(0, |d| d.n as usize));
     let compact = fr.q.is_some();
     let q = fr.q.unwrap_or(Q16);
-    let size = |i: usize| if compact { match i { 0..=10 => n, 11..=18 => ns, _ => nd } } else { match i { 0..=10 => n, 11..=20 => ns, _ => nd } };
+    let fogv = |s: &'_ Vec<Vec<u8>>| -> Option<Vec<u8>> { fr.fog.as_ref().map(|_| s.last().unwrap().clone()) };
+    let nf = fr.fog.as_ref().map_or(0, |g| g.n[0] as usize * g.n[1] as usize * g.n[2] as usize);
+    let (last, count) = (blobs.len() - 1, if compact { STREAMS } else { STREAMS16 });
+    let size = |i: usize| if i == last && last == count { nf } else if compact { match i { 0..=10 => n, 11..=18 => ns, _ => nd } } else { match i { 0..=10 => n, 11..=20 => ns, _ => nd } };
     let s: Vec<Vec<u8>> = blobs.par_iter().enumerate().map(|(i, c)| if c.is_empty() { Ok(Vec::new()) } else { zstd::bulk::decompress(c, size(i)) }).collect::<Result<_, _>>()?;
     let bx = fr.own_box.unwrap_or(b0);
     let (p1, p2) = (hist.first(), hist.get(1));
@@ -247,15 +253,17 @@ pub fn decode(b: &[u8], h: &Head, b0: Box3, hist: &[Prev], objs: &[f32]) -> std:
         let dp = if nd > 0 { woven(&s[21..27]) } else { Vec::new() };
         let mut o = Vec::new();
         let fm = fr.flags & FLAG_LEVELS != 0;
+        let fd = fogv(&s);
         frame_bytes(&mut o, &FrameOut { q: None, own_box: None, ww_baked: fr.flags & FLAG_WW_BAKED != 0, objs, n: fr.water.n, pos: &p6, spd: &sf, fm: fm.then_some(&s[10][..]),
-            ww: (ns > 0).then_some((ns as u32, &wp[..], &pk[..])), deep: (nd > 0).then_some((nd as u32, &dp[..], &s[27][..])) })?;
+            ww: (ns > 0).then_some((ns as u32, &wp[..], &pk[..])), deep: (nd > 0).then_some((nd as u32, &dp[..], &s[27][..])), fog: fr.fog.as_ref().map(|g| (g.n, g.h, &fd.as_ref().unwrap()[..])) })?;
         return Ok(o);
     }
     let (wpos, wpk) = if ns > 0 { (unsorted(&s[11..15]), woven(&s[15..19])) } else { (Vec::new(), Vec::new()) };
     let pk: Vec<u32> = wpk.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
     let (dpos, dsf) = if nd > 0 { (unsorted(&s[19..23]), woven(&s[23..25])) } else { (Vec::new(), Vec::new()) };
     let mut o = Vec::new();
+    let fd = fogv(&s);
     frame_bytes(&mut o, &FrameOut { q: Some(q), own_box: fr.own_box, ww_baked: fr.flags & FLAG_WW_BAKED != 0, objs, n: fr.water.n, pos: bytemuck::cast_slice(&pos), spd: &sf, fm: None,
-        ww: (ns > 0).then_some((ns as u32, &wpos[..], &pk[..])), deep: (nd > 0).then_some((nd as u32, &dpos[..], &dsf[..])) })?;
+        ww: (ns > 0).then_some((ns as u32, &wpos[..], &pk[..])), deep: (nd > 0).then_some((nd as u32, &dpos[..], &dsf[..])), fog: fr.fog.as_ref().map(|g| (g.n, g.h, &fd.as_ref().unwrap()[..])) })?;
     Ok(o)
 }

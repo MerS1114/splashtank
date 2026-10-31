@@ -241,8 +241,10 @@ pub fn run(gpu: &Gpu, c: &Cache, desc: &Desc, o: &DetailOpts, out: &Path, mut pr
     let mut w = CacheWriter::create(out, &meta, 64 * 1024 + meta.to_string().len()).map_err(|e| format!("Could not write {}: {e}", out.display()))?;
     let write = |w: &mut CacheWriter, f: usize, p: crate::bake::Packed| -> Result<u32, String> {
         let ww_baked = src[f].flags & splash_format::cache::FLAG_WW_BAKED != 0;
+        let fogv = c.view(f);
         w.append(&FrameOut { q: p.q, own_box: p.own_box, ww_baked, objs: &p.objs, n: p.n, pos: &p.pos, spd: &p.spd, fm: p.fm.as_deref(),
-            ww: p.ww.as_ref().map(|(n, pos, pk)| (*n, &pos[..], &pk[..])), deep: p.deep.as_ref().map(|(n, pos, s)| (*n, &pos[..], &s[..])) })
+            ww: p.ww.as_ref().map(|(n, pos, pk)| (*n, &pos[..], &pk[..])), deep: p.deep.as_ref().map(|(n, pos, s)| (*n, &pos[..], &s[..])),
+            fog: { let g = fogv.fr.fog.as_ref(); g.map(|g| (g.n, g.h, fogv.slice(&g.d))) } })
             .map_err(|e| format!("Writing the cache failed: {e}"))?;
         Ok(p.n)
     };
