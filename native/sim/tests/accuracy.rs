@@ -438,3 +438,86 @@ fn ocean_diag() {
         eprintln!("f{f}: {} particles, mean height {my:.3}, far surface {top:.3}, fastest {:.1} units/s ({:.0} m/s) at {:.2} {:.2} {:.2}, 99.9% under {:.1}", p.len(), fast.0, fast.0 * d.scale, fast.1[0], fast.1[1], fast.1[2], sp[sp.len() * 999 / 1000].0);
     }
 }
+
+/// The narrow band against full depth (particles everywhere): half a tank of water let go. Water with particles only near the surface should
+/// slosh the same and settle at the same level. Prints the surface at both ends over time; the level is checked against the volume.
+#[test]
+fn narrow_band() {
+    let _turn = one_at_a_time();
+    let gpu = Gpu::new().unwrap();
+    let (w, h, dd, depth) = (3.0f64, 2.0f64, 1.5f64, 1.2f64);
+    let want = depth * 0.5;
+    let spc = 0.02f32;
+    let mut series = Vec::new();
+    for (name, band) in [("full depth", None), ("narrow band", Some(3.0))] {
+        let mut sc = scene(w, h, dd, json!([{ "t": "box", "fx0": 0, "fx1": 0.5, "y0": 0, "y1": depth, "fz0": 0, "fz1": 1 }]), 9.8);
+        if let Some(b) = band { sc["solver"]["nbOn"] = json!(true); sc["solver"]["nbBand"] = json!(b); }
+        sc["solver"]["ballistic"] = json!(false);
+        let d = desc(&sc, spc);
+        let mut s = Session::new(&gpu, &d, &|_| {}, None).unwrap();
+        s.seed(&gpu);
+        let b = s.lay.b;
+        let cell = s.lay.h;
+        let mut line = Vec::new();
+        let mut end = 0.0;
+        for k in 1..=20 {
+            frames(&gpu, &mut s, 30);
+            let (p, _) = read(&gpu, &mut s);
+            // the surface over a strip at each end of the tank: the mean over columns of the highest particle
+            let top = |lo: f32, hi: f32| {
+                let n = ((hi - lo) / cell) as usize + 1;
+                let mut t = vec![0f32; n];
+                for q in p.iter().filter(|q| q[0] >= lo && q[0] < hi) { let i = ((q[0] - lo) / cell) as usize; t[i] = t[i].max(q[1] - b.y0); }
+                t.iter().sum::<f32>() / n as f32
+            };
+            let (l, r) = (top(b.x0, b.x0 + 0.4), top(b.x1 - 0.4, b.x1));
+            line.push((l, r));
+            if k == 20 { end = (top(b.x0, b.x1) as f64 / want - 1.0) * 100.0; }
+        }
+        eprintln!("narrow_band {name}: level {end:.1}% off the volume after 10 s, {} particles\n  left/right every 0.5 s: {}", s.sim.n, line.iter().map(|v| format!("{:.2}/{:.2}", v.0, v.1)).collect::<Vec<_>>().join(" "));
+        series.push((line, end));
+    }
+    let diff = series[0].0.iter().zip(&series[1].0).map(|(a, b)| ((a.0 - b.0).abs() + (a.1 - b.1).abs()) as f64 / 2.0).sum::<f64>() / 20.0;
+    eprintln!("narrow_band: surface differs from full depth by {diff:.3} m on average");
+    assert!(diff < 0.2 && series[1].1.abs() < 5.0, "the narrow band has come apart from full depth: {diff:.3} m, level {:.1}%", series[1].1);
+}
+
+/// A deep ocean with tall cells against without them: the same surface, height at a few places over time.
+#[test]
+fn tall_ocean() {
+    let _turn = one_at_a_time();
+    let gpu = Gpu::new().unwrap();
+    let all: Value = serde_json::from_str(include_str!("../../app/src/scenes.json")).unwrap();
+    let mut base = all["scenes"]["Ocean"].clone();
+    base["box"]["size"]["h"] = json!(6.4);
+    base["ocean"]["level"] = json!(0.75);
+    base["objs"] = json!([]);
+    base["solver"]["sprOn"] = json!(false);
+    base["solver"]["airOn"] = json!(false);
+    let mut runs = Vec::new();
+    for tall in [false, true] {
+        let mut sc = base.clone();
+        sc["solver"]["tallCells"] = json!(tall);
+        let d = desc_from_scene(&sc, &BakeOpts { spacing: 0.04, seconds: Some(6.0), detail: Some(1.0), ..Default::default() }).unwrap();
+        let mut s = Session::new(&gpu, &d, &|m| eprintln!("{m}"), None).unwrap();
+        s.seed(&gpu);
+        let b = s.lay.b;
+        let t0 = std::time::Instant::now();
+        let mut line = Vec::new();
+        for _ in 0..24 {
+            for _ in 0..6 { let (sub, ov) = s.step_frame(&gpu, |_, _, _| Ok(false)).unwrap().unwrap(); let n = s.sim.readback_begin(&gpu); s.finish_frame(&gpu, n, sub, ov, 0); let mut buf = Vec::new(); s.sim.readback_end(&gpu, &mut buf); }
+            let (p, _) = read(&gpu, &mut s);
+            // the top of the water in three patches: the middle, half way out, and near the side
+            let top = |cx: f32, cz: f32| p.iter().filter(|q| (q[0] - cx).abs() < 0.2 && (q[2] - cz).abs() < 0.2).map(|q| q[1]).fold(0f32, f32::max);
+            line.push([top(0.0, 0.0), top(b.x1 * 0.5, b.z1 * 0.3), top(b.x1 * 0.8, b.z0 * 0.8)]);
+        }
+        eprintln!("tall_ocean tall {tall}: {:.1} s, tall row {}", t0.elapsed().as_secs_f32(), s.sim.tall_t0);
+        runs.push(line);
+    }
+    for k in 0..3 {
+        let d = runs[0].iter().zip(&runs[1]).map(|(a, b)| (a[k] - b[k]).abs() as f64).sum::<f64>() / 24.0;
+        let swing = runs[0].iter().map(|a| a[k]).fold(0f32, f32::max) - runs[0].iter().map(|a| a[k]).fold(9f32, f32::min);
+        eprintln!("tall_ocean patch {k}: heights differ by {d:.3} on average, waves there swing {swing:.3}");
+        assert!(d < 0.03, "tall cells change the ocean's surface: {d:.3}");
+    }
+}

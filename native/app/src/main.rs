@@ -12,6 +12,8 @@
 //!       the solver benchmark: simulates up to --at seconds, then times --steps steps stage by stage on the GPU.
 //!   splashtank --benchmark-set [report.txt] [--steps 60]
 //!       the benchmark on the fixed set of scenes (SPLASH_BACKEND=dx12 or vulkan picks the graphics API).
+//!   splashtank --export bake.splc --out folder [--no-mesh]
+//!       PLY files for Blender: points, whitewater and the water's surface as a mesh, one file a frame, in metres.
 //!   splashtank --resume out.splc
 //!       carries on a bake that stopped, from its last checkpoint.
 //!   splashtank --bake-whitewater in.splc out.splc [--scene scene.json]
@@ -27,6 +29,7 @@ mod edit;
 mod editmode;
 mod tf;
 mod gpu;
+mod export;
 mod gui;
 mod render;
 
@@ -84,7 +87,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     if args.iter().any(|a| a.starts_with("--")) { attach_console(); }
-    if args.iter().any(|a| a == "--bake" || a == "--bake-whitewater" || a == "--detail-pass" || a == "--resume" || a == "--benchmark" || a == "--benchmark-set") {
+    if args.iter().any(|a| a == "--bake" || a == "--bake-whitewater" || a == "--detail-pass" || a == "--resume" || a == "--benchmark" || a == "--benchmark-set" || a == "--export") {
         if let Err(e) = bake_cli::run(&args) { eprintln!("{e}"); std::process::exit(1); }
         return;
     }

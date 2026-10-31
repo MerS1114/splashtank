@@ -561,7 +561,7 @@ impl App {
             let j = self.worker.job.lock().unwrap();
             (j.busy, j.done, j.finishing, j.released, j.out.clone(), j.result.as_ref().is_some_and(|r| !r.1))
         };
-        let Some(out) = out else { return; };
+        let Some(out) = out.filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("splc"))) else { self.was_busy = busy; return; };
         // the frames so far, read on a thread
         if let Some(rx) = &self.follow_rx {
             if let Ok((p, c)) = rx.try_recv() { self.follow_rx = None; if let (Some(c), false) = (c, fin) { self.show_bake(&p, c); } }
@@ -1535,6 +1535,8 @@ impl App {
         if ui.add_enabled(self.doc.scene.is_some(), egui::Button::new("Save scene as…")).clicked() { ui.close(); self.save_scene(true); }
         ui.separator();
         if ui.add_enabled(self.bake_cache().is_some() && self.saving.is_none() && !self.worker.busy(), egui::Button::new("Save bake…")).on_hover_text("Keep the bake shown under a name and place of your own (it is moved out of the bake folder)").clicked() { ui.close(); self.save_bake(); }
+        if ui.add_enabled(self.bake_cache().is_some() && !self.worker.busy(), egui::Button::new("Export for Blender…")).on_hover_text("Each frame as PLY files in a folder, in metres: water points, whitewater points and the water's surface as a mesh, with a script that loads the mesh sequence into Blender").clicked() { ui.close(); self.export_bake(true); }
+        if ui.add_enabled(self.bake_cache().is_some() && !self.worker.busy(), egui::Button::new("Export points only…")).on_hover_text("As Export for Blender, without the surface mesh: much quicker").clicked() { ui.close(); self.export_bake(false); }
         if ui.add_enabled(self.bake_cache().is_some(), egui::Button::new("Bake report…")).on_hover_text("The bake's settings, its measurements for every frame and the scene, as a file to send").clicked() { ui.close(); self.save_report(); }
         if ui.button("Open the bake folder").on_hover_text(self.bake.folder.display().to_string()).clicked() {
             ui.close();
@@ -1572,6 +1574,14 @@ impl App {
         self.saving = Some(rx);
         self.path = Some(from);
         self.msg = format!("Saving the bake as {}…", to.display());
+    }
+
+    /// Export for Blender: on the worker, with its progress in the Bake tab.
+    fn export_bake(&mut self, mesh: bool) {
+        let Some(inp) = self.path.clone().filter(|_| self.bake_cache().is_some()) else { return; };
+        let Some(dir) = rfd::FileDialog::new().set_title("Export the bake into this folder").pick_folder() else { return; };
+        self.tab = Tab::Bake;
+        self.worker.start("Exporting for Blender".into(), crate::bake_cli::Task { kind: crate::bake_cli::Kind::Export { mesh }, inp: Some(inp), scene: Value::Null, o: Default::default(), out: dir });
     }
 
     /// The bake report (the page's): settings, every frame's measurements and the scene, as a file.

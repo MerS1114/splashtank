@@ -25,6 +25,8 @@ pub enum Kind {
     Detail(DetailOpts),
     /// the live sim: a bake of the scene whose frames go to the window (the header, then one message a frame) instead of a file
     Live(std::sync::mpsc::Sender<Vec<u8>>),
+    /// the bake at inp as PLY files for Blender in the folder out (mesh: the surface too)
+    Export { mesh: bool },
     /// the solver benchmark: the scene simulated up to at (s), then steps steps timed stage by stage (nothing is written)
     Bench { at: f32, steps: u32, out: Arc<std::sync::Mutex<Option<bake::Bench>>> },
 }
@@ -92,6 +94,13 @@ pub fn execute(t: &Task, gpu: &mut Option<Gpu>, report: &mut dyn FnMut(Note) -> 
             let started = serde_json::json!({ "scene": t.scene, "waterOnly": water_only, "opts": { "spacing": o.spacing, "seconds": o.seconds, "detail": o.detail, "maxPoints": o.max_points, "accurate": o.accurate } });
             bake_now(gpu, &desc, o, &t.out, bake::RunOpts { checkpoint_secs: *checkpoint_secs, resume: false, started_with: started, ..Default::default() }, report)?;
         }
+        Kind::Export { mesh } => {
+            let inp = t.inp.as_ref().ok_or("No bake to export.")?;
+            let c = splash_format::Cache::open(inp).map_err(|e| format!("{}: {e}", inp.display()))?;
+            let t0 = std::time::Instant::now();
+            let m = crate::export::run(&c, &t.out, *mesh, |f, frames, n| report(Note::Frame(&Progress { f: f as u32, frames: frames as u32, n, elapsed: t0.elapsed().as_secs_f32(), sub: 0, frame_ms: 0.0, wait: 0.0 })))?;
+            report(Note::Line(m));
+        }
         Kind::Bench { at, steps, out } => {
             let desc = desc_of(&t.scene, &t.o, false)?;
             let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -157,6 +166,12 @@ fn bake_now(gpu: &Gpu, desc: &Desc, o: &BakeOpts, out: &Path, mut ro: bake::RunO
 /// The command line: builds the task from the arguments and prints its progress.
 pub fn run(args: &[String]) -> Result<(), String> {
     let flag = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
+    if let Some(inp) = flag("--export") {
+        let dir = flag("--out").ok_or("--export needs --out folder")?;
+        let t = Task { kind: Kind::Export { mesh: !args.iter().any(|a| a == "--no-mesh") }, inp: Some(PathBuf::from(inp)), scene: Value::Null, o: BakeOpts::default(), out: PathBuf::from(dir) };
+        let mut gpu = None;
+        return execute(&t, &mut gpu, &mut |n| { if let Note::Line(s) = n { eprintln!("{s}"); } true });
+    }
     if args.iter().any(|a| a == "--benchmark-set") {
         let out = args.iter().position(|a| a == "--benchmark-set").and_then(|i| args.get(i + 1)).filter(|v| !v.starts_with("--")).map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("benchmark-set.txt"));
