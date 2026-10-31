@@ -344,7 +344,7 @@ pub fn estimate_bytes(max_n: u64, apic: bool, ratio: f32, spray_cap: u64, sort: 
     let rows = if apic { 48 } else { 0 };
     let per = 16 + 16 + 4 + 16 + rows + if sort { 16 + 16 + 4 + rows } else { 0 };
     let blocks = (max_n as f64 / (ratio as f64).powi(3) / 512.0 * 2.5).ceil() as u64;
-    max_n * per + blocks * (512 * 72 + 12) + spray_cap * (16 * 4 + 4) + (300 << 20)
+    max_n * per + blocks * (512 * 120 + 12) + spray_cap * (16 * 4 + 4) + (300 << 20)
 }
 
 /// What the bake loop needs from the frame writer: frames to write, or a request to write out everything so far and say where the file

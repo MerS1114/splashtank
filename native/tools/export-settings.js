@@ -76,6 +76,11 @@ for (const r of out.rows) if (r.key === 'nbOn') r.label = 'Enabled';
   out.rows.push({ group: ph, kind: 'check', label: 'Sharp water surface', key: 'ghost', path: ['solver', 'ghost'], def: true,
     tip: 'The pressure meets the air where the water\'s surface really is inside each cell, worked out from the particles every step, instead of at the middle of the next cell. Waves keep their height and timing (a standing wave lost 13% of its height a period without it, 2.7% with it) and splashes rise more freely. Costs about a tenth more time. The web page ignores this setting.' });
 }
+{
+  const ph = out.groups.findIndex((g) => g.id === 'phys');
+  out.rows.push({ group: ph, kind: 'check', label: 'Smooth walls', key: 'smoothWalls', path: ['solver', 'smoothWalls'], def: true,
+    tip: 'Objects cut through grid cells smoothly, so slopes and curves stay slopes and curves to the water, instead of stairs that catch it. The web page ignores this setting.' });
+}
 // native defaults that differ from the page's: the grouped transfer (on: with the finer sort it took particle to grid from 6.8 to 2.2 ms a
 // step on Mer's ocean, the same water; the page left it off)
 for (const r of out.rows) if (r.key === 'p2gWin') {

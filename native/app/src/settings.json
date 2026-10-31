@@ -1266,6 +1266,18 @@
    ],
    "def": true,
    "tip": "The pressure meets the air where the water's surface really is inside each cell, worked out from the particles every step, instead of at the middle of the next cell. Waves keep their height and timing (a standing wave lost 13% of its height a period without it, 2.7% with it) and splashes rise more freely. Costs about a tenth more time. The web page ignores this setting."
+  },
+  {
+   "group": 1,
+   "kind": "check",
+   "label": "Smooth walls",
+   "key": "smoothWalls",
+   "path": [
+    "solver",
+    "smoothWalls"
+   ],
+   "def": true,
+   "tip": "Objects cut through grid cells smoothly, so slopes and curves stay slopes and curves to the water, instead of stairs that catch it. The web page ignores this setting."
   }
  ],
  "looks": {

@@ -89,7 +89,12 @@ struct PackU { nW: u32, nS: u32, nD: u32, wFromPos: u32, srcS: u32, srcD: u32, o
 // the water's surface from the particles (surfSplat, surfPhi): per cell the summed weights and weighted offsets of the particles around its
 // centre (4 numbers, fixed point), and the distance from its centre to the surface in cells (negative in water)
 @group(0) @binding(46) var<storage, read_write> sacc: array<atomic<i32>>;
-@group(0) @binding(47) var<storage, read_write> sphi: array<f32>;   // the fastest particle at the end of a frame (speedMax)   // the sort's second copy of the APIC rows   // APIC: per particle three rows (x, y, z velocity), each how that velocity changes across space
+@group(0) @binding(47) var<storage, read_write> sphi: array<f32>;
+// smooth walls (cutFaces): the open share of each face, three a cell like the velocities, the solid's velocity across it, and the distance to
+// the nearest object at each cell's low corner. Bit 15 of ctype marks a cell an object cuts through.
+@group(0) @binding(48) var<storage, read_write> fopen: array<f32>;
+@group(0) @binding(49) var<storage, read_write> fsolid: array<f32>;
+@group(0) @binding(50) var<storage, read_write> cphi: array<f32>;   // the fastest particle at the end of a frame (speedMax)   // the sort's second copy of the APIC rows   // APIC: per particle three rows (x, y, z velocity), each how that velocity changes across space
 @group(0) @binding(38) var<uniform> PK: PackU;      // per drip sample: (local position, collider), (local normal, wetness)   // the grid velocity kept from the last step (narrow band)
 
 fn colSize(k: u32) -> f32 { let s = cols[k * 8u + 5u].w; return select(1.0, s, s > 0.0); }
@@ -190,7 +195,7 @@ fn colAt(p: vec3<f32>) -> i32 {
 fn cellCenter(i: i32, j: i32, k: i32) -> vec3<f32> { return vec3<f32>(P.x0 + (f32(i) + 0.5) * P.h, P.y0 + (f32(j) + 0.5) * P.h, P.z0 + (f32(k) + 0.5) * P.h); }
 fn colAtCell(i: i32, j: i32, k: i32) -> i32 {
   if (i < 0 || j < 0 || k < 0 || i >= i32(P.nx) || j >= i32(P.ny) || k >= i32(P.nz)) { return -1; }
-  return i32((ctype[cellIdx(i, j, k)] >> 8u) & 0xffu) - 1;
+  return i32((ctype[cellIdx(i, j, k)] >> 8u) & 0x7fu) - 1;
 }
 fn particleCell(p: vec3<f32>) -> vec3<i32> {
   return clamp(vec3<i32>(floor((p - vec3<f32>(P.x0, P.y0, P.z0)) * P.ih)), vec3<i32>(0), vec3<i32>(i32(P.nx) - 1, i32(P.ny) - 1, i32(P.nz) - 1));
@@ -239,7 +244,7 @@ fn sampleAxis(p: vec3<f32>, axis: u32) -> f32 {
 // Narrow band: particles live only in a band of cells under the surface. A depth field (phi, in cells, negative in water) is kept
 // per cell in the top 16 bits of ctype; deep water below the band has no particles and moves with the grid velocity, which is kept
 // from step to step in velG.
-fn colBits(c: u32) -> u32 { return (ctype[c] >> 8u) & 0xffu; }
+fn colBits(c: u32) -> u32 { return (ctype[c] >> 8u) & 0x7fu; }
 fn phiOf(c: u32) -> f32 { return 8.0 - f32(ctype[c] >> 16u) / 4096.0; }
 fn phiPut(c: u32, v: f32) { let q = u32(clamp(round((8.0 - v) * 4096.0), 0.0, 65535.0)); ctype[c] = (ctype[c] & 0xffffu) | (q << 16u); }
 fn inDom(p: vec3<i32>) -> bool { return p.x >= 0 && p.y >= 0 && p.z >= 0 && p.x < i32(P.nx) && p.y < i32(P.ny) && p.z < i32(P.nz); }

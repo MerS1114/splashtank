@@ -122,7 +122,7 @@ fn tallCheck(@builtin(global_invocation_id) g: vec3<u32>) {
   // air, an object (a solid cell with a collider; the ocean's boundary along the sides is solid too, but it is water moving with the
   // waves and may sit over tall cells), the surface or particles
   let ty = ctype[c] & 0xffu;
-  if (ty == 0u || (ty == 2u && (ctype[c] & 0xff00u) != 0u) || (ty == 1u && phiOf(c) > -2.0) || atomicLoad(&cnt[c]) > 0) { tall[2] = 1.0; }
+  if (ty == 0u || (ty == 2u && (ctype[c] & 0x7f00u) != 0u) || (ty == 1u && phiOf(c) > -2.0) || atomicLoad(&cnt[c]) > 0) { tall[2] = 1.0; }
 }
 // look only: points in the tall cells (deep water), as deepPick does for ordinary deep cells
 @compute @workgroup_size(256)

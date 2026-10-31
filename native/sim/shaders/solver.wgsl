@@ -125,6 +125,62 @@ fn solidBuild(@builtin(global_invocation_id) g: vec3<u32>) {
   let a = acell(gid1(g)); if (!a.ok) { return; }
   ctype[a.c] = (ctype[a.c] & 0xffff00ffu) | (u32(colAt(cellCenter(a.p.x, a.p.y, a.p.z)) + 1) << 8u);
 }
+// Smooth walls (Batty, Bertails and Bridson 2007; Houdini's Voxel Face Area): a face of a cell is open by a share, from the objects' distance
+// at its four corners, instead of a whole cell being solid or not, which made slopes and curves into stairs that caught the water. Pressure
+// and divergence are weighted by the open share; the closed share moves with the object.
+const CUT: u32 = 0x8000u;
+fn cphiAt(q: vec3<i32>) -> f32 { if (!inDom(q) || !hasStorage(q)) { return 1.0; } return cphi[cellIdx(q.x, q.y, q.z)]; }
+@compute @workgroup_size(256)
+fn cutCorners(@builtin(global_invocation_id) g: vec3<u32>) {
+  let a = acell(gid1(g)); if (!a.ok) { return; }
+  let p = vec3<f32>(P.x0, P.y0, P.z0) + vec3<f32>(a.p) * P.h;
+  var d = 1.0;
+  for (var k = 0u; k < P.ncols; k++) { if (colNear(k, p)) { d = min(d, (sdfEval(k, p).x - P.q0) * P.ih); } }
+  cphi[a.c] = d;
+}
+// the open share of a face from its corners a, b (one edge), c, d (the other), sampled over it
+fn openShare(a: f32, b: f32, c: f32, d: f32) -> f32 {
+  var s = 0.0;
+  let w = max(max(abs(a - b), abs(c - d)), max(abs(a - c), abs(b - d))) / 4.0 + 1.0e-5;
+  for (var q = 0u; q < 16u; q++) {
+    let u = (f32(q & 3u) + 0.5) / 4.0; let v = (f32(q >> 2u) + 0.5) / 4.0;
+    s += clamp(0.5 + mix(mix(a, b, u), mix(c, d, u), v) / (2.0 * w), 0.0, 1.0);
+  }
+  let o = s / 16.0;
+  if (o < 0.02) { return 0.0; }
+  return max(o, 0.1);   // a sliver of a face would make the pressure stiff there
+}
+@compute @workgroup_size(256)
+fn cutFaces(@builtin(global_invocation_id) g: vec3<u32>) {
+  let a = acell(gid1(g)); if (!a.ok) { return; }
+  let p = a.p; let c = a.c;
+  let c0 = cphiAt(p); let cx = cphiAt(p + vec3<i32>(1, 0, 0)); let cy = cphiAt(p + vec3<i32>(0, 1, 0)); let cz = cphiAt(p + vec3<i32>(0, 0, 1));
+  let cxy = cphiAt(p + vec3<i32>(1, 1, 0)); let cxz = cphiAt(p + vec3<i32>(1, 0, 1)); let cyz = cphiAt(p + vec3<i32>(0, 1, 1)); let cxyz = cphiAt(p + vec3<i32>(1, 1, 1));
+  let lo = min(min(min(c0, cx), min(cy, cz)), min(min(cxy, cxz), min(cyz, cxyz)));
+  if (lo >= 0.0) {
+    ctype[c] = ctype[c] & ~CUT;
+    for (var ax = 0u; ax < 3u; ax++) { fopen[c * 3u + ax] = 1.0; }
+    return;
+  }
+  ctype[c] = ctype[c] | CUT;
+  fopen[c * 3u] = openShare(c0, cy, cz, cyz);
+  fopen[c * 3u + 1u] = openShare(c0, cx, cz, cxz);
+  fopen[c * 3u + 2u] = openShare(c0, cx, cy, cxy);
+  for (var ax = 0u; ax < 3u; ax++) {
+    let fp = facePos(p, ax);
+    var best = 1.0e9; var v = vec3<f32>(0.0);
+    for (var k = 0u; k < P.ncols; k++) { if (colNear(k, fp)) { let d = sdfEval(k, fp).x; if (d < best) { best = d; v = colSurfVel(k, fp); } } }
+    fsolid[c * 3u + ax] = v[ax];
+  }
+}
+// the open share of the lower face of cell q along axis (faces with no cell behind them are open)
+fn faceW(axis: u32, q: vec3<i32>) -> f32 { if (!inDom(q) || !hasStorage(q)) { return 1.0; } return fopen[cellIdx(q.x, q.y, q.z) * 3u + axis]; }
+// what crosses that face: the water's velocity through the open share, the object's through the rest
+fn faceFlux(axis: u32, q: vec3<i32>, cut: bool) -> f32 {
+  let f = faceIndex(axis, q.x, q.y, q.z);
+  if (!cut || !inDom(q) || !hasStorage(q)) { return gvR(f); }
+  let w = fopen[f]; return w * gvR(f) + (1.0 - w) * fsolid[f];
+}
 @compute @workgroup_size(256)
 fn classify(@builtin(global_invocation_id) g: vec3<u32>) {
   let a = acell(gid1(g)); if (!a.ok) { return; }
@@ -134,7 +190,8 @@ fn classify(@builtin(global_invocation_id) g: vec3<u32>) {
   let n = atomicLoad(&cnt[c]);
   let cx = cellCenter(a.p.x, a.p.y, a.p.z);
   if (!inDom(a.p)) { ty = 0u; }   // past the far walls: storage only, never fluid
-  else if ((sb & 0xff00u) != 0u) { ty = 2u; }
+  // smooth walls: a cell an object cuts through stays water while there is water in it, even with its centre just inside the object
+  else if ((sb & 0x7f00u) != 0u && !(n > 0 && (sb & CUT) != 0u)) { ty = 2u; }
   else if (P.ocean != 0u && layerW(cx) >= 0.5) { ty = select(0u, 2u, cx.y < oceanEta(cx.xz)); }   // the ocean's boundary: a wall moving with the waves, under their surface
   // water by depth: deep water has no particles. Fast water inside the band stays water if it was water and has no particles yet (deep
   // water an impact set moving, with the surface come near): left as air, the whole body under an impact vanished and the band fell in
@@ -193,8 +250,9 @@ fn divergence(@builtin(global_invocation_id) g: vec3<u32>) {
   let c = a.c;
   if ((ctype[c] & 0xffu) != 1u) { rhs[c] = 0.0; return; }
   let i = a.p.x; let j = a.p.y; let k = a.p.z;
-  let div = (gvR(faceIndex(0u, i + 1, j, k)) - gvR(faceIndex(0u, i, j, k)) + gvR(faceIndex(1u, i, j + 1, k)) - gvR(faceIndex(1u, i, j, k)) +
-             gvR(faceIndex(2u, i, j, k + 1)) - gvR(faceIndex(2u, i, j, k))) * P.ih;
+  let cut = (ctype[c] & CUT) != 0u; let q = a.p;
+  let div = (faceFlux(0u, q + vec3<i32>(1, 0, 0), cut) - faceFlux(0u, q, cut) + faceFlux(1u, q + vec3<i32>(0, 1, 0), cut) - faceFlux(1u, q, cut) +
+             faceFlux(2u, q + vec3<i32>(0, 0, 1), cut) - faceFlux(2u, q, cut)) * P.ih;
   // density correction: overfull cells push fluid out, and cells that are surrounded by fluid pull it back in when they are too sparse
   var interior = true;
   if (ctypeOf(i - 1, j, k) == 0u || ctypeOf(i + 1, j, k) == 0u || ctypeOf(i, j - 1, k) == 0u || ctypeOf(i, j + 1, k) == 0u || ctypeOf(i, j, k - 1) == 0u || ctypeOf(i, j, k + 1) == 0u) { interior = false; }
@@ -210,19 +268,24 @@ fn relax(c: u32, color: u32) {
   if (u32((i + j + k) & 1) != color) { return; }
   if ((ctype[c] & 0xffu) != 1u) { return; }
   let sn = presNbr(i, j, k);
-  if (sn.y < 0.5) { pres[c] = 0.0; return; }
+  if (sn.y < 1.0e-3) { pres[c] = 0.0; return; }
   let pg = (rhs[c] + sn.x) / sn.y;
   pres[c] = pres[c] + P.omega * (pg - pres[c]);
 }
 // the pressures of the six neighbours added up (x), and how many of them are not solid (y)
 fn presNbr(i: i32, j: i32, k: i32) -> vec2<f32> {
   var sum = 0.0; var nns = 0.0;
+  let me = vec3<i32>(i, j, k);
+  let cut = inDom(me) && (ctype[cellIdx(i, j, k)] & CUT) != 0u;
   for (var a = 0u; a < 6u; a++) {
-    var q = vec3<i32>(i, j, k);
+    var q = me;
     if (a == 0u) { q.x -= 1; } else if (a == 1u) { q.x += 1; } else if (a == 2u) { q.y -= 1; } else if (a == 3u) { q.y += 1; } else if (a == 4u) { q.z -= 1; } else { q.z += 1; }
     let ty = ctypeOf(q.x, q.y, q.z);
     if (ty == 2u) { continue; }
-    if (ty == 1u) { nns += 1.0; sum += presAt(q); } else { nns += 1.0 / faceTheta(vec3<i32>(i, j, k), q); }
+    // smooth walls: each neighbour counts by the open share of the face between
+    var w = 1.0;
+    if (cut) { w = faceW(a / 2u, select(me, q, (a & 1u) == 1u)); if (w <= 0.0) { continue; } }
+    if (ty == 1u) { nns += w; sum += w * presAt(q); } else { nns += w / faceTheta(me, q); }
   }
   return vec2<f32>(sum, nns);
 }
@@ -286,7 +349,7 @@ fn settleMark(@builtin(global_invocation_id) g: vec3<u32>) {
   let c = a.c; var ok = false;
   if ((ctype[c] & 0xffu) == 1u) {
     let sn = presNbr(a.p.x, a.p.y, a.p.z);
-    if (sn.y > 0.5) { ok = abs((rhs[c] + sn.x) / sn.y - pres[c]) < P.ext0.y * P.h * P.h / (P.dt * P.dt); }
+    if (sn.y > 1.0e-3) { ok = abs((rhs[c] + sn.x) / sn.y - pres[c]) < P.ext0.y * P.h * P.h / (P.dt * P.dt); }
   }
   calm[c] = select(0u, min(calm[c] + 1u, 255u), ok);
 }
@@ -322,6 +385,8 @@ fn projBody(f: u32, axis: u32, at: vec3<i32>) {
   let tl = ctypeOf(lo.x, lo.y, lo.z); let th = ctypeOf(hi.x, hi.y, hi.z);
   if (tl == 2u || th == 2u) { return; }
   if (tl != 1u && th != 1u) { return; }
+  // a face an object closes moves with the object
+  if (inDom(hi) && hasStorage(hi) && fopen[f] <= 0.0 && (ctype[cellIdx(hi.x, hi.y, hi.z)] & CUT) != 0u) { gvW(f, fsolid[f]); return; }
   var pl = 0.0; var ph = 0.0;
   if (tl == 1u) { pl = presAt(lo); }
   if (th == 1u) { ph = pres[cellIdx(hi.x, hi.y, hi.z)]; }

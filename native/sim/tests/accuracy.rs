@@ -324,3 +324,71 @@ fn blast() {
     eprintln!("blast: water near the sphere moves out at up to {:.2} m/s (95th percentile, frame {})", best.0, best.1);
     assert!(best.0 > 3.0, "the growing sphere pushes the water out at only {:.2} m/s", best.0);
 }
+
+/// Water let go on a frictionless ramp: its centre of mass accelerates down the slope at exactly g sin(angle), whatever its shape does.
+/// A stairstep wall catches the water and holds it back.
+#[test]
+fn ramp() {
+    let gpu = Gpu::new().unwrap();
+    let all: Value = serde_json::from_str(include_str!("../../app/src/scenes.json")).unwrap();
+    let mut cube = all["scenes"]["Wave tank"]["objs"][0].clone();
+    let a = 25f64.to_radians();
+    let (hx, hy) = (cube["mesh"]["v"][6][0].as_f64().unwrap().abs(), cube["mesh"]["v"][6][1].as_f64().unwrap().abs());
+    // a slab 4 long and 0.6 thick along the slope, its top surface through (0, 0.9)
+    let (lx, ly) = (2.0, 0.3);
+    let (nx, ny) = (a.sin(), a.cos());
+    cube["x"] = json!(-nx * ly); cube["y"] = json!(0.9 - ny * ly); cube["z"] = json!(0.0);
+    cube["px"] = cube["x"].clone(); cube["py"] = cube["y"].clone(); cube["pz"] = json!(0.0);
+    cube["rz"] = json!(-a); cube["rx"] = json!(0); cube["yaw"] = json!(0);
+    cube["sx"] = json!(lx / hx); cube["sy"] = json!(ly / hy); cube["sz"] = json!(2.0);
+    cube["keys"] = json!([]);
+    let mut sc = scene(3.0, 2.2, 0.4, json!([]), 9.8);
+    sc["objs"] = json!([cube]);
+    let d = desc(&sc, sp());
+    let mut s = Session::new(&gpu, &d, &|_| {}, None).unwrap();
+    // a block of water lying on the slope, up the ramp, 0.5 along it and 0.2 thick
+    let sd = s.lay.d as f64;
+    let (tx, ty) = (a.cos(), -a.sin());
+    let mut u = -0.85;
+    while u < -0.35 {
+        let mut w = 0.03;
+        while w < 0.23 {
+            let (x, y) = (u * tx + w * nx, 0.9 + u * ty + w * ny);
+            let mut z = -0.2 + sd / 2.0;
+            while z < 0.2 { s.sim.add(&gpu, [x as f32, y as f32, z as f32], [0.0; 3]); z += sd; }
+            w += sd;
+        }
+        u += sd;
+    }
+    s.prime(&gpu);
+    let along = |p: &[[f32; 3]]| p.iter().map(|q| q[0] as f64 * tx + (q[1] as f64 - 0.9) * ty).sum::<f64>() / p.len() as f64;
+    let u0 = along(&read(&gpu, &mut s).0);
+    frames(&gpu, &mut s, 30);
+    let (p, _) = read(&gpu, &mut s);
+    let moved = along(&p) - u0;
+    let want = 0.5 * 9.8 * a.sin() * 0.25;
+    eprintln!("ramp: water's centre moved {moved:.3} m down the 25 degree slope in 0.5 s, against {want:.3} m without friction ({:.1}%), {} particles", 100.0 * moved / want, p.len());
+    assert!(moved > 0.85 * want, "the slope holds the water back: {moved:.3} m against {want:.3} m");
+}
+
+/// Still water around a tilted object stays still: a badly weighted wall would stir it up.
+#[test]
+fn still_object() {
+    let gpu = Gpu::new().unwrap();
+    let all: Value = serde_json::from_str(include_str!("../../app/src/scenes.json")).unwrap();
+    let mut cube = all["scenes"]["Wave tank"]["objs"][0].clone();
+    for (k, v) in [("x", 0.0), ("y", 0.3), ("z", 0.0), ("px", 0.0), ("py", 0.3), ("pz", 0.0), ("rz", 0.6), ("rx", 0.4), ("yaw", 0.3)] { cube[k] = json!(v); }
+    cube["keys"] = json!([]);
+    let mut sc = scene(1.5, 1.0, 1.5, json!([{ "t": "box", "fx0": 0, "fx1": 1, "y0": 0, "y1": 0.5, "fz0": 0, "fz1": 1 }]), 9.8);
+    sc["objs"] = json!([cube]);
+    let d = desc(&sc, 0.02);
+    let mut s = Session::new(&gpu, &d, &|_| {}, None).unwrap();
+    s.seed(&gpu);
+    frames(&gpu, &mut s, 180);
+    let (_, v) = read(&gpu, &mut s);
+    let mut sp: Vec<f32> = v.iter().map(|&q| len(q)).collect();
+    sp.sort_by(|a, b| a.total_cmp(b));
+    let mean = sp.iter().map(|&x| x as f64).sum::<f64>() / sp.len() as f64;
+    eprintln!("still_object: after 3 s, speed mean {mean:.4} m/s, 99% under {:.3}, max {:.3}", sp[sp.len() * 99 / 100], sp[sp.len() - 1]);
+    assert!(mean < 0.06, "water around a still object moves at {mean:.3} m/s");
+}
