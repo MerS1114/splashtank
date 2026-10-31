@@ -111,6 +111,9 @@ pub enum Action { Start(String, Task), Stop, Fail(String) }
 
 /// The settings in the panel (the page's Bake settings), taken from the file opened last.
 pub struct BakeUi {
+    /// bakes waiting their turn (title and task), and whether they are running one after another
+    pub queue: Vec<(String, Task)>,
+    pub queue_run: bool,
     src: Option<PathBuf>,
     /// live water's particle spacing (Simulation tab), and the bake's own
     spacing: f32,
@@ -198,7 +201,7 @@ fn stamp() -> String {
 
 impl Default for BakeUi {
     fn default() -> BakeUi {
-        BakeUi { src: None, spacing: 0.04, bake_sp: 0.04, bake_edited: false, seconds: 5.0, auto_max: true, max_m: 4.0, accurate: false, water_only: false, ckpt_min: 5.0,
+        BakeUi { queue: Vec::new(), queue_run: false, src: None, spacing: 0.04, bake_sp: 0.04, bake_edited: false, seconds: 5.0, auto_max: true, max_m: 4.0, accurate: false, water_only: false, ckpt_min: 5.0,
             det: DetailOpts::default(), det_open: false, follow: true, resumable: None, est_key: (u64::MAX, 0, 0, 0), est_since: Instant::now(), est_wait: false, est_rx: None, est_text: String::new(),
             folder: setting("bakeFolder").and_then(|v| v.as_str().map(PathBuf::from)).unwrap_or_else(default_folder) }
     }
@@ -236,6 +239,17 @@ impl BakeUi {
             }
             Err(e) => Some(Action::Fail(e)),
         }
+    }
+    /// The scene as it is now, with the panel's settings, added to the queue. Queued bakes go in a folder of their own inside the bake
+    /// folder: they are meant to be there in the morning, so they are not temporary.
+    pub fn queue_bake(&mut self, scene: &serde_json::Value) -> Result<(), String> {
+        let dir = self.folder.join("Queued bakes");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("Could not make {}: {e}", dir.display()))?;
+        let stem = self.src.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "bake".into());
+        let name = format!("{stem} {} {}", stamp(), self.queue.len() + 1);
+        let kind = Kind::Bake { water_only: self.water_only, checkpoint_secs: self.ckpt_min * 60.0 };
+        self.queue.push((format!("{stem}, spacing {}, {} s", self.bake_sp, self.seconds), Task { kind, inp: None, scene: scene.clone(), o: self.opts(), out: dir.join(format!("{name}.splc")) }));
+        Ok(())
     }
     /// Bake whitewater for the bake at c, into the bake folder.
     pub fn start_whitewater(&self, c: Option<PathBuf>, scene: Option<&serde_json::Value>) -> Option<Action> {
@@ -391,6 +405,18 @@ impl BakeUi {
             ui.label(egui::RichText::new(est).small()).on_hover_text("The water a narrow band bake starts with is counted exactly; it can grow after impacts (Max points Auto allows for that). Sizes on disk are typical: fast, broken-up water takes more.");
             if ui.add_sized([120.0, 26.0], egui::Button::new(egui::RichText::new("Bake").strong())).on_hover_text("Bake now. The bake is temporary (in the bake folder) until File > Save bake keeps it: a new bake replaces it, and leaving it (another scene, closing) deletes it after asking.").clicked() {
                 act = self.start_bake(Some(scene));
+            }
+            if ui.button("Add to queue").on_hover_text("Keep this scene and these settings as they are now, to bake later. Queued bakes run one after another, and each is kept in the Queued bakes folder inside the bake folder. Good for overnight: change the scene or the settings and add another.").clicked() {
+                if let Err(e) = self.queue_bake(scene) { act = Some(Action::Fail(e)); }
+            }
+            if !self.queue.is_empty() {
+                ui.label(egui::RichText::new(format!("Queue: {} waiting", self.queue.len())).strong());
+                let mut gone = None;
+                for (k, (t, _)) in self.queue.iter().enumerate() {
+                    ui.horizontal(|ui| { if ui.small_button("x").on_hover_text("Take it off the queue").clicked() { gone = Some(k); } ui.label(egui::RichText::new(t).small()); });
+                }
+                if let Some(k) = gone { self.queue.remove(k); }
+                ui.checkbox(&mut self.queue_run, "Run the queue").on_hover_text("Each bake starts when the one before it ends. Untick to stop after the bake running now.");
             }
             let _ = is_cache;
             ui.horizontal(|ui| {

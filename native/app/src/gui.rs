@@ -32,9 +32,11 @@ pub fn run(files: Vec<PathBuf>) {
         theme(&cc.egui_ctx);
         let mut app = App::new(rs, cc.egui_ctx.clone());
         crate::bakeui::clean_folder(&app.bake.folder);
+        app.load_look();
+        let back = app.offer_recovery();
         for f in &files { app.open(f); }
         // like the page: a scene to start from, with live water on
-        if files.is_empty() { app.new_scene("Wave tank"); app.msg = "The Wave tank, with live water. File > New scene for another, or drop a scene or bake on the window.".into(); }
+        if files.is_empty() && !back { app.new_scene("Wave tank"); app.msg = "The Wave tank, with live water. File > New scene for another, or drop a scene or bake on the window.".into(); }
         // for checking the panel without clicking: SPLASH_AUTOBAKE=out.splc starts a bake of the opened file
         if let Ok(out) = std::env::var("SPLASH_AUTOBAKE") { app.autobake = Some(PathBuf::from(out)); }
         Ok(Box::new(app))
@@ -288,6 +290,23 @@ struct App {
     seen: u32,
     was_busy: bool,
     autobake: Option<PathBuf>,
+    autosaved: Instant,
+    ctx_attention: bool,
+}
+
+/// Where the scene is kept every minute while it has unsaved changes. Gone after a save or a normal close, so finding it at start-up means a crash.
+fn autosave_path() -> Option<PathBuf> { std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("SplashTank").join("autosave.json")) }
+fn forget_autosave() { if let Some(p) = autosave_path() { let _ = std::fs::remove_file(p); } }
+/// The file goes to the top of File > Open recent. Temporary bakes are not worth listing.
+fn remember_file(p: &Path) {
+    if autosave_path().as_deref() == Some(p) { return; }
+    if p.ancestors().any(|a| a.file_name().is_some_and(|n| n == "SplashTank bakes" || n == "Bakes")) && !p.ancestors().any(|a| a.file_name().is_some_and(|n| n == "Queued bakes")) { return; }
+    let f = p.display().to_string();
+    let mut v: Vec<serde_json::Value> = crate::bakeui::setting("recent").and_then(|v| v.as_array().cloned()).unwrap_or_default();
+    v.retain(|x| x.as_str() != Some(&f));
+    v.insert(0, serde_json::json!(f));
+    v.truncate(10);
+    crate::bakeui::set_setting("recent", serde_json::Value::Array(v));
 }
 
 impl App {
@@ -316,7 +335,7 @@ impl App {
             t: 0.0, look: Look::default(),
             msg: "Open a bake cache (.splc) or a scene file (.json), or drop one on the window.".into(),
             gpu: crate::gpu::describe(&rs.adapter, &rs.device), last: Instant::now(), frame_ms: 0.0, perf: false, bench: Arc::new(std::sync::Mutex::new(None)), bench_at: 2.5, bench_steps: 60, slow_ms: 0.0, readahead: tx,
-            path: None, bake: BakeUi::default(), worker: Worker::new(ctx.clone()), seen: 0, was_busy: false, autobake: None,
+            path: None, bake: BakeUi::default(), worker: Worker::new(ctx.clone()), seen: 0, was_busy: false, autobake: None, autosaved: Instant::now(), ctx_attention: false,
         }
     }
 
@@ -356,7 +375,7 @@ impl App {
         };
         let Some(p) = path else { return; };
         match s.save(&p) {
-            Ok(()) => { self.msg = format!("Saved the scene as {}", p.display()); self.bake.saved_as(&p); self.scene_path = Some(p); self.dirty = false; }
+            Ok(()) => { self.msg = format!("Saved the scene as {}", p.display()); remember_file(&p); forget_autosave(); self.bake.saved_as(&p); self.scene_path = Some(p); self.dirty = false; }
             Err(e) => self.msg = format!("Could not save {}: {e}", p.display()),
         }
     }
@@ -464,6 +483,7 @@ impl App {
                 self.msg = m;
                 if !same { if let Some(b) = self.doc.tank() { self.cam = Orbit::frame(&b); self.goal = None; } }
                 self.path = Some(path.to_owned());
+                remember_file(path);
                 self.bake.source(path);
                 self.scene_path = is_json.then(|| path.to_owned());
                 self.dirty = false;
@@ -585,6 +605,8 @@ impl App {
             self.bake.check_resume(&out);
             let _ = ok;
             if let Some(old) = self.replaced.take().filter(|_| out.exists()) { self.drop_temp(&old); }
+            // a flash on the taskbar when the window is not in front
+            if out.exists() { self.ctx_attention = true; }
             if out.exists() {
                 // the finished bake is shown (the scene stays as it is being edited)
                 let (keep, st) = (self.bake.follow, self.st);
@@ -1230,6 +1252,39 @@ impl App {
         if let Some(b) = self.doc.tank() { let mut o = self.cam; o.frame_keep_angles(&b); self.goal = Some(Goal { target: Some(o.target), r: Some(o.r), theta: None, phi: None }); }
     }
     /// looking along an axis, orthographic, as Blender's numpad views (snapView); top and bottom keep the nearest side square to the screen
+    /// The View tab's settings stay for next time.
+    fn save_look(&self) {
+        let l = &self.look;
+        crate::bakeui::set_setting("look", serde_json::json!({ "size": l.size, "vmax": l.vmax, "foam": l.foam, "detail": l.detail, "sprDetail": l.spr_detail, "streak": l.streak, "bg": l.bg, "fog": l.fog, "fogK": l.fog_k, "byType": l.by_type }));
+    }
+    fn load_look(&mut self) {
+        let Some(v) = crate::bakeui::setting("look") else { return; };
+        let (f, l) = (|k: &str| v[k].as_f64().map(|x| x as f32), &mut self.look);
+        if let Some(x) = f("size") { l.size = x; } if let Some(x) = f("vmax") { l.vmax = x; } if let Some(x) = f("foam") { l.foam = x; }
+        if let Some(x) = f("detail") { l.detail = x as u32; } if let Some(x) = f("sprDetail") { l.spr_detail = x as u32; } if let Some(x) = f("streak") { l.streak = x; }
+        if let Some(x) = f("bg") { l.bg = x as u8; } if let Some(x) = f("fogK") { l.fog_k = x; }
+        if let Some(x) = v["fog"].as_bool() { l.fog = x; } if let Some(x) = v["byType"].as_bool() { l.by_type = x; }
+    }
+    /// Offered at start-up when the last run ended without closing properly.
+    fn offer_recovery(&mut self) -> bool {
+        let Some(p) = autosave_path().filter(|p| p.exists()) else { return false; };
+        let of = crate::bakeui::setting("autosaveOf").and_then(|v| v.as_str().map(String::from));
+        let said = rfd::MessageDialog::new().set_title("SplashTank").set_level(rfd::MessageLevel::Info)
+            .set_description(format!("SplashTank did not close properly last time. Open the scene as it was a minute or less before that ({})?", of.as_deref().unwrap_or("not saved yet")))
+            .set_buttons(rfd::MessageButtons::YesNo).show() == rfd::MessageDialogResult::Yes;
+        if said {
+            self.open(&p);
+            self.scene_path = of.map(PathBuf::from);
+            self.dirty = true;
+            self.msg = "Recovered the scene. Save it to keep it.".into();
+        } else { forget_autosave(); }
+        said
+    }
+    /// Everything not selected becomes the selection.
+    fn invert_selection(&mut self) {
+        self.sel_set = (0..self.objs().len()).filter(|k| !self.sel_set.contains(k)).collect();
+        self.sel = self.sel_set.first().copied();
+    }
     fn snap_view(&mut self, v: &str) {
         use std::f32::consts::PI;
         let (th, ph) = match v { "front" => (Some(0.0), PI / 2.0), "back" => (Some(PI), PI / 2.0), "right" => (Some(PI / 2.0), PI / 2.0), "left" => (Some(-PI / 2.0), PI / 2.0),
@@ -1423,6 +1478,9 @@ impl App {
                 if ui.button("Undo                Ctrl Z").clicked() { self.undo_redo(false); ui.close(); }
                 if ui.button("Redo        Ctrl Shift Z").clicked() { self.undo_redo(true); ui.close(); }
                 ui.separator();
+                if ui.button("Select all                 A").clicked() { self.sel_set = (0..self.objs().len()).collect(); self.sel = self.sel.or(self.sel_set.first().copied()); ui.close(); }
+                if ui.button("Invert selection      Ctrl I").clicked() { self.invert_selection(); ui.close(); }
+                ui.separator();
                 if ui.button("Search settings        F3").clicked() { self.tab = Tab::Sim; self.set_ws(false); ui.close(); }
                 if ui.button(format!("Snapping: {}   Shift Tab", if self.snap_on { "on" } else { "off" })).clicked() { self.snap_on = !self.snap_on; ui.close(); }
                 if ui.button(format!("Orientation: {}", if self.orient_local { "Local" } else { "Global" })).clicked() { self.orient_local = !self.orient_local; ui.close(); }
@@ -1443,6 +1501,9 @@ impl App {
                 if ui.button("Front             Numpad 1").clicked() { self.snap_view("front"); ui.close(); }
                 if ui.button("Right             Numpad 3").clicked() { self.snap_view("right"); ui.close(); }
                 if ui.button("Top               Numpad 7").clicked() { self.snap_view("top"); ui.close(); }
+                if ui.button("Back         Ctrl Numpad 1").clicked() { self.snap_view("back"); ui.close(); }
+                if ui.button("Left         Ctrl Numpad 3").clicked() { self.snap_view("left"); ui.close(); }
+                if ui.button("Bottom       Ctrl Numpad 7").clicked() { self.snap_view("bottom"); ui.close(); }
                 if ui.button(format!("{}      Numpad 5", if self.cam.ortho { "Perspective " } else { "Orthographic" })).clicked() { self.cam.ortho = !self.cam.ortho; ui.close(); }
                 ui.separator();
                 if ui.button(if self.kf_open { "Hide key tracks" } else { "Show key tracks" }).clicked() { self.kf_open = !self.kf_open; ui.close(); }
@@ -1531,11 +1592,20 @@ impl App {
                 if let Some(p) = rfd::FileDialog::new().add_filter("SplashTank files", &["splc", "json"]).add_filter("Bake cache", &["splc"]).add_filter("Scene", &["json"]).pick_file() { self.open(&p); }
             }
         }
+        let recent: Vec<String> = crate::bakeui::setting("recent").and_then(|v| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())).unwrap_or_default();
+        ui.add_enabled_ui(!recent.is_empty(), |ui| ui.menu_button("Open recent", |ui| {
+            for f in recent {
+                let p = PathBuf::from(&f);
+                let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| f.clone());
+                if ui.add_enabled(p.exists(), egui::Button::new(name)).on_hover_text(f.clone()).clicked() { ui.close(); if self.may_discard() { self.open(&p); } }
+            }
+        }));
         ui.separator();
         if ui.add_enabled(self.doc.scene.is_some(), egui::Button::new("Save scene              Ctrl S")).clicked() { ui.close(); self.save_scene(false); }
         if ui.add_enabled(self.doc.scene.is_some(), egui::Button::new("Save scene as…")).clicked() { ui.close(); self.save_scene(true); }
         ui.separator();
         if ui.add_enabled(self.bake_cache().is_some() && self.saving.is_none() && !self.worker.busy(), egui::Button::new("Save bake…")).on_hover_text("Keep the bake shown under a name and place of your own (it is moved out of the bake folder)").clicked() { ui.close(); self.save_bake(); }
+        if ui.add_enabled(self.live_cache().is_some_and(|c| !c.frames.is_empty()), egui::Button::new("Save live water…")).on_hover_text("Keep the live water's frames as a bake file").clicked() { ui.close(); self.save_live(); }
         if ui.add_enabled(self.bake_cache().is_some() && !self.worker.busy(), egui::Button::new("Export for Blender…")).on_hover_text("Each frame as PLY files in a folder, in metres: water points, whitewater points and the water's surface as a mesh, with a script that loads the mesh sequence into Blender").clicked() { ui.close(); self.export_bake(true); }
         if ui.add_enabled(self.bake_cache().is_some() && !self.worker.busy(), egui::Button::new("Export points only…")).on_hover_text("As Export for Blender, without the surface mesh: much quicker").clicked() { ui.close(); self.export_bake(false); }
         if ui.add_enabled(self.bake_cache().is_some(), egui::Button::new("Bake report…")).on_hover_text("The bake's settings, its measurements for every frame and the scene, as a file to send").clicked() { ui.close(); self.save_report(); }
@@ -1575,6 +1645,20 @@ impl App {
         self.saving = Some(rx);
         self.path = Some(from);
         self.msg = format!("Saving the bake as {}…", to.display());
+    }
+
+    /// Save live water: its frames as a bake file, written on a thread, then opened as the bake shown.
+    fn save_live(&mut self) {
+        let Some(c) = self.live_cache().cloned() else { return; };
+        let Some(to) = rfd::FileDialog::new().set_title("Save the live water as").add_filter("Bake cache", &["splc"]).set_file_name("live water.splc").save_file().map(|p| if p.extension().is_none() { p.with_extension("splc") } else { p }) else { return; };
+        let (tx, rx) = mpsc::channel();
+        let t2 = to.clone();
+        std::thread::spawn(move || {
+            let r = splash_format::cache::convert(&c, &t2, false, |_, _| {}).map_err(|e| format!("Could not save {}: {e}", t2.display()));
+            let _ = tx.send(r.map(|_| t2));
+        });
+        self.saving = Some(rx);
+        self.msg = format!("Saving the live water as {}…", to.display());
     }
 
     /// Export for Blender: on the worker, with its progress in the Bake tab.
@@ -1923,6 +2007,7 @@ impl eframe::App for App {
                 if up { if let Some(t) = self.key_times().into_iter().find(|&t| t > self.st + 1e-6) { self.set_time(t); } }
                 if down { if let Some(t) = self.key_times().into_iter().rev().find(|&t| t < self.st - 1e-6) { self.set_time(t); } }
                 if self.editing() && ki && !ctrl && self.edit.is_none() { self.key_selected(alt); }
+                if self.editing() && ki && ctrl && self.edit.is_none() { self.invert_selection(); }
                 // Delete with a key picked on the timeline, wherever the mouse is
                 if ui.input(|i| i.key_pressed(egui::Key::Delete)) && self.sel_key.is_some() && self.edit.is_none() { self.delete_keys(); }
             }
@@ -1937,6 +2022,7 @@ impl eframe::App for App {
                 if ui.input(|i| i.key_pressed(egui::Key::P)) { self.perf = !self.perf; }
             }
         }
+        if std::mem::take(&mut self.ctx_attention) { ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational)); }
         if self.step_cam(dt) { ui.ctx().request_repaint(); }
         if let Some(out) = self.autobake.take() {
             if let Some(src) = self.path.clone() {
@@ -1948,6 +2034,19 @@ impl eframe::App for App {
             }
         }
         self.poll_job();
+        if self.bake.queue_run && !self.worker.busy() && !self.was_busy && self.saving.is_none() {
+            if self.bake.queue.is_empty() { self.bake.queue_run = false; self.msg = "The queue is finished.".into(); }
+            else { let (t, task) = self.bake.queue.remove(0); self.act(Action::Start(format!("Queue: {t}"), task)); }
+        }
+        // the scene every minute while it has changes that are not saved, for after a crash
+        if self.dirty && self.tf.is_none() && self.autosaved.elapsed().as_secs() >= 60 {
+            self.autosaved = Instant::now();
+            if let (Some(s), Some(p)) = (&self.doc.scene, autosave_path()) {
+                let _ = std::fs::create_dir_all(p.parent().unwrap());
+                let _ = s.save(&p);
+                crate::bakeui::set_setting("autosaveOf", serde_json::json!(self.scene_path.as_ref().map(|q| q.display().to_string())));
+            }
+        }
         self.look.region = (self.bake.det_open && self.tab == Tab::Bake).then_some((self.bake.det.c, self.bake.det.s));
         self.doc.selected = if self.editing() { self.sel_set.iter().filter_map(|&k| self.objs().get(k)?["id"].as_u64()).collect() } else { Vec::new() };
         // recording: every object's place this frame (the page's recordStep, at 60 a second, gaps filled with the last place)
@@ -2014,7 +2113,8 @@ impl eframe::App for App {
         self.changed_now = false;
         // Ctrl+S saves the scene; closing the window with unsaved edits asks first
         if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) && self.doc.scene.is_some() { self.save_scene(false); }
-        if ui.ctx().input(|i| i.viewport().close_requested()) && !self.may_discard() {
+        if ui.ctx().input(|i| i.viewport().close_requested()) && self.may_discard() { forget_autosave(); self.save_look(); }
+        else if ui.ctx().input(|i| i.viewport().close_requested()) {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         if ui.input(|i| i.key_pressed(egui::Key::F3)) { self.tab = Tab::Sim; self.set_ws(false); }
