@@ -90,7 +90,7 @@ Targets, at cell size 0.025 m: standing wave loses under 3% of its height a peri
    - Points stored in a fixed order that is the same in every frame and spreads evenly through the water, so any first part of a frame is an even sample (drawing fewer points is just drawing a shorter range).
    - Each frame stored as the difference from where the last two frames predict each point (motion prediction), quantized, then compressed (zstd). A full frame every 24 frames so any frame can be reached quickly, like video.
    - Velocity can be kept (for motion blur when rendering elsewhere, and so Bake whitewater no longer guesses it from the next frame).
-   - Target: 3 to 5 times smaller than today's caches, and faster to read than the disk is to send it.
+   - Target: 3 to 5 times smaller than today's caches, and faster to read than the disk is to send it. Done 2026-10-31 (prediction, sorted whitewater, zstd, full frames): 2 to 5 times smaller; the point order and velocity are still to do.
 2. Old .splc files still open, and can be converted.
 3. Export for Blender: points per frame (PLY sequence, with speed and velocity) and a meshed surface per frame (marching cubes over the liquid distance field on the GPU, OBJ or PLY sequence; Alembic if a Rust writer is good enough). OpenVDB later (writing VDB from Rust needs work).
 
