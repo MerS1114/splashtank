@@ -71,6 +71,8 @@ pub struct Desc {
     /// Max points was given (otherwise a narrow band bake picks its own from the starting water and the card)
     pub max_n_set: bool, pub substeps: u32, pub max_sub: u32, pub frames: u32,
     pub g: f32, pub iters: u32, pub flip: f32, pub apic_flip: f32, pub comp: f32, pub sep: f32, pub apic: bool, pub accurate: bool,
+    /// live water, not a bake: reserves less room (making the solver's buffers is part of every restart)
+    pub live: bool,
     pub cell_ratio: f32, pub sort: bool, pub p2g_win: bool, pub ballistic: bool, pub settle: bool, pub mg: bool, pub ghost: bool,
     pub detail: f32, pub col_max: f32, pub vmax_w: f32, pub scale: f32, pub tear: f32,
     pub size: [f32; 3], pub open: u32, pub org: [f32; 3],
@@ -116,6 +118,24 @@ fn keys_of(o: &Value, org: [f32; 3]) -> Vec<Key> {
 }
 
 /// The page's Quality slider and Max points rule (bakeRes), and every other setting (buildDesc, simPar).
+/// A shape's collision grid. Building one is the slow part of starting a bake or live water, and only editing a shape's points changes
+/// it, so the last few are kept, by the shape's points and faces.
+fn shape_grid(v: &[[f32; 3]], f: &[Vec<u32>]) -> Arc<Sdf> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    static KEPT: std::sync::Mutex<Vec<(u64, Arc<Sdf>)>> = std::sync::Mutex::new(Vec::new());
+    let mut h = DefaultHasher::new();
+    for p in v { for c in p { c.to_bits().hash(&mut h); } }
+    f.hash(&mut h);
+    let key = h.finish();
+    if let Some(s) = KEPT.lock().unwrap().iter().find(|x| x.0 == key) { return s.1.clone(); }
+    let s = Arc::new(sdf::build(v, f, 0.025, 0.16));
+    let mut k = KEPT.lock().unwrap();
+    if k.len() >= 32 { k.remove(0); }
+    k.push((key, s.clone()));
+    s
+}
+
 pub fn desc_from_scene(scene: &Value, o: &BakeOpts) -> Result<Desc, String> {
     if scene.get("app").and_then(Value::as_str) != Some("SplashTank") { return Err("This is not a SplashTank scene file.".into()); }
     let sv = scene.get("solver").cloned().unwrap_or(Value::Null);
@@ -195,7 +215,7 @@ pub fn desc_from_scene(scene: &Value, o: &BakeOpts) -> Result<Desc, String> {
                 let v: Vec<[f32; 3]> = m.get("v")?.as_array()?.iter().filter_map(|p| { let a = p.as_array()?; Some([a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32, a.get(2)?.as_f64()? as f32]) }).collect();
                 let f: Vec<Vec<u32>> = m.get("f")?.as_array()?.iter().filter_map(|t| t.as_array()?.iter().map(|k| k.as_u64().map(|k| k as u32)).collect::<Option<Vec<_>>>())
                     .filter(|f| f.len() >= 3 && f.iter().all(|&k| (k as usize) < v.len())).collect();
-                (!f.is_empty()).then(|| Arc::new(sdf::build(&v, &f, 0.025, 0.16)))
+                (!f.is_empty()).then(|| shape_grid(&v, &f))
             })
         };
         let g = |k: &str, d: f64| num(&ov, k, d) as f32;
@@ -261,7 +281,7 @@ pub fn desc_from_scene(scene: &Value, o: &BakeOpts) -> Result<Desc, String> {
         d, max_n, max_n_set: o.max_points.is_some(), fps, substeps, max_sub, frames: (dur * fps).round() as u32,
         g, iters, flip: num(&sv, "flip", 0.95) as f32, apic_flip: num(&sv, "apicFlip", 0.8) as f32, comp: if sep > 0.0 { 0.0 } else { 6.0 }, sep, apic, accurate,
         // the Speed-ups switches: not in the page's scene files (its defaults then), kept under solver by the native window
-        cell_ratio, sort: flag(&sv, "sortP", true), p2g_win: flag(&sv, "p2gWin", true), ballistic: flag(&sv, "ballistic", true), settle: flag(&sv, "settle", false), mg: flag(&sv, "mg", true), ghost: flag(&sv, "ghost", true),
+        live: false, cell_ratio, sort: flag(&sv, "sortP", true), p2g_win: flag(&sv, "p2gWin", true), ballistic: flag(&sv, "ballistic", true), settle: flag(&sv, "settle", false), mg: flag(&sv, "mg", true), ghost: flag(&sv, "ghost", true),
         detail, col_max: num(&sv, "colMax", 100.0) as f32 * k, vmax_w: num(&sv, "vmaxW", 50.0) as f32 * k, scale,
         tear: num(&sv, "tear", 0.5) as f32 * 0.5 * cell_ratio.powi(3),
         size, open, org, fills: box_fills, events, objs,

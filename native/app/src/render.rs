@@ -168,8 +168,8 @@ pub struct Renderer {
     layer_bgl: wgpu::BindGroupLayout,
     empty: wgpu::BindGroup,
     dummy: wgpu::Buffer,
-    frames: HashMap<usize, GpuFrame>,
-    lru: VecDeque<usize>,
+    frames: HashMap<(u64, usize), GpuFrame>,
+    lru: VecDeque<(u64, usize)>,
     gen: u64,
     /// bytes of frames kept on the GPU, and the most to keep (older frames are dropped beyond it)
     pub kept_bytes: u64,
@@ -247,7 +247,14 @@ impl Renderer {
             kept_bytes: 0, budget: 2 << 30, uploads: 0 }
     }
 
-    pub fn is_kept(&self, f: usize) -> bool { self.frames.contains_key(&f) }
+    pub fn is_kept(&self, f: usize) -> bool { self.frames.contains_key(&(self.gen, f)) }
+    /// The frames of a cache that is gone. Otherwise frames stay by cache (gen), so going between Live and Bake uploads nothing again.
+    pub fn forget(&mut self, gen: u64) {
+        let mut freed = 0;
+        self.frames.retain(|k, g| { if k.0 == gen { freed += g.bytes; false } else { true } });
+        self.lru.retain(|k| k.0 != gen);
+        self.kept_bytes -= freed;
+    }
     pub fn kept_frames(&self) -> usize { self.frames.len() }
 
     fn layer(&self, device: &wgpu::Device, c: &Cache, p: &Points, q: Option<[u8; 3]>, bx: Box3, ww_codes: Option<&std::ops::Range<usize>>) -> (GpuLayer, u64) {
@@ -274,11 +281,12 @@ impl Renderer {
     /// Puts frame f on the GPU unless it is there already; drops the least recently used frames beyond the budget.
     pub fn load(&mut self, device: &wgpu::Device, doc: &Doc, f: usize) {
         let Some(c) = &doc.cache else { return; };
-        if self.gen != doc.gen { self.frames.clear(); self.lru.clear(); self.kept_bytes = 0; self.gen = doc.gen; }
+        self.gen = doc.gen;
         if f >= c.frames.len() { return; }
-        if self.frames.contains_key(&f) {
-            if let Some(k) = self.lru.iter().position(|&x| x == f) { self.lru.remove(k); }
-            self.lru.push_back(f);
+        let key = (doc.gen, f);
+        if self.frames.contains_key(&key) {
+            if let Some(k) = self.lru.iter().position(|&x| x == key) { self.lru.remove(k); }
+            self.lru.push_back(key);
             return;
         }
         let fr = &c.frames[f];
@@ -290,8 +298,8 @@ impl Renderer {
             let p = Points { n: w.n, pos: w.pos.clone(), spd: w.pk.clone(), fm: None };
             let (l, b) = self.layer(device, c, &p, fr.q, c.ww_box(), Some(&w.pk)); bytes += b; l });
         self.uploads += 1;
-        self.frames.insert(f, GpuFrame { water, deep, ww, bytes });
-        self.lru.push_back(f);
+        self.frames.insert(key, GpuFrame { water, deep, ww, bytes });
+        self.lru.push_back(key);
         self.kept_bytes += bytes;
         while self.kept_bytes > self.budget && self.lru.len() > 2 {
             let old = self.lru.pop_front().unwrap();
@@ -347,7 +355,7 @@ impl Renderer {
         pass.set_pipeline(&self.bg);
         pass.draw(0..3, 0..1);
         if let Some(bf) = &tb { pass.set_pipeline(&self.tris); pass.set_vertex_buffer(0, bf.slice(..)); pass.draw(0..tris.len() as u32, 0..1); }
-        let (fa, fb) = (self.frames.get(&a).filter(|_| c.is_some()), self.frames.get(&b).filter(|_| c.is_some() && w > 0.0));
+        let (fa, fb) = (self.frames.get(&(self.gen, a)).filter(|_| c.is_some()), self.frames.get(&(self.gen, b)).filter(|_| c.is_some() && w > 0.0));
         // deep water and whitewater from the nearer frame
         let near = if w >= 0.5 { fb } else { fa };
         if look.water {

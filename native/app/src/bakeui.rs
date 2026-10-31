@@ -6,7 +6,7 @@ use eframe::egui;
 use splash_sim::detail::DetailOpts;
 use splash_sim::scene::BakeOpts;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -32,7 +32,8 @@ pub struct Job {
 
 /// serial: the number of the newest task; an older one still running stops at its next frame and no longer reports (so starting a new
 /// task right after Stop never revives the old one)
-pub struct Worker { tx: mpsc::Sender<(u64, Task)>, pub job: Arc<Mutex<Job>>, cancel: Arc<AtomicBool>, serial: Arc<std::sync::atomic::AtomicU64> }
+/// limit: the task waits after finishing a frame at or past this one (live water stays this far along and no further, doing nothing)
+pub struct Worker { tx: mpsc::Sender<(u64, Task)>, pub job: Arc<Mutex<Job>>, cancel: Arc<AtomicBool>, serial: Arc<std::sync::atomic::AtomicU64>, pub limit: Arc<AtomicU32> }
 
 impl Worker {
     pub fn new(ctx: egui::Context) -> Worker {
@@ -40,7 +41,8 @@ impl Worker {
         let job = Arc::new(Mutex::new(Job::default()));
         let cancel = Arc::new(AtomicBool::new(false));
         let serial = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let (j, c, sr) = (job.clone(), cancel.clone(), serial.clone());
+        let limit = Arc::new(AtomicU32::new(u32::MAX));
+        let (j, c, sr, lm) = (job.clone(), cancel.clone(), serial.clone(), limit.clone());
         std::thread::spawn(move || {
             let mut gpu = None;
             while let Ok((me, t)) = rx.recv() {
@@ -49,6 +51,7 @@ impl Worker {
                 if stale() { continue; }
                 let r = bake_cli::execute(&t, &mut gpu, &mut |n| {
                     if stale() { return false; }
+                    let fr = if let Note::Frame(p) = &n { Some(p.f) } else { None };
                     let last = {
                         let mut s = j.lock().unwrap();
                         match n {
@@ -67,6 +70,9 @@ impl Worker {
                         let w = Instant::now();
                         while !j.lock().unwrap().released && w.elapsed() < Duration::from_secs(5) { std::thread::sleep(Duration::from_millis(10)); ctx.request_repaint(); }
                     }
+                    if let (Some(f), false) = (fr, last) {
+                        while f >= lm.load(Ordering::Relaxed) && !c.load(Ordering::Relaxed) && !stale() { std::thread::sleep(Duration::from_millis(15)); }
+                    }
                     !c.load(Ordering::Relaxed)
                 });
                 if stale() { continue; }
@@ -82,7 +88,7 @@ impl Worker {
                 ctx.request_repaint();
             }
         });
-        Worker { tx, job, cancel, serial }
+        Worker { tx, job, cancel, serial, limit }
     }
 
     pub fn start(&self, title: String, t: Task) {
@@ -106,9 +112,12 @@ pub enum Action { Start(String, Task), Stop, Fail(String) }
 /// The settings in the panel (the page's Bake settings), taken from the file opened last.
 pub struct BakeUi {
     src: Option<PathBuf>,
+    /// live water's particle spacing (Simulation tab), and the bake's own
     spacing: f32,
+    bake_sp: f32,
+    /// the bake's spacing was changed in the panel: the window writes it into the scene
+    pub bake_edited: bool,
     seconds: f32,
-    quality: f32,
     auto_max: bool,
     max_m: f32,
     accurate: bool,
@@ -121,8 +130,13 @@ pub struct BakeUi {
     pub follow: bool,
     /// a stopped bake that can carry on: its cache and what its checkpoint says
     resumable: Option<(PathBuf, String)>,
-    /// the estimate for the settings and scene it was made for (worked out again when either changes)
-    est: Option<(String, String)>,
+    /// the estimate: what it was last asked for and when (it waits for the changes to end), the thread working it out, the last answer.
+    /// Working it out builds collision shapes and counts the starting water, so never on the window's thread.
+    est_key: (u64, u32, u32, u32),
+    est_since: Instant,
+    est_wait: bool,
+    est_rx: Option<mpsc::Receiver<String>>,
+    est_text: String,
     /// where bakes go until saved under a name (File > Save bake); remembered between runs
     pub folder: PathBuf,
 }
@@ -184,8 +198,8 @@ fn stamp() -> String {
 
 impl Default for BakeUi {
     fn default() -> BakeUi {
-        BakeUi { src: None, spacing: 0.04, seconds: 5.0, quality: 1.0, auto_max: true, max_m: 4.0, accurate: false, water_only: false, ckpt_min: 5.0,
-            det: DetailOpts::default(), det_open: false, follow: true, resumable: None, est: None,
+        BakeUi { src: None, spacing: 0.04, bake_sp: 0.04, bake_edited: false, seconds: 5.0, auto_max: true, max_m: 4.0, accurate: false, water_only: false, ckpt_min: 5.0,
+            det: DetailOpts::default(), det_open: false, follow: true, resumable: None, est_key: (u64::MAX, 0, 0, 0), est_since: Instant::now(), est_wait: false, est_rx: None, est_text: String::new(),
             folder: setting("bakeFolder").and_then(|v| v.as_str().map(PathBuf::from)).unwrap_or_else(default_folder) }
     }
 }
@@ -240,7 +254,7 @@ impl BakeUi {
             if let Ok((_, o)) = bake_cli::from_cache(p) {
                 self.spacing = o.spacing;
                 if let Some(s) = o.seconds { self.seconds = s; }
-                if let Some(q) = o.detail { self.quality = q; }
+                self.bake_sp = o.spacing / o.detail.unwrap_or(1.0).max(0.01);
                 self.accurate = o.accurate.unwrap_or(false);
             }
             self.check_resume(p);
@@ -259,10 +273,14 @@ impl BakeUi {
     pub fn set_seconds(&mut self, s: f32) { self.seconds = s; }
     /// the live spacing (the live sim runs at it, as the page's live view)
     pub fn spacing(&self) -> f32 { self.spacing }
+    pub fn set_spacing(&mut self, v: f32) { self.spacing = v; }
+    pub fn bake_spacing(&self) -> f32 { self.bake_sp }
     fn settings_of(&mut self, v: &serde_json::Value) {
         let bk = &v["bake"];
         self.seconds = bk["dur"].as_f64().unwrap_or(5.0) as f32;
-        self.quality = bk["detail"].as_f64().unwrap_or(1.0) as f32;
+        if let Some(s) = v.pointer("/solver/spacing").and_then(serde_json::Value::as_f64) { self.spacing = s as f32; }
+        // older scene files have a multiplier of the live spacing
+        self.bake_sp = bk["spacing"].as_f64().map(|s| s as f32).unwrap_or(self.spacing / bk["detail"].as_f64().unwrap_or(1.0).max(0.01) as f32);
         self.accurate = bk["accuracy"].as_str() == Some("accurate");
     }
 
@@ -279,11 +297,8 @@ impl BakeUi {
 
 /// The page's bake estimate: the water the bake starts with (the narrow band seeds just as the bake will, else the volume of the starting
     /// water over the spacing cubed), the video memory that takes, and the cache's size on disk (compact frames: 6 bytes a point).
-    fn estimate(&mut self, scene: &serde_json::Value) -> String {
-        let o = self.opts();
-        let key = format!("{:?}{:?}{}", o.spacing, o.detail, scene);
-        if let Some((k, v)) = &self.est { if *k == key { return v.clone(); } }
-        let v = match splash_sim::scene::desc_from_scene(scene, &o) {
+    fn estimate_now(scene: &serde_json::Value, o: &BakeOpts) -> String {
+        match splash_sim::scene::desc_from_scene(scene, o) {
             Err(e) => e,
             Ok(d) => {
                 let lay = splash_sim::flip::layout(d.d, d.cell_ratio, d.size);
@@ -306,18 +321,33 @@ impl BakeUi {
                 format!("About {:.2} M points to start (Max points {:.1} M), about {:.1} GB of video memory, about {:.0} MB a frame, {:.1} GB for {} frames.",
                     start as f64 / 1e6, max_n as f64 / 1e6, mem as f64 / 1e9, per / 1048576.0, per * (d.frames + 1) as f64 / 1073741824.0, d.frames + 1)
             }
-        };
-        self.est = Some((key, v.clone()));
-        v
+        }
+    }
+
+    /// The estimate: worked out on its own thread once the settings have been still for a moment; until then, the last one.
+    fn estimate(&mut self, scene: &serde_json::Value, rev: u64, ctx: &egui::Context) -> String {
+        let o = self.opts();
+        let key = (rev, self.bake_sp.to_bits(), self.seconds.to_bits(), o.max_points.unwrap_or(0));
+        if key != self.est_key { self.est_key = key; self.est_since = Instant::now(); self.est_wait = true; }
+        if self.est_wait && self.est_rx.is_none() && self.est_since.elapsed() > Duration::from_millis(350) {
+            self.est_wait = false;
+            let (tx, rx) = mpsc::channel();
+            let (sc, c) = (scene.clone(), ctx.clone());
+            std::thread::spawn(move || { let _ = tx.send(Self::estimate_now(&sc, &o)); c.request_repaint(); });
+            self.est_rx = Some(rx);
+        }
+        if let Some(t) = self.est_rx.as_ref().and_then(|r| r.try_recv().ok()) { self.est_text = t; self.est_rx = None; }
+        if self.est_wait { ctx.request_repaint_after(Duration::from_millis(120)); }
+        if self.est_text.is_empty() { "Working out what this bake needs…".into() } else { self.est_text.clone() }
     }
 
     fn opts(&self) -> BakeOpts {
-        BakeOpts { spacing: self.spacing, seconds: Some(self.seconds), detail: Some(self.quality),
+        BakeOpts { spacing: self.spacing, seconds: Some(self.seconds), detail: Some(self.spacing / self.bake_sp.max(1e-4)),
             max_points: (!self.auto_max).then(|| (self.max_m * 1e6) as u32), accurate: Some(self.accurate) }
     }
 
     /// scene: the scene as edited in the window (what gets baked); cache: the bake shown now (Bake whitewater and Detail work on it).
-    pub fn panel(&mut self, ui: &mut egui::Ui, w: &Worker, scene: Option<&serde_json::Value>, cache: Option<&Path>) -> Option<Action> {
+    pub fn panel(&mut self, ui: &mut egui::Ui, w: &Worker, scene: Option<&serde_json::Value>, rev: u64, cache: Option<&Path>) -> Option<Action> {
         let mut act = None;
         let busy = w.busy();
         ui.heading("Bake");
@@ -326,7 +356,7 @@ impl BakeUi {
             return None;
         };
         let is_cache = src.extension().is_some_and(|e| e.eq_ignore_ascii_case("splc"));
-        let Some(scene) = scene.cloned() else {
+        let Some(scene) = scene else {
             ui.label("This cache holds no scene, so it cannot be baked again.");
             return None;
         };
@@ -335,16 +365,11 @@ impl BakeUi {
         else { ui.label(format!("The scene from {}, as edited here", src.file_name().unwrap_or_default().to_string_lossy())); }
         ui.add_enabled_ui(!busy, |ui| {
             egui::Grid::new("bakeset").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-                ui.label("Spacing").on_hover_text("The live particle spacing (the page's Simulation > Spacing). The bake's spacing is this divided by Quality.");
-                ui.add(egui::DragValue::new(&mut self.spacing).range(0.003..=0.3).speed(0.0005).max_decimals(4));
+                ui.label("Bake spacing").on_hover_text("How far apart the particles are in the bake: smaller is finer, and much slower (half the spacing is about 8 times the particles). Separate from live water's spacing, which is in the Simulation tab.");
+                self.bake_edited |= ui.add(egui::DragValue::new(&mut self.bake_sp).range(0.002..=0.3).speed(0.0005).max_decimals(4)).changed();
                 ui.end_row();
                 ui.label("Length, s");
                 ui.add(egui::DragValue::new(&mut self.seconds).range(0.05..=600.0).speed(0.05).max_decimals(2));
-                ui.end_row();
-                ui.label("Quality").on_hover_text("Preview bakes at the live spacing, Final 1.5 times finer, Fine 2 times finer.");
-                ui.horizontal(|ui| {
-                    for (q, n) in [(1.0, "Preview"), (1.5, "Final"), (2.0, "Fine")] { ui.selectable_value(&mut self.quality, q, n); }
-                });
                 ui.end_row();
                 ui.label("Max points").on_hover_text("Auto: the scene's own, and for narrow band bakes 2.5 times the starting water, as far as the card's free memory allows.");
                 ui.horizontal(|ui| {
@@ -362,10 +387,10 @@ impl BakeUi {
                 ui.add(egui::DragValue::new(&mut self.ckpt_min).range(0.0..=120.0).speed(0.1).max_decimals(1).suffix(" min"));
                 ui.end_row();
             });
-            let est = self.estimate(&scene);
+            let est = self.estimate(scene, rev, ui.ctx());
             ui.label(egui::RichText::new(est).small()).on_hover_text("The water a narrow band bake starts with is counted exactly; it can grow after impacts (Max points Auto allows for that). Sizes on disk assume compact frames.");
             if ui.add_sized([120.0, 26.0], egui::Button::new(egui::RichText::new("Bake").strong())).on_hover_text("Bake now. The bake is temporary (in the bake folder) until File > Save bake keeps it: a new bake replaces it, and leaving it (another scene, closing) deletes it after asking.").clicked() {
-                act = self.start_bake(Some(&scene));
+                act = self.start_bake(Some(scene));
             }
             let _ = is_cache;
             ui.horizontal(|ui| {
@@ -399,7 +424,7 @@ impl BakeUi {
             ui.label(format!("On the bake shown ({})", c.file_name().unwrap_or_default().to_string_lossy()));
             ui.add_enabled_ui(!busy, |ui| {
                 if ui.button("Bake whitewater").on_hover_text("Whitewater made from this bake's water, with the Whitewater settings as they are now; a new bake in the bake folder.").clicked() {
-                    act = self.start_whitewater(Some(c.to_owned()), Some(&scene));
+                    act = self.start_whitewater(Some(c.to_owned()), Some(scene));
                 }
                 let r = egui::CollapsingHeader::new("Detail").default_open(false).show(ui, |ui| {
                     ui.label("A finer sim over a region of this bake, guided by it. The region is the dashed blue box.");

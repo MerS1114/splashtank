@@ -82,6 +82,7 @@ fn help(ui: &mut egui::Ui) {
         "I keys the selection at the playhead (over a row in the Object tab: only that row), Alt + I takes the key off; click a key mark to pick it, drag it to move it, Delete removes it",
         "Tab edits the shape of a collider: 1 points, 2 edges, 3 faces, E extrude, I inset, Tab to leave",
         "Ctrl + Z undo, Ctrl + Shift + Z or Ctrl + Y redo, Ctrl + S save the scene",
+        "Simulate ahead (top bar): off, the water simulates only while you play; on, it simulates the whole timeline after each change. Refresh water starts it again from the beginning",
         "Space plays, Left / Right step a frame, Shift + Left / Right go to the ends, Up / Down jump between keys",
         "orbit: middle or right drag, or Alt + drag; pan: Shift + drag; zoom: the wheel or Ctrl + drag",
         "F focuses the selection, Home frames the tank; 1, 3, 7 look from the front, side and top (Ctrl: the other side), 5 switches orthographic",
@@ -230,6 +231,23 @@ struct App {
     live_rx: Option<mpsc::Receiver<Vec<u8>>>,
     live_pending: Vec<Vec<u8>>,
     live_stale: bool,
+    /// Simulate ahead: live water simulates and caches the whole timeline by itself after a change. Off (the default): only while playing
+    ahead: bool,
+    /// live water was started for this scene, the frames shown are the old run's until the new one's first frame, when the scene last changed
+    live_tried: bool,
+    live_fresh: bool,
+    last_change: Instant,
+    /// any input lately (uploading kept frames waits for a quiet moment)
+    last_input: Instant,
+    /// counts every change to the scene (the Bake tab's estimate follows it), numbers for the caches' frames on the GPU
+    scene_rev: u64,
+    gens: u64,
+    aside_gen: u64,
+    /// the bake being written is reopened on a thread, at most twice a second: its index takes long to read on the window's thread
+    follow_rx: Option<mpsc::Receiver<(PathBuf, Option<Cache>)>>,
+    follow_at: Instant,
+    /// SPLASH_TRACE: slow frames are written to a file
+    trace: bool,
     /// the click that finished a move is only that (it does not also select)
     swallow: bool,
     /// edit mode: the shape being edited, and a move of its points going on (the move, the points, the points as tiny objects)
@@ -261,7 +279,7 @@ struct App {
     bench_steps: u32,
     slow_ms: f32,
     /// frames to read ahead from disk (the loader thread touches their pages so uploads do not wait for the disk)
-    ahead: mpsc::Sender<(Arc<Cache>, Vec<usize>)>,
+    readahead: mpsc::Sender<(Arc<Cache>, Vec<usize>)>,
     /// the file opened last
     path: Option<PathBuf>,
     bake: BakeUi,
@@ -292,11 +310,11 @@ impl App {
             ws_bake: false, aside: None, kf_open: true, bake_stale: false, saving: None, replaced: None,
             sel_set: Vec::new(), tool: Tool::Select, tf: None, tf_text: String::new(), undo: Vec::new(), redo: Vec::new(), stable: None, burst: false,
             changed_now: false, hover: None, add_at: None, box_from: None, find: String::new(), obj_act: None, edit: None, etf: None, orient_local: false, snap_on: false, snap_to: 0, handles: true, face_drag: None, st: 0.0, splay: false, auto_key: false, rec_on: false, rec_buf: std::collections::HashMap::new(), pb: 1, sel_key: None, key_drag: None, key_del_now: false,
-            live: false, live_w: Worker::new(ctx.clone()), live_rx: None, live_pending: Vec::new(), live_stale: false, swallow: false,
+            live: false, live_w: Worker::new(ctx.clone()), live_rx: None, live_pending: Vec::new(), live_stale: false, ahead: crate::bakeui::setting("simAhead").and_then(|v| v.as_bool()).unwrap_or(false), live_tried: false, live_fresh: false, last_change: Instant::now(), last_input: Instant::now(), follow_rx: None, follow_at: Instant::now(), scene_rev: 0, gens: 1, aside_gen: 1, trace: std::env::var("SPLASH_TRACE").is_ok(), swallow: false,
             cam: Orbit { target: glam::Vec3::new(0.0, 0.7, 0.0), theta: 0.8, phi: 1.0, r: 6.2, ortho: false }, goal: None,
             t: 0.0, look: Look::default(),
             msg: "Open a bake cache (.splc) or a scene file (.json), or drop one on the window.".into(),
-            gpu: crate::gpu::describe(&rs.adapter, &rs.device), last: Instant::now(), frame_ms: 0.0, perf: false, bench: Arc::new(std::sync::Mutex::new(None)), bench_at: 2.5, bench_steps: 60, slow_ms: 0.0, ahead: tx,
+            gpu: crate::gpu::describe(&rs.adapter, &rs.device), last: Instant::now(), frame_ms: 0.0, perf: false, bench: Arc::new(std::sync::Mutex::new(None)), bench_at: 2.5, bench_steps: 60, slow_ms: 0.0, readahead: tx,
             path: None, bake: BakeUi::default(), worker: Worker::new(ctx.clone()), seen: 0, was_busy: false, autobake: None,
         }
     }
@@ -343,16 +361,53 @@ impl App {
     }
 
     /// After an edit to the scene's JSON: the parsed scene (tank, objects) is made again from it.
-    fn edited(&mut self) {
+    fn edited(&mut self) { self.touch(true); }
+    /// As edited, when only objects' places changed (a move, every frame of it).
+    fn posed(&mut self) { self.touch(false); }
+    fn touch(&mut self, meshes: bool) {
+        // nothing is simulated while editing: the water's frames stay, marked out of date, and the sim stops at once
         self.live_stale = true;
+        self.last_change = Instant::now();
+        self.scene_rev += 1;
+        if self.bake_cache().is_some() { self.bake_stale = true; }
+        if self.live_w.busy() { self.live_w.stop(); self.live_rx = None; self.live_pending.clear(); }
         // the first change of a burst saves the scene before it for undo
         if !self.burst { if let Some(s) = self.stable.take() { self.undo.push(s); if self.undo.len() > 100 { self.undo.remove(0); } } self.redo.clear(); self.burst = true; }
         self.changed_now = true;
-        if let Some(s) = self.doc.scene.take() {
-            let j = s.json.clone();
-            self.doc.scene = Some(splash_format::Scene::from_json(j).unwrap_or(s));
-        }
+        if let Some(s) = self.doc.scene.as_mut() { s.refresh(meshes); }
         self.dirty = true;
+    }
+
+    /// A cache has gone: its frames leave the GPU. shown: the one in doc.cache, else the one kept aside.
+    fn bump(&mut self, shown: bool) {
+        self.gens += 1;
+        let (old, n) = if shown { (std::mem::replace(&mut self.doc.gen, self.gens), self.gens) } else { (std::mem::replace(&mut self.aside_gen, self.gens), self.gens) };
+        let _ = n;
+        self.r.forget(old);
+    }
+
+    /// Play or pause. Water out of date simulates again from the start now: this is when the work is wanted.
+    fn play(&mut self) {
+        self.bake.follow = false;
+        self.splay = !self.splay;
+        if !self.splay { return; }
+        if self.st >= self.tl_dur() - 1e-6 { self.set_time(0.0); }
+        if !self.ws_bake && self.live && self.live_stale && !self.worker.busy() { self.set_time(0.0); self.live_start(); }
+    }
+
+    /// Refresh: the water from nothing, at the start (whatever state it got into).
+    fn refresh_water(&mut self) {
+        if self.doc.scene.is_none() { return; }
+        self.set_ws(false);
+        self.live_w.stop();
+        self.live_rx = None; self.live_pending.clear();
+        *self.live_slot() = None;
+        self.bump(!self.ws_bake);
+        self.live = true;
+        self.splay = false;
+        self.set_time(0.0);
+        self.live_start();
+        self.msg = "Water refreshed from the start.".into();
     }
 
     /// New scene: an empty tank, or one of the page's starting scenes (scenes.json, made by native/tools/export-scenes.js from the page).
@@ -374,7 +429,7 @@ impl App {
         self.doc.cache = None;
         self.aside = None;
         self.ws_bake = false;
-        self.doc.gen += 1;
+        self.bump(true); self.bump(false);
         self.path = None;
         self.scene_path = None;
         self.dirty = false;
@@ -388,9 +443,8 @@ impl App {
         self.auto_key = false;
         self.set_time(0.0);
         self.msg = format!("New scene: {name}. Add objects with Shift+A, fill the tank in the Scene tab, save it with Ctrl+S.");
-        // live water is on from the start (the page's live view)
-        self.live = true;
-        self.live_start();
+        self.scene_rev += 1;
+        self.live = true; self.live_tried = false; self.live_stale = false;
     }
 
     fn open(&mut self, path: &Path) {
@@ -399,8 +453,13 @@ impl App {
         // the live water belongs to the scene shown: it goes with it
         self.live_w.stop(); self.live_rx = None; self.live_pending.clear();
         self.aside = None;
-        match crate::open_into(&mut self.doc, path) {
+        let g0 = self.doc.gen;
+        let r = crate::open_into(&mut self.doc, path);
+        self.doc.gen = g0;
+        match r {
             Ok(m) => {
+                self.bump(true); self.bump(false);
+                self.scene_rev += 1;
                 self.msg = m;
                 if !same { if let Some(b) = self.doc.tank() { self.cam = Orbit::frame(&b); self.goal = None; } }
                 self.path = Some(path.to_owned());
@@ -419,7 +478,7 @@ impl App {
                 if !self.ws_bake { self.tab = Tab::Object; } else if !matches!(self.tab, Tab::Bake | Tab::Display | Tab::Perf) { self.tab = Tab::Bake; }
                 self.set_time(0.0);
                 self.live = self.doc.scene.is_some();
-                if self.live { self.live_start(); }
+                self.live_tried = false; self.live_stale = false;
             }
             Err(e) => self.msg = e,
         }
@@ -431,8 +490,8 @@ impl App {
         self.end_tf(false);
         if bake && self.edit.is_some() { self.toggle_edit(); }
         std::mem::swap(&mut self.doc.cache, &mut self.aside);
+        std::mem::swap(&mut self.doc.gen, &mut self.aside_gen);
         self.ws_bake = bake;
-        self.doc.gen += 1;
         if bake && !matches!(self.tab, Tab::Bake | Tab::Display | Tab::Perf) { self.tab = Tab::Bake; }
         if !bake && self.tab == Tab::Bake { self.tab = Tab::Object; }
         self.set_time(self.st);
@@ -448,27 +507,29 @@ impl App {
     /// Shows the newest frame of the cache a task is writing (frames are only added, so the ones kept on the GPU stay good).
     fn follow(&mut self, p: &Path) {
         let Ok(c) = Cache::open(p) else { return; };
-        self.set_ws(true);
+        self.show_bake(p, c);
+    }
+    /// The bake at p, as read, becomes the bake shown. The Live workspace stays open if that is where you are (a bake runs behind it).
+    fn show_bake(&mut self, p: &Path, c: Cache) {
         // the scene stays the one being edited (the bake was made from it)
         if self.path.as_deref() != Some(p) {
             self.path = Some(p.to_owned());
-            self.doc.gen += 1;
-            let first = self.doc.cache.is_none();
-            self.doc.cache = Some(Arc::new(c));
-            if first && self.doc.scene.is_none() { if let Some(b) = self.doc.tank() { self.cam = Orbit::frame(&b); self.goal = None; } }
-        } else {
-            self.doc.cache = Some(Arc::new(c));
+            self.bump(self.ws_bake);
         }
+        let n = c.frames.len();
+        let fps = c.info.fps as f64;
+        *self.bake_slot() = Some(Arc::new(c));
         self.bake_stale = false;
-        self.splay = false;
-        let n = self.frames();
-        self.st = n.saturating_sub(1) as f64 / self.fps() as f64;
+        if self.ws_bake && self.bake.follow {
+            self.splay = false;
+            self.st = n.saturating_sub(1) as f64 / fps.max(1.0);
+        }
         self.msg = format!("Showing {} as it is written: {} frames", p.file_name().unwrap_or_default().to_string_lossy(), n);
     }
 
     /// Lets go of the bake at p when it is open (a task is about to write or replace it).
     fn close_if(&mut self, p: &Path) {
-        if self.path.as_deref() == Some(p) && self.bake_cache().is_some() { *self.bake_slot() = None; self.doc.gen += 1; }
+        if self.path.as_deref() == Some(p) && self.bake_cache().is_some() { *self.bake_slot() = None; self.bump(self.ws_bake); }
     }
 
     fn act(&mut self, a: Action) {
@@ -485,6 +546,7 @@ impl App {
                 let slow = t.out.to_string_lossy().to_ascii_uppercase().starts_with("C:");
                 self.bake.follow = true;
                 self.seen = 0;
+                self.set_ws(true);
                 self.worker.start(title, t);
                 // measured on this computer: C: wrote about 13 MB/s on long writes, G: 463 MB/s
                 if slow { self.worker.job.lock().unwrap().log.push("This cache goes to drive C:, which writes slowly on this computer (about 13 MB/s on long writes). Big bakes are much faster on G:.".into()); }
@@ -500,13 +562,23 @@ impl App {
             (j.busy, j.done, j.finishing, j.released, j.out.clone(), j.result.as_ref().is_some_and(|r| !r.1))
         };
         let Some(out) = out else { return; };
+        // the frames so far, read on a thread
+        if let Some(rx) = &self.follow_rx {
+            if let Ok((p, c)) = rx.try_recv() { self.follow_rx = None; if let (Some(c), false) = (c, fin) { self.show_bake(&p, c); } }
+        }
         if fin && !released {
+            // (a read still going holds the file open)
+            if let Some(rx) = self.follow_rx.take() { let _ = rx.recv(); }
             self.close_if(&out);
             self.worker.job.lock().unwrap().released = true;
         }
-        if busy && !fin && self.bake.follow && done > self.seen {
+        if busy && !fin && done > self.seen && self.follow_rx.is_none() && self.follow_at.elapsed().as_secs_f32() > 0.5 {
             self.seen = done;
-            self.follow(&out);
+            self.follow_at = Instant::now();
+            let (tx, rx) = mpsc::channel();
+            let p = out.clone();
+            std::thread::spawn(move || { let c = Cache::open(&p).ok(); let _ = tx.send((p, c)); });
+            self.follow_rx = Some(rx);
         }
         if self.was_busy && !busy {
             self.bake.check_resume(&out);
@@ -532,8 +604,9 @@ impl App {
     fn live_start(&mut self) {
         let Some(j) = self.doc.scene.as_ref().map(|s| s.json.clone()) else { return; };
         let (tx, rx) = mpsc::channel();
-        *self.live_slot() = None;
-        if !self.ws_bake { self.doc.gen += 1; }
+        // the old frames stay shown until the new run's first one
+        self.live_fresh = true;
+        self.live_tried = true;
         self.live_rx = Some(rx);
         self.live_pending.clear();
         self.live_stale = false;
@@ -547,7 +620,7 @@ impl App {
         self.live_rx = None;
         self.live_pending.clear();
         *self.live_slot() = None;
-        if !self.ws_bake { self.doc.gen += 1; }
+        self.bump(!self.ws_bake);
     }
     /// Takes the live sim's new frames into the cache shown.
     fn live_poll(&mut self) {
@@ -558,15 +631,23 @@ impl App {
         pending.extend(rx.try_iter());
         let mut done = 0;
         let slot = if self.ws_bake { &mut self.aside } else { &mut self.doc.cache };
+        let mut replaced = false;
         for b in &pending {
+            if self.live_fresh || slot.is_none() {
+                // a new run's first message: it takes over from the old frames
+                if let Ok(c) = Cache::from_header(b.clone()) { *slot = Some(Arc::new(c)); self.live_fresh = false; replaced = true; }
+                done += 1;
+                continue;
+            }
             match slot {
-                None => if let Ok(c) = Cache::from_header(b.clone()) { *slot = Some(Arc::new(c)) },
                 Some(c) => match Arc::get_mut(c) { Some(c) => { let _ = c.push(b); } None => break },
+                None => {}
             }
             done += 1;
         }
         pending.drain(..done);
         self.live_pending = pending;
+        if replaced { self.bump(!self.ws_bake); }
         // memory: like the page's live cache, at most about 2 GB of frames
         if self.live_cache().is_some_and(|c| c.bytes().len() > 2usize << 30) { self.live_w.stop(); self.msg = "Live water stopped at 2 GB of frames.".into(); }
     }
@@ -692,7 +773,7 @@ impl App {
         let mut any = false;
         for o in objs.iter_mut() { any |= tf::apply_keys(o, st, smooth); if replay { any |= tf::apply_rec(o, st); } }
         if !any { return; }
-        if let Some(s) = self.doc.scene.take() { let j = s.json.clone(); self.doc.scene = Some(splash_format::Scene::from_json(j).unwrap_or(s)); }
+        if let Some(s) = self.doc.scene.as_mut() { s.refresh(false); }
         if !self.burst { self.stable = self.doc.scene.as_ref().map(|s| s.json.clone()); }
     }
     /// I: keys every group of the selected objects at the time shown; Alt+I takes their key on that frame off.
@@ -767,7 +848,7 @@ impl App {
             if icon_btn(ui, Ico::Rewind, false).on_hover_text("Back to the start (Shift+Left)").clicked() { go(self, 0.0); }
             if icon_btn(ui, Ico::PrevKey, false).on_hover_text("Previous key (Down)").clicked() { if let Some(t) = self.key_times().into_iter().rev().find(|&t| t < self.st - 1e-6) { go(self, t); } }
             if icon_btn(ui, Ico::PrevFrame, false).on_hover_text("Back one frame (Left)").clicked() { go(self, self.st - step); }
-            if icon_btn(ui, if self.splay { Ico::Pause } else { Ico::Play }, self.splay).on_hover_text("Play or stop (Space)").clicked() { self.bake.follow = false; self.splay = !self.splay; }
+            if icon_btn(ui, if self.splay { Ico::Pause } else { Ico::Play }, self.splay).on_hover_text("Play or stop (Space). Out-of-date water simulates again from the start.").clicked() { self.play(); }
             if icon_btn(ui, Ico::NextFrame, false).on_hover_text("Forward one frame (Right)").clicked() { go(self, self.st + step); }
             if icon_btn(ui, Ico::NextKey, false).on_hover_text("Next key (Up)").clicked() { if let Some(t) = self.key_times().into_iter().find(|&t| t > self.st + 1e-6) { go(self, t); } }
             let frames = (dur / step).round() as usize + 1;
@@ -1375,18 +1456,26 @@ impl App {
             if ui.selectable_label(!self.ws_bake, egui::RichText::new("  Live  ").strong()).on_hover_text("Live: set up the scene, with live water simulating as you work.").clicked() { self.set_ws(false); }
             if ui.selectable_label(self.ws_bake, egui::RichText::new("  Bake  ").strong()).on_hover_text("Bake: run the whole shot at full quality into a cache, then play it back.").clicked() { self.set_ws(true); }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // live water: Start / Stop, and what it is doing
+                // live water: simulate ahead or only while playing, Refresh, and what it is doing
                 let busy = self.live_w.busy();
-                let start = egui::Button::new(egui::RichText::new(if self.live { "Stop" } else { "Start" }).color(egui::Color32::BLACK).strong()).fill(orange);
-                if ui.add_enabled(self.doc.scene.is_some(), start).on_hover_text("Live water: simulate the scene while you work (the page's Start). Its frames stay in memory, so the timeline plays and scrubs them; a change simulates again.").clicked() {
-                    if self.live { self.live_off(); } else { self.live = true; self.live_start(); self.set_ws(false); }
+                let label = egui::RichText::new(if self.ahead { "Simulate ahead: On" } else { "Simulate ahead: Off" }).strong();
+                let label = if self.ahead { label.color(egui::Color32::BLACK) } else { label };
+                let sw = egui::Button::new(label).fill(if self.ahead { orange } else { egui::Color32::from_gray(0x54) });
+                if ui.add_enabled(self.doc.scene.is_some(), sw).on_hover_text("Off: nothing is simulated while you edit. The water simulates only while you play, a little ahead of the playhead, and stops when you pause.\nOn: after each change the whole timeline simulates and caches by itself, ready to scrub, which keeps the graphics card busy.").clicked() {
+                    self.ahead = !self.ahead;
+                    crate::bakeui::set_setting("simAhead", serde_json::json!(self.ahead));
                 }
+                if ui.add_enabled(self.doc.scene.is_some() && !self.worker.busy(), egui::Button::new("Refresh water")).on_hover_text("Throw away the water's frames and start it again from the beginning. Use it when the water is out of date or looks stuck.").clicked() { self.refresh_water(); }
                 let n = self.live_cache().map_or(0, |c| c.frames.len());
-                let (dot, txt) = if !self.live { (egui::Color32::from_gray(0x80), "Live · stopped".to_string()) }
-                    else if self.live_stale { (orange, "Live · changed".to_string()) }
-                    else if busy { (egui::Color32::from_rgb(0x4a, 0xc8, 0x5a), format!("Live · simulating {n}/{}", (self.scene_dur() * self.live_fps()).round() as usize + 1)) }
-                    else if let Some((e, true)) = self.live_w.job.lock().unwrap().result.clone() { (egui::Color32::from_rgb(0xe0, 0x60, 0x50), format!("Live · {e}")) }
-                    else { (egui::Color32::from_rgb(0x4a, 0xc8, 0x5a), format!("Live · cached {n} frames")) };
+                let total = (self.scene_dur() * self.live_fps()).round() as usize + 1;
+                let green = egui::Color32::from_rgb(0x4a, 0xc8, 0x5a);
+                let grey = egui::Color32::from_gray(0x90);
+                let (dot, txt) = if self.worker.busy() { (grey, "Water waits for the bake".to_string()) }
+                    else if self.live_stale { (orange, if self.ahead { "Water out of date: simulating soon".to_string() } else { "Water out of date: press Play or Refresh".to_string() }) }
+                    else if busy && n as u32 >= self.live_w.limit.load(std::sync::atomic::Ordering::Relaxed) { (grey, format!("Water paused at frame {n}")) }
+                    else if busy { (green, format!("Simulating {n} of {total}")) }
+                    else if let Some((e, true)) = self.live_w.job.lock().unwrap().result.clone() { (egui::Color32::from_rgb(0xe0, 0x60, 0x50), format!("Water: {e}")) }
+                    else { (green, format!("Water cached, {n} frames")) };
                 ui.label(egui::RichText::new(txt).small());
                 icon_at(ui, Ico::Dot, dot);
                 ui.separator();
@@ -1603,7 +1692,12 @@ impl App {
             if tab == Tab::Bake {
                 let shown = self.path.clone().filter(|p| self.bake_cache().is_some() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("splc")));
                 let scene = self.doc.scene.as_ref().map(|s| &s.json);
-                if let Some(a) = self.bake.panel(ui, &self.worker, scene, shown.as_deref()) { self.act(a); }
+                if let Some(a) = self.bake.panel(ui, &self.worker, scene, self.scene_rev, shown.as_deref()) { self.act(a); }
+                if std::mem::take(&mut self.bake.bake_edited) {
+                    // kept in the scene (detail for the web page); nothing to simulate again
+                    let (b, l) = (self.bake.bake_spacing(), self.bake.spacing());
+                    if let Some(s) = self.doc.scene.as_mut() { s.json["bake"]["spacing"] = serde_json::json!(b); s.json["bake"]["detail"] = serde_json::json!(l / b); self.dirty = true; }
+                }
                 return;
             }
             if matches!(tab, Tab::Sim | Tab::Scene | Tab::Object) {
@@ -1614,6 +1708,19 @@ impl App {
                             if let Some(p) = rfd::FileDialog::new().add_filter("Scene", &["json"]).pick_file() { self.open(&p); }
                         }
                     });
+                    ui.separator();
+                }
+                if tab == Tab::Sim && self.doc.scene.is_some() {
+                    let mut sp = self.bake.spacing();
+                    let r = ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Spacing").strong());
+                        ui.add(egui::DragValue::new(&mut sp).range(0.003..=0.3).speed(0.0005).max_decimals(4))
+                    }).inner.on_hover_text("How far apart live water's particles are: smaller is finer and slower. The bake has its own spacing in the Bake tab.");
+                    if r.changed() {
+                        self.bake.set_spacing(sp);
+                        if let Some(s) = self.doc.scene.as_mut() { s.json["solver"]["spacing"] = serde_json::json!(sp); }
+                        self.edited();
+                    }
                     ui.separator();
                 }
                 if tab == Tab::Object && self.doc.scene.is_some() {
@@ -1796,7 +1903,7 @@ impl eframe::App for App {
             let (up, down, ki, alt) = ui.input(|i| (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::I), i.modifiers.alt));
             if self.tf.is_none() && self.etf.is_none() {
                 let step = self.tl_step();
-                if space { self.bake.follow = false; self.splay = !self.splay; }
+                if space { self.play(); }
                 if left || right || up || down { self.splay = false; self.bake.follow = false; }
                 if left { self.set_time(if shift { 0.0 } else { self.st - step }); }
                 if right { let d = self.tl_dur(); self.set_time(if shift { d } else { self.st + step }); }
@@ -1861,7 +1968,18 @@ impl eframe::App for App {
         // a change that has ended (nothing changed this frame, no move going on): the scene now at rest is what undo goes back to
         if self.burst && !self.changed_now && self.tf.is_none() { self.stable = self.doc.scene.as_ref().map(|s| s.json.clone()); self.burst = false; }
         // the live sim starts again once a change has ended (not on every step of a drag)
-        if self.live && self.live_stale && !self.burst && self.tf.is_none() && !self.worker.busy() { self.live_start(); }
+        // live water: its first frames when a scene opens; after a change, by itself only with Simulate ahead on, once the change has
+        // been over for a moment and nothing is held down
+        if self.live && !self.ws_bake && !self.live_tried && !self.worker.busy() { self.live_start(); }
+        if self.live && self.live_stale && self.ahead && !self.ws_bake && !self.burst && self.tf.is_none() && !self.worker.busy() {
+            if self.last_change.elapsed().as_secs_f32() > 0.8 && !ui.input(|i| i.pointer.any_down()) { self.live_start(); } else { ui.ctx().request_repaint_after(std::time::Duration::from_millis(200)); }
+        }
+        // how far it may go: all the way with Simulate ahead; otherwise a second past the playhead while playing, a frame past it when not
+        {
+            let f = (self.st * self.live_fps()) as u32;
+            let lim = if self.ahead { u32::MAX } else if self.ws_bake { 0 } else if self.splay { f + 24 } else { f + 1 };
+            self.live_w.limit.store(lim, std::sync::atomic::Ordering::Relaxed);
+        }
         if self.live {
             self.live_poll();
             let busy = self.live_w.busy();
@@ -1870,7 +1988,7 @@ impl eframe::App for App {
                 let newest = c.frames.len().saturating_sub(1) as f64 / c.info.fps.max(1.0) as f64;
                 if self.splay && self.st > newest { self.st = newest; }
             }
-            if busy { ui.ctx().request_repaint(); }
+            if busy { ui.ctx().request_repaint_after(std::time::Duration::from_millis(100)); }
         }
         // a bake being written: the view shows its newest frame (until the playhead is moved)
         if self.ws_bake && self.worker.busy() && self.bake.follow { let n = self.frames(); if n > 0 { self.st = (n - 1) as f64 / self.fps() as f64; } }
@@ -1892,11 +2010,12 @@ impl eframe::App for App {
             if let Some(c) = &self.doc.cache {
                 let f = self.t.floor() as usize;
                 let next: Vec<usize> = (1..=3).map(|k| (f + k) % n).filter(|&k| !self.r.is_kept(k)).collect();
-                if !next.is_empty() { let _ = self.ahead.send((c.clone(), next)); }
+                if !next.is_empty() { let _ = self.readahead.send((c.clone(), next)); }
             }
             ui.ctx().request_repaint();
         }
 
+        let t_before = now.elapsed().as_secs_f32() * 1000.0;
         egui::Panel::top("top").show(ui, |ui| self.top(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status(ui));
         let kf = egui::Panel::bottom("timeline").resizable(self.kf_open).min_size(if self.kf_open { 120.0 } else { 0.0 });
@@ -1912,7 +2031,8 @@ impl eframe::App for App {
             // the water blends from this frame towards the next while playing (paused, the frame is shown as it is)
             let (fb, w) = if n > 1 && self.t.fract() > 0.0 { ((f + 1).min(n - 1), self.t.fract() as f32) } else { (f, 0.0) };
             // while paused, put the following frames on the GPU too, one per redraw, as long as they fit the budget (like the page's idleFill)
-            if !self.splay && n > 1 && self.r.kept_bytes < self.r.budget * 9 / 10 {
+            if ui.input(|i| !i.events.is_empty() || i.pointer.is_moving()) { self.last_input = now; }
+            if !self.splay && n > 1 && self.r.kept_bytes < self.r.budget * 9 / 10 && self.last_input.elapsed().as_secs_f32() > 0.5 {
                 if let Some(k) = (1..n).map(|k| (f + k) % n).find(|&k| !self.r.is_kept(k)) {
                     self.r.load(&rs.device, &self.doc, k);
                     ui.ctx().request_repaint();
@@ -1948,7 +2068,7 @@ impl eframe::App for App {
                     if let Some(o) = self.objs_mut() { self.tf_text = t.apply(o, &view, m, on); }
                     if let Some(p) = t.snapped.and_then(|p| view.screen(p)) { ui.painter().circle_stroke(p, 9.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(0xff, 0xd3, 0x4a))); }
                     self.tf = Some(t);
-                    self.edited();
+                    self.posed();
                     let (pressed, released, right) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.pointer.secondary_pressed()));
                     let from_drag = self.tf.as_ref().is_some_and(|t| t.from_drag);
                     if right { self.end_tf(false); self.swallow = true; } else if (from_drag && released) || (!from_drag && pressed) { self.end_tf(true); self.swallow = true; }
@@ -2007,5 +2127,14 @@ impl eframe::App for App {
             }
             self.add_menu(ui);
         });
+        if self.trace {
+            let ms = now.elapsed().as_secs_f32() * 1000.0;
+            if ms > 25.0 {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(std::env::temp_dir().join("splash-trace.txt")) {
+                    let _ = writeln!(f, "{ms:.0} ms (before panels {t_before:.0}), bake workspace {}, tab {:?}, live busy {}", self.ws_bake, TABS.iter().find(|x| x.0 == self.tab).map(|x| x.1), self.live_w.busy());
+                }
+            }
+        }
     }
 }

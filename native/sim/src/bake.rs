@@ -329,7 +329,11 @@ pub fn tall_row(desc: &Desc, lay: &crate::flip::Layout, band: f32, margin: u32) 
 
 /// The free video memory in MB, from the NVIDIA driver's nvidia-smi (this program is built for Mer's NVIDIA card); None if it cannot say.
 pub fn free_vram_mb() -> Option<u64> {
-    let o = std::process::Command::new("nvidia-smi").args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"]).output().ok()?;
+    let mut c = std::process::Command::new("nvidia-smi");
+    c.args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"]);
+    // CREATE_NO_WINDOW: from a windowed program a console tool otherwise flashes an empty window, every time the water restarted
+    #[cfg(windows)] { use std::os::windows::process::CommandExt; c.creation_flags(0x0800_0000); }
+    let o = c.output().ok()?;
     String::from_utf8_lossy(&o.stdout).lines().next()?.trim().parse().ok()
 }
 

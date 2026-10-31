@@ -82,7 +82,8 @@ impl<'d> Session<'d> {
                 Fill::Vol { lo, hi, .. } => ((hi[0] - lo[0]) * (hi[1] - lo[1]) * (hi[2] - lo[2])) as f64,
             }).sum::<f64>() + desc.events.iter().map(|e| 4.19 * e.r * e.r * e.r).sum::<f64>();
             need = (start / d3).ceil() as u64;
-            max_n = (max_n as u64).max(4_000_000).max((need as f64 * 1.3).ceil() as u64).min(lim as u64) as u32;
+            // (live water restarts often and its particle buffers are made each time: 1M will do there)
+            max_n = (max_n as u64).max(if desc.live { 1_000_000 } else { 4_000_000 }).max((need as f64 * 1.3).ceil() as u64).min(lim as u64) as u32;
         }
         // the card must hold it: say so before starting rather than fail partway
         if sort && !fits(max_n as u64, true) && fits(max_n as u64, false) { sort = false; }

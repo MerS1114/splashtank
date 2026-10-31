@@ -108,7 +108,8 @@ pub fn execute(t: &Task, gpu: &mut Option<Gpu>, report: &mut dyn FnMut(Note) -> 
             };
         }
         Kind::Live(tx) => {
-            let desc = desc_of(&t.scene, &t.o, false)?;
+            let mut desc = desc_of(&t.scene, &t.o, false)?;
+            desc.live = true;
             bake::run(gpu, &desc, &t.out, &bake::RunOpts { sink: Some(tx.clone()), ..Default::default() }, |p| report(Note::Frame(p)))?;
         }
         Kind::Resume => {

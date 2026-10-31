@@ -62,18 +62,34 @@ impl Scene {
         if json.get("app").and_then(Value::as_str) != Some("SplashTank") || !json.get("objs").map(Value::is_array).unwrap_or(false) {
             return Err(bad("This is not a SplashTank scene file."));
         }
-        let bx = json.get("box").cloned().unwrap_or(Value::Null);
-        let sz = bx.get("size").cloned().unwrap_or(Value::Null);
-        let size = [num(&sz, "w", 3.0), num(&sz, "h", 2.6), num(&sz, "d", 3.0)];
-        let mn = bx.get("min").cloned().unwrap_or(Value::Null);
-        let min = [num(&mn, "x", -size[0] / 2.0), num(&mn, "y", 0.0), num(&mn, "z", -size[2] / 2.0)];
-        let objs = json["objs"].as_array().unwrap().iter().map(obj).collect();
-        let oc = json.get("ocean").cloned().unwrap_or(Value::Null);
+        let mut s = Scene { json, min: [0.0; 3], size: [0.0; 3], objs: Vec::new(), ocean_level: None, narrow_band: false };
+        s.refresh(true);
+        Ok(s)
+    }
+
+    /// The typed fields again after json was edited. meshes false: objects' shapes did not change, so only their places are read
+    /// (this runs every frame an object moves or the keys play).
+    pub fn refresh(&mut self, meshes: bool) {
+        let j = &self.json;
+        let (bx, none) = (j.get("box").unwrap_or(&Value::Null), Value::Null);
+        let sz = bx.get("size").unwrap_or(&none);
+        let size = [num(sz, "w", 3.0), num(sz, "h", 2.6), num(sz, "d", 3.0)];
+        let mn = bx.get("min").unwrap_or(&none);
+        let min = [num(mn, "x", -size[0] / 2.0), num(mn, "y", 0.0), num(mn, "z", -size[2] / 2.0)];
+        let list = j["objs"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        if !meshes && list.len() == self.objs.len() {
+            for (o, v) in self.objs.iter_mut().zip(list) {
+                o.pos = [num(v, "x", 0.0), num(v, "y", 0.0), num(v, "z", 0.0)];
+                o.rot = [num(v, "rx", 0.0), num(v, "yaw", 0.0), num(v, "rz", 0.0)];
+                o.scale = [num(v, "sx", 1.0), num(v, "sy", 1.0), num(v, "sz", 1.0)];
+            }
+        } else { self.objs = list.iter().map(obj).collect(); }
+        let oc = j.get("ocean").unwrap_or(&none);
         let ocean_on = oc.get("on").and_then(Value::as_bool).unwrap_or(false);
         // level is a share of the box height (ocean config in 00-state.js)
-        let ocean_level = ocean_on.then(|| num(&oc, "level", 0.5) * size[1]);
-        let narrow_band = json.pointer("/solver/nbOn").and_then(Value::as_bool).unwrap_or(false);
-        Ok(Scene { json, min, size, objs, ocean_level, narrow_band })
+        self.ocean_level = ocean_on.then(|| num(oc, "level", 0.5) * size[1]);
+        self.narrow_band = j.pointer("/solver/nbOn").and_then(Value::as_bool).unwrap_or(false);
+        self.min = min; self.size = size;
     }
 
     pub fn save(&self, path: &Path) -> io::Result<()> {
