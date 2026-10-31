@@ -102,6 +102,11 @@ pub fn ww_area_box(b: &splash_format::Box3, k: f32, up: f32) -> splash_format::B
 
 /// Solver options (sim.opt).
 /// The sort's most keys and their chunks of 64 (SORTKMAX in blocks.wgsl): the count buffer's size.
+/// How deep carried depth alone must be to count as water, with the water's volume right, and how fast that changes with the error.
+const VOL_BASE: f32 = -1.2;
+const VOL_GAIN: f32 = 12.0;
+/// and the slow part that takes out what is left (a second's error of 1% moves it 0.03)
+const VOL_SLOW: f32 = 3.0;
 const SORT_K: u32 = 1 << 21;
 const SORT_CH: u32 = (SORT_K + 1).div_ceil(64);
 /// The keys this layout's sort uses (sortK in blocks.wgsl), and their chunks of 64.
@@ -116,9 +121,11 @@ fn sort_keys(n: [u32; 3]) -> (u32, u32) {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Opt { pub apic: bool, pub sort: bool, pub sort_auto: bool, pub p2g_win: bool, pub ballistic: bool, pub settle: bool, pub settle_tol: f32,
-    pub mg: bool, pub sep: f32, pub sep_iters: u32, pub extrap: bool, pub ghost: bool, pub smooth: bool, pub wall_drag: f32 }
+    pub mg: bool, pub sep: f32, pub sep_iters: u32, pub extrap: bool, pub ghost: bool, pub smooth: bool, pub wall_drag: f32,
+    /// narrow band: hold the water's volume at the start's (no sources, drops or ocean, whose water really changes)
+    pub vol_hold: bool }
 impl Default for Opt {
-    fn default() -> Opt { Opt { apic: true, sort: false, sort_auto: true, p2g_win: false, ballistic: true, settle: false, settle_tol: 0.001, mg: true, sep: 10.0, sep_iters: 8, extrap: true, ghost: true, smooth: true, wall_drag: 0.0 } }
+    fn default() -> Opt { Opt { apic: true, sort: false, sort_auto: true, p2g_win: false, ballistic: true, settle: false, settle_tol: 0.001, mg: true, sep: 10.0, sep_iters: 8, extrap: true, ghost: true, smooth: true, wall_drag: 0.0, vol_hold: false } }
 }
 
 /// Three small staging buffers for the ctl counters, read back without waiting (readStats): each step uses the newest that arrived.
@@ -203,6 +210,9 @@ pub struct FlipSim {
     air_feel: bool,
     air_iters: u32,
     air_on_step: bool,
+    /// water cells at the start (Opt::vol_hold)
+    vol0: Option<u32>,
+    vol_i: f32,
     fog_on: bool,
     fog_stage: Option<wgpu::Buffer>,
     /// time since the volume last updated, and whether this step updates it
@@ -256,7 +266,7 @@ impl FlipSim {
             last_dt: 0.0, mg_size: 0, mg_dense: Vec::new(), mg_top: 0, only_tiles: false, stats_ring, stats: None, ovf_total: 0, stage: None, pending: None, fstage: None, fmapped: false, grew: 0, ww_only: false, tall_t0: 0, prof: None, prof_acc: Vec::new(), prof_steps: 0,
             vel_g_on: false, nb_init: 0, nb_fills: Vec::new(), nb_vols: Vec::new(), nb_band: None, ocean: None, ocean_w: Vec::new(), nb_on: false, init_step: 0,
             spray_cap: 0, spr_disp_max: 0, deep_on: false, air_dims: None, ndrip: 0, drip_sig: vec![u32::MAX], drip_cache: HashMap::new(),
-            air_real: false, air_feel: false, air_iters: 20, air_on_step: false, fog_on: false, fog_stage: None, fog_wait: 0.0, fog_now: false, drip_on_step: false, spr_on_step: false, ab: l.b,
+            air_real: false, air_feel: false, air_iters: 20, air_on_step: false, vol0: None, vol_i: 0.0, fog_on: false, fog_stage: None, fog_wait: 0.0, fog_now: false, drip_on_step: false, spr_on_step: false, ab: l.b,
             sctl_stage: None, sstage: None, dstage: None,
         };
         // slot k starts as particle k (written in chunks: 44M ids are 176 MB)
@@ -328,7 +338,7 @@ impl FlipSim {
             "ovfTotal": self.ovf_total, "grew": self.grew, "velG": self.vel_g_on, "nbInit": self.nb_init, "nbBand": self.nb_band,
             "ocean": self.ocean.map(|o| serde_json::json!([o.height, o.length, o.dir, o.spread, o.seed, o.level, o.layer])), "oceanW": self.ocean_w,
             "sprayCap": self.spray_cap, "sprDispMax": self.spr_disp_max, "deepOn": self.deep_on,
-            "air": self.air_dims.map(|a| serde_json::json!([a.n, a.cells, a.h])), "ndrip": self.ndrip, "dripSig": self.drip_sig,
+            "vol0": self.vol0, "volI": self.vol_i, "air": self.air_dims.map(|a| serde_json::json!([a.n, a.cells, a.h])), "ndrip": self.ndrip, "dripSig": self.drip_sig,
             // the last step's counters: they decide growing and sorting on the next steps
             "stats": self.stats.map(|s| serde_json::json!([s.sc, s.ovf, s.fluid, s.settled, s.free, s.need, s.vmax, s.seen])),
         }))
@@ -367,6 +377,7 @@ impl FlipSim {
         self.ocean_w = v["oceanW"].as_array().map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect()).unwrap_or_default();
         self.spray_cap = u("sprayCap") as u32; self.spr_disp_max = u("sprDispMax") as u32; self.deep_on = bl("deepOn");
         self.air_dims = v["air"].as_array().map(|a| AirDims { n: [0, 1, 2].map(|i| a[0][i].as_u64().unwrap_or(1) as u32), cells: a[1].as_u64().unwrap_or(1) as u32, h: a[2].as_f64().unwrap_or(1.0) as f32 });
+        self.vol0 = v["vol0"].as_u64().map(|x| x as u32); self.vol_i = f("volI");
         self.ndrip = u("ndrip") as u32;
         self.drip_sig = v["dripSig"].as_array().map(|a| a.iter().map(|x| x.as_u64().unwrap_or(0) as u32).collect()).unwrap_or_else(|| vec![u32::MAX]);
         self.nb_fills.clear(); self.nb_vols.clear();
@@ -874,6 +885,11 @@ impl FlipSim {
         self.set_f(418, if self.opt.sep > 0.0 && !self.ww_only { 1.0 - (-self.opt.sep * dt).exp() } else { 0.0 });
         self.set_f(421, if apic { 1.0 } else { 0.0 });
         self.set_f(422, self.opt.wall_drag);
+        // Nothing else in the narrow band keeps its volume: deep water is water because the carried depth says so, and which rules hold it
+        // decide whether it gains (10% over a slosh) or loses (16%). So the count of water cells steers how deep a cell has to be.
+        let hold = self.stats.filter(|s| self.opt.vol_hold && s.fluid > 0).map(|s| { let v0 = *self.vol0.get_or_insert(s.fluid); s.fluid as f32 / v0 as f32 - 1.0 });
+        if let Some(e) = hold { self.vol_i = (self.vol_i + VOL_SLOW * e * dt).clamp(-0.6, 0.6); }
+        self.set_f(423, hold.map_or(-1.0, |e| (VOL_BASE - VOL_GAIN * e - self.vol_i).clamp(-2.5, -0.9)));
         // the sharp water surface (ghost fluid with theta from the surface field each step); off: the page's cell-centred surface
         self.set_f(419, if self.opt.ghost && !self.ww_only { -1.0 } else { 0.0 });
         if self.opt.mg && !self.ww_only {

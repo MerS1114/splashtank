@@ -284,8 +284,8 @@ pub fn desc_from_scene(scene: &Value, o: &BakeOpts) -> Result<Desc, String> {
     let apic = sv.get("xfer").and_then(Value::as_str).unwrap_or("apic") == "apic";
     let mut dsc = Desc {
         d, max_n, max_n_set: o.max_points.is_some(), fps, substeps, max_sub, frames: (dur * fps).round() as u32,
-        g, iters, flip: num(&sv, "flip", 0.95) as f32, // (narrow band water gains water above 0.8: the level ended 1.7% off at 0.8, 6-7% at 0.85-0.9, full depth about 2.5% at all three)
-        apic_flip: { let a = num(&sv, "apicFlip", 0.9) as f32; if nb.is_some() || ocean.is_some() { a.min(0.8) } else { a } }, comp: if sep > 0.0 { 0.0 } else { 6.0 }, sep, apic, accurate,
+        g, iters, flip: num(&sv, "flip", 0.95) as f32, // (an ocean has no fixed volume to hold, so it stays at 0.8: narrow band water gained water above that before the volume was held, flip.rs vol_hold)
+        apic_flip: { let a = num(&sv, "apicFlip", 0.9) as f32; if ocean.is_some() { a.min(0.8) } else { a } }, comp: if sep > 0.0 { 0.0 } else { 6.0 }, sep, apic, accurate,
         // the Speed-ups switches: not in the page's scene files (its defaults then), kept under solver by the native window
         live: false, wall_drag: num(&sv, "wallDrag", 0.015) as f32, cell_ratio, sort: flag(&sv, "sortP", true), p2g_win: flag(&sv, "p2gWin", true), ballistic: flag(&sv, "ballistic", true), settle: flag(&sv, "settle", false), mg: flag(&sv, "mg", true), ghost: flag(&sv, "ghost", true), smooth: flag(&sv, "smoothWalls", true),
         detail, col_max: num(&sv, "colMax", 100.0) as f32 * k, vmax_w: num(&sv, "vmaxW", 50.0) as f32 * k, scale,

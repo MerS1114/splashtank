@@ -45,7 +45,7 @@ fn nbPhi(@builtin(global_invocation_id) g: vec3<u32>) {
   if (colBits(c) != 0u) { rhs[c] = 0.5; return; }
   let x = cellCenter(a.p.x, a.p.y, a.p.z);
   let phA = phiSample(x - P.dt * velGVec(x));
-  var inside = atomicLoad(&cnt[c]) > 0 || phA < -1.0;
+  var inside = atomicLoad(&cnt[c]) > 0 || phA < P.ext1.w;   // how deep counts as water: flip.rs steers it to keep the water's volume
   if (P.ocean != 0u && layerW(x) >= 0.5) { inside = x.y < oceanEta(x.xz); }
   rhs[c] = select(clamp(phA, 0.5, 7.9), clamp(phA, -7.9, -0.5), inside);
 }

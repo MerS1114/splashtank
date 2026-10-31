@@ -412,6 +412,37 @@ fn still_object() {
     assert!(mean < 0.06, "water around a still object moves at {mean:.3} m/s");
 }
 
+/// By hand (--ignored): the water's real volume over time, narrow band against full depth, at two Splash details: water cells and particles.
+#[test]
+#[ignore]
+fn nb_volume() {
+    let _turn = one_at_a_time();
+    let gpu = Gpu::new().unwrap();
+    let (w, h, dd, depth) = (3.0f64, 2.0f64, 1.5f64, 1.2f64);
+    let spc = 0.02f32;
+    for (name, band, af) in [("full 0.8", None, 0.8), ("full 0.9", None, 0.9), ("band 0.8", Some(3.0), 0.8), ("band 0.9", Some(3.0), 0.9)] {
+        if band.is_none() && std::env::var("NBV_ONLY").is_ok_and(|v| !v.is_empty()) { continue; }
+        let mut sc = scene(w, h, dd, json!([{ "t": "box", "fx0": 0, "fx1": 0.5, "y0": 0, "y1": depth, "fz0": 0, "fz1": 1 }]), 9.8);
+        if let Some(b) = band { sc["solver"]["nbOn"] = json!(true); sc["solver"]["nbBand"] = json!(b); }
+        sc["solver"]["ballistic"] = json!(false);
+        let mut d = desc(&sc, spc);
+        d.apic_flip = af;
+        let mut s = Session::new(&gpu, &d, &|_| {}, None).unwrap();
+        s.seed(&gpu);
+        let cell = s.lay.h as f64;
+        let want = w * dd * depth * 0.5;
+        let mut line = String::new();
+        for _ in 1..=16 {
+            frames(&gpu, &mut s, 30);
+            let (p, v) = read(&gpu, &mut s);
+            let st = s.sim.stats.unwrap();
+            let fast = v.iter().filter(|q| len(**q) > 0.5).count();
+            line += &format!(" {:.3}/{}k/{}k", st.fluid as f64 * cell * cell * cell / want, p.len() / 1000, fast / 1000);
+        }
+        eprintln!("nbv {name}: water cells over the volume / particles / fast every 0.5 s:{line}");
+    }
+}
+
 /// Mer's meteor ocean, frame by frame (needs her scene in Downloads; run by hand with --ignored): the surface far from the impact against
 /// the mean particle height, and the fastest water.
 #[test]
@@ -423,12 +454,13 @@ fn ocean_diag() {
     let mut sc: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     sc["bake"]["accuracy"] = json!("normal");
     let spc: f32 = std::env::var("ACC_SP").ok().and_then(|v| v.parse().ok()).unwrap_or(0.03);
-    let d = desc_from_scene(&sc, &BakeOpts { spacing: spc, seconds: Some(1.5), detail: Some(1.0), accurate: Some(false), ..Default::default() }).unwrap();
+    let d = desc_from_scene(&sc, &BakeOpts { spacing: spc, seconds: Some(8.0), detail: Some(1.0), accurate: Some(false), ..Default::default() }).unwrap();
     let mut s = Session::new(&gpu, &d, &|m| eprintln!("{m}"), None).unwrap();
     s.seed(&gpu);
     let b = s.lay.b;
     let (hx, hz) = ((b.x1 - b.x0) * 0.15, (b.z1 - b.z0) * 0.15);
-    for f in 0..=18 {
+    let last: u32 = std::env::var("ACC_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(18);
+    for f in 0..=last {
         if f > 0 { frames(&gpu, &mut s, 1); }
         let (p, v) = read(&gpu, &mut s);
         let my = p.iter().map(|q| q[1] as f64).sum::<f64>() / p.len() as f64;
