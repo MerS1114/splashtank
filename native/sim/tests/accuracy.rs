@@ -64,10 +64,17 @@ fn read(gpu: &Gpu, s: &mut Session) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
     out
 }
 
+/// Each case reserves a whole simulation on the card: together they run out of its memory.
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TURN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn len(v: [f32; 3]) -> f32 { (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt() }
 
 #[test]
 fn still() {
+    let _turn = one_at_a_time();
     let gpu = Gpu::new().unwrap();
     let sc = scene(1.0, 1.0, 1.0, json!([{ "t": "box", "fx0": 0, "fx1": 1, "y0": 0, "y1": 0.5, "fz0": 0, "fz1": 1 }]), 9.8);
     let d = desc(&sc, sp());
@@ -98,6 +105,7 @@ fn dam_scene() -> (Value, f64, f64) {
 
 #[test]
 fn dam() {
+    let _turn = one_at_a_time();
     let gpu = Gpu::new().unwrap();
     let (sc, a, _) = dam_scene();
     let d = desc(&sc, sp());
@@ -125,6 +133,7 @@ fn dam() {
 
 #[test]
 fn volume() {
+    let _turn = one_at_a_time();
     let gpu = Gpu::new().unwrap();
     let (sc, a, w) = dam_scene();
     let want = a * 2.0 * a / w;
@@ -153,6 +162,7 @@ fn volume() {
 
 #[test]
 fn slosh() {
+    let _turn = one_at_a_time();
     let gpu = Gpu::new().unwrap();
     let (l, dd, hd, am) = (1.0f64, 0.2f64, 0.5f64, 0.08f64);
     let sc = scene(l, 1.0, dd, json!([]), 9.8);
@@ -214,6 +224,7 @@ fn slosh() {
 
 #[test]
 fn swirl() {
+    let _turn = one_at_a_time();
     let gpu = Gpu::new().unwrap();
     let (l, dd, u) = (1.0f64, 0.1f64, 0.5f64);
     // no gravity: with it, the thin gap left at the top sloshes and pollutes the vortex
@@ -262,6 +273,7 @@ fn built_in(name: &str) -> Value {
 
 #[test]
 fn crown() {
+    let _turn = one_at_a_time();
     let gpu = Gpu::new().unwrap();
     let sc = built_in("Meteor lake");
     let d = desc(&sc, 0.04);
@@ -297,6 +309,7 @@ fn crown() {
 
 #[test]
 fn blast() {
+    let _turn = one_at_a_time();
     let gpu = Gpu::new().unwrap();
     let sc = built_in("Underwater blast");
     let d = desc(&sc, 0.04);
@@ -329,6 +342,7 @@ fn blast() {
 /// A stairstep wall catches the water and holds it back.
 #[test]
 fn ramp() {
+    let _turn = one_at_a_time();
     let gpu = Gpu::new().unwrap();
     let all: Value = serde_json::from_str(include_str!("../../app/src/scenes.json")).unwrap();
     let mut cube = all["scenes"]["Wave tank"]["objs"][0].clone();
@@ -374,6 +388,7 @@ fn ramp() {
 /// Still water around a tilted object stays still: a badly weighted wall would stir it up.
 #[test]
 fn still_object() {
+    let _turn = one_at_a_time();
     let gpu = Gpu::new().unwrap();
     let all: Value = serde_json::from_str(include_str!("../../app/src/scenes.json")).unwrap();
     let mut cube = all["scenes"]["Wave tank"]["objs"][0].clone();
@@ -391,4 +406,35 @@ fn still_object() {
     let mean = sp.iter().map(|&x| x as f64).sum::<f64>() / sp.len() as f64;
     eprintln!("still_object: after 3 s, speed mean {mean:.4} m/s, 99% under {:.3}, max {:.3}", sp[sp.len() * 99 / 100], sp[sp.len() - 1]);
     assert!(mean < 0.06, "water around a still object moves at {mean:.3} m/s");
+}
+
+/// Mer's meteor ocean, frame by frame (needs her scene in Downloads; run by hand with --ignored): the surface far from the impact against
+/// the mean particle height, and the fastest water.
+#[test]
+#[ignore]
+fn ocean_diag() {
+    let _turn = one_at_a_time();
+    let gpu = Gpu::new().unwrap();
+    let path = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap()).join("Downloads/splashtank-scene.json");
+    let mut sc: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    sc["bake"]["accuracy"] = json!("normal");
+    let spc: f32 = std::env::var("ACC_SP").ok().and_then(|v| v.parse().ok()).unwrap_or(0.03);
+    let d = desc_from_scene(&sc, &BakeOpts { spacing: spc, seconds: Some(1.5), detail: Some(1.0), accurate: Some(false), ..Default::default() }).unwrap();
+    let mut s = Session::new(&gpu, &d, &|m| eprintln!("{m}"), None).unwrap();
+    s.seed(&gpu);
+    let b = s.lay.b;
+    let (hx, hz) = ((b.x1 - b.x0) * 0.15, (b.z1 - b.z0) * 0.15);
+    for f in 0..=18 {
+        if f > 0 { frames(&gpu, &mut s, 1); }
+        let (p, v) = read(&gpu, &mut s);
+        let my = p.iter().map(|q| q[1] as f64).sum::<f64>() / p.len() as f64;
+        // the top of the water in a corner far from the middle: the 98th percentile of height there
+        let mut far: Vec<f32> = p.iter().filter(|q| q[0] < b.x0 + hx && q[2] < b.z0 + hz && q[0] > b.x0 + 0.05 * hx).map(|q| q[1]).collect();
+        far.sort_by(|a, b| a.total_cmp(b));
+        let top = far.get(far.len() * 98 / 100).copied().unwrap_or(0.0);
+        let mut sp: Vec<(f32, [f32; 3])> = v.iter().zip(&p).map(|(w, q)| (len(*w), *q)).collect();
+        sp.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let fast = sp.last().copied().unwrap_or((0.0, [0.0; 3]));
+        eprintln!("f{f}: {} particles, mean height {my:.3}, far surface {top:.3}, fastest {:.1} units/s ({:.0} m/s) at {:.2} {:.2} {:.2}, 99.9% under {:.1}", p.len(), fast.0, fast.0 * d.scale, fast.1[0], fast.1[1], fast.1[2], sp[sp.len() * 999 / 1000].0);
+    }
 }
