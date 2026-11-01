@@ -33,6 +33,7 @@ pub fn run(files: Vec<PathBuf>) {
         let mut app = App::new(rs, cc.egui_ctx.clone());
         crate::bakeui::clean_folder(&app.bake.folder);
         app.load_look();
+        if let Some(z) = crate::bakeui::setting("uiZoom").and_then(|v| v.as_f64()) { cc.egui_ctx.set_zoom_factor(z as f32); }
         let back = app.offer_recovery();
         for f in &files { app.open(f); }
         // like the page: a scene to start from, with live water on
@@ -391,10 +392,13 @@ impl App {
         self.scene_rev += 1;
         if self.bake_cache().is_some() { self.bake_stale = true; }
         if self.live_w.busy() { self.live_w.stop(); self.live_rx = None; self.live_pending.clear(); }
-        // the first change of a burst saves the scene before it for undo
+        self.undo_mark();
+        if let Some(s) = self.doc.scene.as_mut() { s.refresh(meshes); }
+    }
+    /// The first change of a burst saves the scene before it for undo.
+    fn undo_mark(&mut self) {
         if !self.burst { if let Some(s) = self.stable.take() { self.undo.push(s); if self.undo.len() > 100 { self.undo.remove(0); } } self.redo.clear(); self.burst = true; }
         self.changed_now = true;
-        if let Some(s) = self.doc.scene.as_mut() { s.refresh(meshes); }
         self.dirty = true;
     }
 
@@ -1843,7 +1847,7 @@ impl App {
                     }
                 };
                 // how the mist looks changes only the picture: the water stays good
-                if changed { if self.tab == Tab::Sim && !crate::edit::take_sim_change() { self.dirty = true; } else { self.edited(); } }
+                if changed { if self.tab == Tab::Sim && !crate::edit::take_sim_change() { self.undo_mark(); } else { self.edited(); } }
                 match self.obj_act.take() {
                     Some("dup") => self.duplicate(egui::pos2(0.0, 0.0)),
                     Some("del") => self.delete_selected(),
@@ -1967,6 +1971,12 @@ impl App {
                     self.dirty = true;
                 }
             }
+            ui.horizontal(|ui| {
+                ui.label("Interface size").on_hover_text("Everything in the window larger or smaller. Remembered.");
+                let mut z = ui.ctx().zoom_factor();
+                for (v, n) in [(1.0, "100%"), (1.25, "125%"), (1.5, "150%"), (1.75, "175%")] { ui.selectable_value(&mut z, v, n); }
+                if z != ui.ctx().zoom_factor() { ui.ctx().set_zoom_factor(z); crate::bakeui::set_setting("uiZoom", serde_json::json!(z)); }
+            });
             ui.horizontal(|ui| {
                 ui.label("Background");
                 for (v, n) in [(0u8, "Grey"), (1, "Light"), (2, "Black")] { ui.selectable_value(&mut self.look.bg, v, n); }

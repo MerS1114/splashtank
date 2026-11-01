@@ -32,8 +32,33 @@ fn label(ui: &mut egui::Ui, text: &str, changed: bool, tip: &str) {
 /// Right-click on a setting: back to the page's default (the page's context menu).
 fn reset_menu(resp: &egui::Response, j: &mut Value, path: &[&str], def: &Value) -> bool {
     let mut ch = false;
-    resp.context_menu(|ui| { if ui.button("Reset to default").clicked() { set(j, path, def.clone()); ch = true; ui.close(); } });
+    let key = path.join(".");
+    resp.context_menu(|ui| {
+        if ui.button("Reset to default").clicked() { set(j, path, def.clone()); ch = true; ui.close(); }
+        let on = pinned(&key);
+        if ui.button(if on { "Unpin" } else { "Pin to top" }).on_hover_text("Pinned settings stay in a group at the top of the Simulation tab, in every scene.").clicked() { toggle_pin(&key); ui.close(); }
+    });
     ch
+}
+
+// Pinned settings: their paths, kept in settings.json
+thread_local! {
+    static PINS: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+    static SHOW_ALL: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+fn with_pins<T>(f: impl FnOnce(&mut Vec<String>) -> T) -> T {
+    PINS.with(|p| {
+        let mut p = p.borrow_mut();
+        let v = p.get_or_insert_with(|| crate::bakeui::setting("pins").and_then(|v| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())).unwrap_or_default());
+        f(v)
+    })
+}
+fn pinned(key: &str) -> bool { with_pins(|p| p.iter().any(|k| k == key)) }
+fn toggle_pin(key: &str) {
+    with_pins(|p| {
+        if let Some(i) = p.iter().position(|k| k == key) { p.remove(i); } else { p.push(key.to_owned()); }
+        crate::bakeui::set_setting("pins", json!(p));
+    });
 }
 
 thread_local! { static SIM_CHANGED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
@@ -49,6 +74,9 @@ fn row_inner(ui: &mut egui::Ui, j: &mut Value, r: &Value) -> bool {
     let path = path_of(r);
     let tip = r["tip"].as_str().unwrap_or("");
     let name = r["label"].as_str().unwrap_or("");
+    // a green dot: this one changes only the picture
+    let dotted;
+    let (name, tip): (&str, &str) = if r["look"].as_bool() == Some(true) { dotted = format!("\u{2022} {name}"); (&dotted, tip) } else { (name, tip) };
     if r["kind"] == "check" {
         let def = r["def"].as_bool().unwrap_or(false);
         let mut on = get(j, &path).and_then(Value::as_bool).unwrap_or(def);
@@ -101,11 +129,19 @@ fn row_inner(ui: &mut egui::Ui, j: &mut Value, r: &Value) -> bool {
     ch | reset_menu(&resp, j, &path, &r["def"])
 }
 
+/// The group has a row to show, itself or in a group inside it.
+fn group_shows(gi: usize, all: bool) -> bool {
+    let sp = spec();
+    sp["rows"].as_array().unwrap().iter().any(|r| r["group"].as_u64() == Some(gi as u64) && (all || r["basic"].as_bool() == Some(true)))
+        || sp["groups"].as_array().unwrap().iter().enumerate().any(|(k, s)| s["parent"].as_u64() == Some(gi as u64) && group_shows(k, all))
+}
+
 fn group(ui: &mut egui::Ui, j: &mut Value, gi: usize) -> bool {
     let sp = spec();
     let g = &sp["groups"][gi];
-    let rows: Vec<&Value> = sp["rows"].as_array().unwrap().iter().filter(|r| r["group"].as_u64() == Some(gi as u64)).collect();
-    let subs: Vec<usize> = sp["groups"].as_array().unwrap().iter().enumerate().filter(|(_, s)| s["parent"].as_u64() == Some(gi as u64)).map(|(k, _)| k).collect();
+    let all = SHOW_ALL.with(|c| c.get()).unwrap_or(false);
+    let rows: Vec<&Value> = sp["rows"].as_array().unwrap().iter().filter(|r| r["group"].as_u64() == Some(gi as u64) && (all || r["basic"].as_bool() == Some(true))).collect();
+    let subs: Vec<usize> = sp["groups"].as_array().unwrap().iter().enumerate().filter(|(k, s)| s["parent"].as_u64() == Some(gi as u64) && group_shows(*k, all)).map(|(k, _)| k).collect();
     if rows.is_empty() && subs.is_empty() { return false; }
     let mut changed = false;
     let h = egui::CollapsingHeader::new(g["title"].as_str().unwrap_or("")).id_salt(("simgroup", gi)).default_open(g["open"].as_bool().unwrap_or(false)).show(ui, |ui| {
@@ -155,7 +191,21 @@ pub fn settings(ui: &mut egui::Ui, j: &mut Value, find: &mut String) -> bool {
         ui.add(egui::TextEdit::singleline(find).hint_text("a setting's name").desired_width(200.0));
         if !find.is_empty() && ui.small_button("x").clicked() { find.clear(); }
     });
-    ui.label(egui::RichText::new("Right-click a setting to reset it to the default.").small().color(egui::Color32::from_gray(0x90)));
+    let mut all = SHOW_ALL.with(|c| c.get()).unwrap_or_else(|| crate::bakeui::setting("settingsAll").and_then(|v| v.as_bool()).unwrap_or(false));
+    let before = all;
+    ui.horizontal(|ui| {
+        ui.selectable_value(&mut all, false, "Simple").on_hover_text("The settings most shots change.");
+        ui.selectable_value(&mut all, true, "All").on_hover_text("Every setting.");
+    });
+    if all != before { crate::bakeui::set_setting("settingsAll", json!(all)); }
+    SHOW_ALL.with(|c| c.set(Some(all)));
+    ui.label(egui::RichText::new("Right-click a setting to reset or pin it. \u{2022} changes only the picture; the rest simulate again.").small().color(egui::Color32::from_gray(0x90)));
+    let pins: Vec<&Value> = sp["rows"].as_array().unwrap().iter().filter(|r| pinned(&path_of(r).join("."))).collect();
+    if !pins.is_empty() {
+        egui::CollapsingHeader::new("Pinned").default_open(true).show(ui, |ui| {
+            egui::Grid::new("simpins").num_columns(2).spacing([8.0, 3.0]).show(ui, |ui| { for r in &pins { changed |= row(ui, j, r); ui.end_row(); } });
+        });
+    }
     let q = find.trim().to_lowercase();
     if !q.is_empty() {
         egui::Grid::new("simfind").num_columns(2).spacing([8.0, 3.0]).show(ui, |ui| {

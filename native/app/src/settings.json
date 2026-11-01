@@ -179,7 +179,8 @@
     "solver",
     "g"
    ],
-   "def": 9.8
+   "def": 9.8,
+   "basic": true
   },
   {
    "group": 1,
@@ -217,7 +218,8 @@
     "solver",
     "apicFlip"
    ],
-   "def": 0.9
+   "def": 0.9,
+   "basic": true
   },
   {
    "group": 1,
@@ -274,7 +276,8 @@
     "solver",
     "scale"
    ],
-   "def": 1
+   "def": 1,
+   "basic": true
   },
   {
    "group": 2,
@@ -294,7 +297,8 @@
     "wind",
     "speed"
    ],
-   "def": 0
+   "def": 0,
+   "basic": true
   },
   {
    "group": 2,
@@ -372,7 +376,8 @@
     "solver",
     "gust"
    ],
-   "def": 1
+   "def": 1,
+   "basic": true
   },
   {
    "group": 3,
@@ -391,7 +396,8 @@
     "solver",
     "foamSens"
    ],
-   "def": 1
+   "def": 1,
+   "basic": true
   },
   {
    "group": 3,
@@ -441,7 +447,8 @@
     "solver",
     "sprOn"
    ],
-   "def": true
+   "def": true,
+   "basic": true
   },
   {
    "group": 4,
@@ -460,7 +467,8 @@
     "solver",
     "sprAmt"
    ],
-   "def": 2
+   "def": 2,
+   "basic": true
   },
   {
    "group": 4,
@@ -479,7 +487,8 @@
     "solver",
     "wwFoamLife"
    ],
-   "def": 8
+   "def": 8,
+   "basic": true
   },
   {
    "group": 4,
@@ -498,7 +507,8 @@
     "solver",
     "wwTrail"
    ],
-   "def": 1
+   "def": 1,
+   "basic": true
   },
   {
    "group": 5,
@@ -757,7 +767,8 @@
     "solver",
     "airOn"
    ],
-   "def": true
+   "def": true,
+   "basic": true
   },
   {
    "group": 8,
@@ -907,7 +918,8 @@
     "solver",
     "dripOn"
    ],
-   "def": true
+   "def": true,
+   "basic": true
   },
   {
    "group": 14,
@@ -957,7 +969,8 @@
     "solver",
     "nbOn"
    ],
-   "def": false
+   "def": false,
+   "basic": true
   },
   {
    "group": 15,
@@ -988,7 +1001,8 @@
     "solver",
     "nbBand"
    ],
-   "def": 3
+   "def": 3,
+   "basic": true
   },
   {
    "group": 16,
@@ -1000,7 +1014,8 @@
     "ocean",
     "on"
    ],
-   "def": false
+   "def": false,
+   "basic": true
   },
   {
    "group": 16,
@@ -1020,7 +1035,8 @@
     "ocean",
     "height"
    ],
-   "def": 2
+   "def": 2,
+   "basic": true
   },
   {
    "group": 16,
@@ -1040,7 +1056,8 @@
     "ocean",
     "length"
    ],
-   "def": 30
+   "def": 30,
+   "basic": true
   },
   {
    "group": 16,
@@ -1100,7 +1117,8 @@
     "ocean",
     "level"
    ],
-   "def": 0.5
+   "def": 0.5,
+   "basic": true
   },
   {
    "group": 16,
@@ -1216,7 +1234,8 @@
     "solver",
     "vmaxW"
    ],
-   "def": 50
+   "def": 50,
+   "basic": true
   },
   {
    "group": 19,
@@ -1324,7 +1343,8 @@
     "fogOn"
    ],
    "def": true,
-   "tip": "Keep a cloud of mist and smoke with the bake. Costs little time and about half a megabyte a frame."
+   "tip": "Keep a cloud of mist and smoke with the bake. Costs little time and about half a megabyte a frame.",
+   "basic": true
   },
   {
    "group": 9,
@@ -1342,7 +1362,8 @@
     "fogAmount"
    ],
    "def": 1,
-   "tip": "How much cloud whitewater leaves."
+   "tip": "How much cloud whitewater leaves.",
+   "basic": true
   },
   {
    "group": 9,
@@ -1360,7 +1381,8 @@
     "fogLife"
    ],
    "def": 3,
-   "tip": "How long the cloud takes to thin away."
+   "tip": "How long the cloud takes to thin away.",
+   "basic": true
   },
   {
    "group": 10,
@@ -1526,7 +1548,8 @@
    ],
    "def": 1,
    "tip": "How thick it is drawn.",
-   "look": true
+   "look": true,
+   "basic": true
   },
   {
    "group": 12,
@@ -1546,7 +1569,8 @@
    "def": 1,
    "tip": "The most solid it can get: lower keeps even the thickest cloud see-through.",
    "pct": true,
-   "look": true
+   "look": true,
+   "basic": true
   },
   {
    "group": 12,
@@ -1563,7 +1587,8 @@
     247
    ],
    "look": true,
-   "tip": "The colour of lit cloud, for mist and smoke alike."
+   "tip": "The colour of lit cloud, for mist and smoke alike.",
+   "basic": true
   },
   {
    "group": 12,
@@ -1582,7 +1607,8 @@
    ],
    "def": 1,
    "tip": "How bright it is drawn. Under 1 it darkens towards smoke.",
-   "look": true
+   "look": true,
+   "basic": true
   },
   {
    "group": 12,
@@ -1640,7 +1666,8 @@
     "smokeAmount"
    ],
    "def": 1,
-   "tip": "How much smoke objects marked Makes smoke give off."
+   "tip": "How much smoke objects marked Makes smoke give off.",
+   "basic": true
   },
   {
    "group": 13,

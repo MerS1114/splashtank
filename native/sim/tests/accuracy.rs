@@ -443,6 +443,38 @@ fn nb_volume() {
     }
 }
 
+/// By hand (--ignored): how spacing changes the Meteor lake splash, in real sizes: the volume of water above the still surface and how high it
+/// reaches. RES_BAND=m keeps the narrow band the same depth in metres at every spacing (else the same number of cells).
+#[test]
+#[ignore]
+fn res_crown() {
+    let _turn = one_at_a_time();
+    let gpu = Gpu::new().unwrap();
+    let metric = std::env::var("RES_BAND").is_ok_and(|v| v == "m");
+    for spc in [0.04f32, 0.03, 0.02] {
+        let mut sc = built_in("Meteor lake");
+        if metric { let b = sc["solver"]["nbBand"].as_f64().unwrap_or(3.0); sc["solver"]["nbBand"] = json!(b * 0.04 / spc as f64); }
+        let d = desc(&sc, spc);
+        let mut s = Session::new(&gpu, &d, &|_| {}, None).unwrap();
+        s.seed(&gpu);
+        let (p0, _) = read(&gpu, &mut s);
+        let mut ys: Vec<f32> = p0.iter().map(|q| q[1]).collect();
+        ys.sort_by(|a, b| a.total_cmp(b));
+        let surf = ys[ys.len() * 98 / 100];
+        let mut line = String::new();
+        let mut done = 0;
+        for f in [12u32, 18, 24, 36, 48] {
+            frames(&gpu, &mut s, f - done); done = f;
+            let (p, _) = read(&gpu, &mut s);
+            let mut up: Vec<f32> = p.iter().map(|q| q[1] - surf).filter(|&y| y > 0.1).collect();
+            up.sort_by(|a, b| a.total_cmp(b));
+            let vol = up.len() as f64 * (spc as f64).powi(3);
+            line += &format!(" f{f} {:.2}/{:.2}", vol, up.get(up.len().saturating_sub(1) * 99 / 100).copied().unwrap_or(0.0));
+        }
+        eprintln!("res {spc} band {:.1}: volume above the surface / 99% height:{line}; {} particles", d.nb.unwrap_or(0.0), s.sim.n);
+    }
+}
+
 /// Mer's meteor ocean, frame by frame (needs her scene in Downloads; run by hand with --ignored): the surface far from the impact against
 /// the mean particle height, and the fastest water.
 #[test]

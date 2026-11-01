@@ -130,6 +130,12 @@ for (const r of out.rows) if (r.key === 'nbOn') r.label = 'Enabled';
     tip: 'Water sliding over the tank floor loses speed as the square of it, as over a real floor. It brings a dam break\'s front within 10% of the measured one. 0 is a perfectly slippery floor. The web page ignores this.' });
 }
 for (const r of out.rows) if (r.key === 'apicFlip') r.def = 0.9;   // waves lost 3.6% of their height a period at the page's 0.8, 1.5% at 0.9, and the crown stayed
+// the Simulation tab's Simple view: the settings most shots change
+{
+  const basic = new Set(['g', 'scale', 'apicFlip', 'wind.speed', 'gust', 'foamSens', 'sprOn', 'sprAmt', 'wwFoamLife', 'wwTrail', 'airOn', 'fogOn', 'fogAmount', 'fogLife', 'fogDensity', 'fogOpacity', 'fogColor',
+    'fogBright', 'smokeAmount', 'dripOn', 'nbOn', 'nbBand', 'ocean.on', 'ocean.height', 'ocean.length', 'ocean.level', 'vmaxW']);
+  for (const r of out.rows) if (basic.has(r.key)) r.basic = true;
+}
 // native defaults that differ from the page's: the grouped transfer (on: with the finer sort it took particle to grid from 6.8 to 2.2 ms a
 // step on Mer's ocean, the same water; the page left it off)
 for (const r of out.rows) if (r.key === 'p2gWin') {
