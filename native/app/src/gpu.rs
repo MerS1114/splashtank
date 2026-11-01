@@ -40,7 +40,7 @@ pub fn picture(files: &[PathBuf], out: &Path, frame: f64, size: [u32; 2]) -> Res
     let frame = doc.cache.as_ref().map(|c| frame.clamp(0.0, c.frames.len().saturating_sub(1) as f64)).unwrap_or(0.0);
     let t0 = std::time::Instant::now();
     let mut enc = device.create_command_encoder(&Default::default());
-    r.draw(&device, &queue, &mut enc, &color.create_view(&Default::default()), size, &cam, &doc, frame.floor() as usize, frame.ceil() as usize, frame.fract() as f32, &Look { air: std::env::var("SPLASH_AIR").is_ok(), ..Look::default() });
+    r.draw(&device, &queue, &mut enc, &color.create_view(&Default::default()), size, &cam, &doc, frame.floor() as usize, frame.ceil() as usize, frame.fract() as f32, &Look { air: std::env::var("SPLASH_AIR").ok().and_then(|v| v.parse().ok()).unwrap_or(0), ..Look::default() });
     let row = (size[0] * 4).div_ceil(256) * 256;
     let buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (row * size[1]) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
     enc.copy_texture_to_buffer(color.as_image_copy(), wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None } },

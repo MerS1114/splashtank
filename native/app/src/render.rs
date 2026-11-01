@@ -134,14 +134,21 @@ pub struct Look {
     pub scene_objs: bool,
     /// draw the mist and smoke volume (how it looks is in the scene's settings, with the rest of it)
     pub fog: bool,
-    /// draw the air field as arrows: every how many stored cells, how long, and how fast air must be to show (m/s)
-    pub air: bool,
+    /// the air field: 0 not shown, 1 arrows through the tank, 2 a slice. Arrows every how many cells; size; hidden under this speed; red at this speed (m/s)
+    pub air: u8,
     pub air_every: u32,
     pub air_len: f32,
     pub air_min: f32,
+    pub air_red: f32,
+    /// the slice: how far along its facing direction (0 to 1), turned and tilted (degrees), samples across, with a wash of colour behind the arrows
+    pub cut_pos: f32,
+    pub cut_turn: f32,
+    pub cut_tilt: f32,
+    pub cut_n: u32,
+    pub cut_wash: bool,
 }
 impl Default for Look {
-    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None, scene_objs: false, by_type: false, time: 0.0, bg: 0, fog: true, air: false, air_every: 2, air_len: 1.0, air_min: 0.5 } }
+    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None, scene_objs: false, by_type: false, time: 0.0, bg: 0, fog: true, air: 0, air_every: 4, air_len: 1.0, air_min: 0.5, air_red: 30.0, cut_pos: 0.5, cut_turn: 0.0, cut_tilt: 0.0, cut_n: 140, cut_wash: true } }
 }
 
 #[repr(C)]
@@ -179,8 +186,8 @@ pub struct Renderer {
     fog_smp: wgpu::Sampler,
     tris: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
-    /// lines over everything (the air field's arrows)
-    lines_top: wgpu::RenderPipeline,
+    /// flat triangles over everything (the air field)
+    tris_top: wgpu::RenderPipeline,
     cams: Vec<CamSlot>,
     /// the multisampled colour and depth the view is drawn into, resolved into the caller's target
     msaa: Option<([u32; 2], wgpu::TextureView, wgpu::TextureView)>,
@@ -280,8 +287,8 @@ impl Renderer {
         });
         let tris = geo(wgpu::PrimitiveTopology::TriangleList, &opaque, depth(true, less));
         let lines = geo(wgpu::PrimitiveTopology::LineList, &blended, depth(false, less));
-        let lines_top = geo(wgpu::PrimitiveTopology::LineList, &blended, depth(false, wgpu::CompareFunction::Always));
-        Renderer { bg, water, deep, ww, fog, fog_bgl, fog_u, fog_buf, fog_smp, lines_top, tris, lines, cams, msaa: None, layer_bgl, empty, dummy, frames: HashMap::new(), lru: VecDeque::new(), gen: u64::MAX,
+        let tris_top = geo(wgpu::PrimitiveTopology::TriangleList, &blended, depth(false, wgpu::CompareFunction::Always));
+        Renderer { bg, water, deep, ww, fog, fog_bgl, fog_u, fog_buf, fog_smp, tris_top, tris, lines, cams, msaa: None, layer_bgl, empty, dummy, frames: HashMap::new(), lru: VecDeque::new(), gen: u64::MAX,
             kept_bytes: 0, budget: 2 << 30, uploads: 0 }
     }
 
@@ -381,7 +388,7 @@ impl Renderer {
 
         let (tris, lines) = geometry(doc, a, b, w, look);
         let mut arrows = Vec::new();
-        if let (true, Some(c)) = (look.air, &doc.cache) { if a < c.frames.len() { air_arrows(&mut arrows, c, a, look); } }
+        if let (true, Some(c)) = (look.air > 0, &doc.cache) { if a < c.frames.len() { air_view(&mut arrows, c, a, look, cam.eye()); } }
         let ab = (!arrows.is_empty()).then(|| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("air"), contents: bytemuck::cast_slice(&arrows), usage: wgpu::BufferUsages::VERTEX }));
         let tb = (!tris.is_empty()).then(|| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("tris"), contents: bytemuck::cast_slice(&tris), usage: wgpu::BufferUsages::VERTEX }));
         let lb = (!lines.is_empty()).then(|| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("lines"), contents: bytemuck::cast_slice(&lines), usage: wgpu::BufferUsages::VERTEX }));
@@ -484,7 +491,7 @@ impl Renderer {
         }
         if let Some(bf) = &ab {
             pass.set_bind_group(0, &self.cams[3].bg, &[]);
-            pass.set_pipeline(&self.lines_top); pass.set_vertex_buffer(0, bf.slice(..)); pass.draw(0..arrows.len() as u32, 0..1);
+            pass.set_pipeline(&self.tris_top); pass.set_vertex_buffer(0, bf.slice(..)); pass.draw(0..arrows.len() as u32, 0..1);
         }
     }
 }
@@ -500,34 +507,90 @@ pub fn euler(rx: f32, ry: f32, rz: f32) -> Mat3 {
                     Vec3::new(cz * sy * cx + sz * sx, sz * sy * cx - cz * sx, cy * cx))
 }
 
-/// The frame's air field as arrows: blue for slow air through cyan to white for the fastest, each as long as the air moves in a fraction of a
-/// second, so a glance shows where the air goes and how hard.
-fn air_arrows(out: &mut Vec<Vert>, c: &Cache, f: usize, look: &Look) {
+/// Green for slow air through yellow to red at look.air_red; u is the speed as a share of that.
+fn air_col(u: f32, a: f32) -> [f32; 4] {
+    let (g, y, r) = ([0.15, 0.85, 0.35], [1.0, 0.85, 0.1], [1.0, 0.13, 0.08]);
+    let (p, q, t) = if u < 0.5 { (g, y, u * 2.0) } else { (y, r, u * 2.0 - 1.0) };
+    [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t, p[2] + (q[2] - p[2]) * t, a]
+}
+/// One flat arrow facing the camera: faster air makes it longer, wider and redder. cell: the room it has.
+fn arrow(out: &mut Vec<Vert>, p: Vec3, w: Vec3, u: f32, cell: f32, eye: Vec3, look: &Look) {
+    let dir = w.normalize_or_zero();
+    let side = dir.cross(eye - p).normalize_or_zero();
+    if side == Vec3::ZERO { return; }
+    let len = cell * (0.3 + 1.3 * u) * look.air_len;
+    let wd = len * (0.05 + 0.05 * u);
+    let (e, n) = (p + dir * len, p + dir * len * 0.7);
+    let c = air_col(u, 0.95);
+    for q in [p - side * wd, p + side * wd, n + side * wd, p - side * wd, n + side * wd, n - side * wd, n - side * wd * 2.5, n + side * wd * 2.5, e] {
+        out.push(Vert { p: q.into(), n: [0.0; 3], c });
+    }
+}
+/// The frame's air: arrows through the tank, or a slice: a plane with a denser view of the air on it, sampled between the cells.
+fn air_view(out: &mut Vec<Vert>, c: &Cache, f: usize, look: &Look, eye: Vec3) {
     let v = c.view(f);
     let Some(g) = v.fr.air.as_ref() else { return; };
     let d = v.slice(&g.d);
     let (b, o, sc) = (c.info.b, c.info.org, c.info.scale.max(1e-6));
     let b0 = Vec3::new(b.x0 + o[0], b.y0 + o[1], b.z0 + o[2]);
-    let step = look.air_every.max(1) as usize;
     let (nx, ny, nz) = (g.n[0] as usize, g.n[1] as usize, g.n[2] as usize);
     let k = g.top / 127.0;
-    // the fastest air's arrow reaches about to the next arrow
-    let shown = 0.9 * look.air_len * g.h * step as f32 / g.top.max(1e-6);
-    for kk in (0..nz).step_by(step) { for j in (0..ny).step_by(step) { for i in (0..nx).step_by(step) {
-        let a = (i + nx * (j + ny * kk)) * 3;
-        let w = Vec3::new(d[a] as i8 as f32, d[a + 1] as i8 as f32, d[a + 2] as i8 as f32) * k;
-        let s = w.length();
-        if s * sc < look.air_min { continue; }
-        let p = b0 + Vec3::new(i as f32 + 0.25, j as f32 + 0.25, kk as f32 + 0.25) * g.h;
-        let u = (s / g.top.max(1e-6)).sqrt().min(1.0);
-        let col = [(2.0 * u - 1.0).clamp(0.0, 1.0), (0.3 + 1.4 * u).min(1.0), 1.0, 0.95];
-        let e = p + w * shown;
-        let dir = (e - p).normalize_or_zero();
-        let side = dir.cross(if dir.y.abs() < 0.9 { Vec3::Y } else { Vec3::X }).normalize_or_zero() * (e - p).length() * 0.2;
-        for (x, y) in [(p, e), (e, e - dir * (e - p).length() * 0.3 + side), (e, e - dir * (e - p).length() * 0.3 - side)] {
-            out.push(Vert { p: x.into(), n: [0.0; 3], c: col }); out.push(Vert { p: y.into(), n: [0.0; 3], c: col });
-        }
-    } } }
+    let cellv = |i: usize, j: usize, q: usize| { let a = (i + nx * (j + ny * q)) * 3; Vec3::new(d[a] as i8 as f32, d[a + 1] as i8 as f32, d[a + 2] as i8 as f32) * k };
+    let red = look.air_red.max(0.1);
+    if look.air == 1 {
+        let step = look.air_every.max(1) as usize;
+        for q in (0..nz).step_by(step) { for j in (0..ny).step_by(step) { for i in (0..nx).step_by(step) {
+            let w = cellv(i, j, q);
+            let sp = w.length() * sc;
+            if sp < look.air_min { continue; }
+            arrow(out, b0 + Vec3::new(i as f32 + 0.5, j as f32 + 0.5, q as f32 + 0.5) * g.h, w, (sp / red).min(1.0), g.h * step as f32, eye, look);
+        } } }
+        return;
+    }
+    // trilinear between the cells' centres
+    let at = |p: Vec3| -> Vec3 {
+        let q = (p - b0) / g.h - Vec3::splat(0.5);
+        let q = q.clamp(Vec3::ZERO, Vec3::new(nx as f32 - 1.001, ny as f32 - 1.001, nz as f32 - 1.001));
+        let (i, t) = (q.floor(), q - q.floor());
+        let (x, y, z) = (i.x as usize, i.y as usize, i.z as usize);
+        let lx = |j: usize, s: usize| cellv(x, j, s).lerp(cellv((x + 1).min(nx - 1), j, s), t.x);
+        let ly = |s: usize| lx(y, s).lerp(lx((y + 1).min(ny - 1), s), t.y);
+        ly(z).lerp(ly((z + 1).min(nz - 1)), t.z)
+    };
+    let e = Vec3::new(b.x1 - b.x0, b.y1 - b.y0, b.z1 - b.z0);
+    let mid = b0 + e * 0.5;
+    let (ct, st) = look.cut_turn.to_radians().sin_cos();
+    let (cl, sl) = look.cut_tilt.to_radians().sin_cos();
+    // facing +z when both are 0: turning goes round the upright, tilting leans it back to lying flat at 90
+    let nrm = Vec3::new(ct * sl, cl, st * sl).normalize();
+    let ax = Vec3::new(st, 0.0, -ct).normalize();
+    let ay = nrm.cross(ax).normalize();
+    let reach = e.length();
+    let inside = |p: Vec3| { let q = p - b0; q.x >= 0.0 && q.y >= 0.0 && q.z >= 0.0 && q.x <= e.x && q.y <= e.y && q.z <= e.z };
+    let span = (e * nrm.abs()).element_sum();
+    let c0 = mid + nrm * (look.cut_pos - 0.5) * span;
+    let m = look.cut_n.clamp(16, 200) as usize;
+    let ds = 2.0 * reach / m as f32;
+    let pt = |i: usize, j: usize| c0 + ax * (i as f32 * ds - reach) + ay * (j as f32 * ds - reach);
+    if look.cut_wash {
+        let col = |p: Vec3| { if !inside(p) { return [0.0; 4]; } let u = (at(p).length() * sc / red).min(1.0); air_col(u, 0.5) };
+        for j in 0..m { for i in 0..m {
+            let q = [pt(i, j), pt(i + 1, j), pt(i + 1, j + 1), pt(i, j + 1)];
+            if !q.iter().any(|p| inside(*p)) { continue; }
+            let cs = q.map(col);
+            for s in [0, 1, 2, 0, 2, 3] { out.push(Vert { p: q[s].into(), n: [0.0; 3], c: cs[s] }); }
+        } }
+    }
+    // the arrows lie in the slice: what the air does across it
+    for j in (0..m).step_by(2) { for i in (0..m).step_by(2) {
+        let p = pt(i, j);
+        if !inside(p) { continue; }
+        let w = at(p);
+        let inp = w - nrm * w.dot(nrm);
+        let sp = w.length() * sc;
+        if sp < look.air_min { continue; }
+        arrow(out, p, inp, (sp / red).min(1.0), ds * 2.0, eye, look);
+    } }
 }
 
 /// Triangles (colliders) and lines (tank box, floor grid, whitewater area, ocean level, water volumes as wireframes) in scene

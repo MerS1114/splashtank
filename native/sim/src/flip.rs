@@ -1224,19 +1224,15 @@ impl FlipSim {
         Some((a.n.map(|x| x * 2), a.h * 0.5, v.chunks_exact(2).map(|c| (c[0].clamp(0.0, 1.0).sqrt() * 255.0).round() as u8).collect()))
     }
 
-    /// The air field as a frame keeps it, every second cell each way: cells, cell size, the fastest speed, and x y z as bytes (-127 to 127 of the fastest).
+    /// The air field as a frame keeps it: cells, cell size, the fastest speed, and x y z as bytes (-127 to 127 of the fastest).
     pub fn read_air(&mut self, gpu: &Gpu) -> Option<([u32; 3], f32, f32, Vec<u8>)> {
         if !self.air_on_step { return None; }
         let a = self.air_dims?;
         let raw = Self::read_into(gpu, &self.buf[&32], 0, a.cells as u64 * 16, &mut self.fog_stage, None);
         let v: &[[f32; 4]] = bytemuck::cast_slice(&raw);
-        let n = a.n.map(|x| x.div_ceil(2));
-        let mut top = 1e-6f32;
-        let at = |i: u32, j: u32, k: u32| v[(i * 2 + a.n[0] * (j * 2 + a.n[1] * k * 2)) as usize];
-        for k in 0..n[2] { for j in 0..n[1] { for i in 0..n[0] { let c = at(i, j, k); top = top.max(c[0].abs()).max(c[1].abs()).max(c[2].abs()); } } }
-        let mut b = Vec::with_capacity((n[0] * n[1] * n[2] * 3) as usize);
-        for k in 0..n[2] { for j in 0..n[1] { for i in 0..n[0] { let c = at(i, j, k); for q in 0..3 { b.push((c[q] / top * 127.0).round() as i8 as u8); } } } }
-        Some((n, a.h * 2.0, top, b))
+        let top = v.iter().fold(1e-6f32, |t, c| t.max(c[0].abs()).max(c[1].abs()).max(c[2].abs()));
+        let b = v.iter().flat_map(|c| [0, 1, 2].map(|q| (c[q] / top * 127.0).round() as i8 as u8)).collect();
+        Some((a.n, a.h, top, b))
     }
 
     /// The deep water points of the last step (narrow band look; x y z, 4096 + speed), the empty ones dropped (readDeep).

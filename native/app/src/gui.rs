@@ -1955,11 +1955,30 @@ impl App {
             ui.checkbox(&mut self.look.whitewater, "Whitewater");
             ui.checkbox(&mut self.look.fog, "Mist and smoke").on_hover_text("The cloud kept with the bake, drawn as see-through fog. Simulation > Mist and smoke sets how it looks.");
             ui.checkbox(&mut self.look.objects, "Objects");
-            ui.checkbox(&mut self.look.air, "Air field").on_hover_text("Arrows showing where the air moves and how hard: blue is slow, white is the fastest in that frame. Kept with bakes and live water made since this was added.");
-            if self.look.air {
-                ui.add(egui::Slider::new(&mut self.look.air_every, 1..=6).text("Arrows: every")).on_hover_text("Lower shows more arrows.");
-                ui.add(egui::Slider::new(&mut self.look.air_len, 0.2..=5.0).logarithmic(true).text("Arrow length"));
+            ui.horizontal(|ui| {
+                ui.label("Air field").on_hover_text("Where the air moves and how hard, from small green arrows through yellow to long red ones. Follows playback. Needs a bake or live water made since this was added.");
+                ui.selectable_value(&mut self.look.air, 0, "Off");
+                ui.selectable_value(&mut self.look.air, 1, "Arrows").on_hover_text("A grid of arrows through the whole tank.");
+                ui.selectable_value(&mut self.look.air, 2, "Slice").on_hover_text("A plane you place through the tank, with a dense view of the air on it.");
+            });
+            if self.look.air > 0 {
+                ui.add(egui::Slider::new(&mut self.look.air_red, 1.0..=200.0).logarithmic(true).suffix(" m/s").text("Red at")).on_hover_text("Air this fast is red and full size; half of it is yellow.");
+                ui.add(egui::Slider::new(&mut self.look.air_len, 0.2..=5.0).logarithmic(true).text("Arrow size"));
                 ui.add(egui::Slider::new(&mut self.look.air_min, 0.0..=30.0).suffix(" m/s").text("Hide air slower than"));
+            }
+            if self.look.air == 1 { ui.add(egui::Slider::new(&mut self.look.air_every, 1..=8).text("Arrows: every")).on_hover_text("Every how many air cells. Lower shows more arrows."); }
+            if self.look.air == 2 {
+                ui.horizontal(|ui| {
+                    ui.label("Face");
+                    if ui.small_button("Front").clicked() { self.look.cut_turn = 0.0; self.look.cut_tilt = 0.0; }
+                    if ui.small_button("Side").clicked() { self.look.cut_turn = 90.0; self.look.cut_tilt = 0.0; }
+                    if ui.small_button("Top").clicked() { self.look.cut_turn = 0.0; self.look.cut_tilt = 90.0; }
+                });
+                ui.add(egui::Slider::new(&mut self.look.cut_pos, 0.0..=1.0).text("Position")).on_hover_text("Where the slice sits through the tank.");
+                ui.add(egui::Slider::new(&mut self.look.cut_turn, -180.0..=180.0).suffix("\u{b0}").text("Turn"));
+                ui.add(egui::Slider::new(&mut self.look.cut_tilt, -90.0..=90.0).suffix("\u{b0}").text("Tilt"));
+                ui.add(egui::Slider::new(&mut self.look.cut_n, 30..=200).text("Detail")).on_hover_text("How fine the slice is drawn. Arrows are every second step of this.");
+                ui.checkbox(&mut self.look.cut_wash, "Colour wash").on_hover_text("Colour the whole slice by air speed, behind the arrows.");
             }
             ui.horizontal(|ui| {
                 ui.label("Colour by").on_hover_text("Speed: blue to cyan to white as the water speeds up, churned water white. Type: one colour per kind of point: water blue, churned water pale blue, foam white, spray orange, mist lilac, bubbles green, deep water (narrow band) dark blue.");
