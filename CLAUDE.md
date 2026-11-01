@@ -130,6 +130,12 @@ Mist settings (2026-10-31): a group of their own after Air field (export-setting
 
 Interface work (Mer, 2026-10-31: interface first, then the rest; native/PLAN-ui.md has the stages, the resolution findings and a plan for every preset scene; no built-in render or water pushing objects yet). Published: eba0ca6. Stage 1 so far: Display > Interface size (uiZoom), Simulation tab Simple / All (row basic: true from export-settings.js, settingsAll), Pin to top in the right-click menu (settings.json pins, every scene), a dot on look-only rows, undo for look settings (undo_mark). Next in stage 1: group descriptions, the other tabs, a changed-settings view.
 
+Mer's decisions, 2026-10-31: guided finals are the plan for the Detail pass rework, not now. She is gathering images for what each preset should be: do not remake presets until they arrive.
+
+Whitewater against spacing (accuracy.rs res_ww, --ignored): points grew 9 times from 0.04 to 0.02 (mist 143k to 1.3M) but bakes kept a 200k sample, each point drawn half as wide. ww::cover(d) = d / 0.04 now scales emission (flip.rs word sprRate; mist cloud's fog_add the other way so it stays level), ww::keep_cap(d) keeps (0.04/d)^2 x 200k points (at most 2M), the pool grows up to 6 times (session.rs). At 0.02 mist 401k against 138k at 0.04 (about the 4 times equal cover needs); cloud 13.2, 9.2, 10.8 across 0.04, 0.03, 0.02. Pictures at frame 30: closer than before but not matched: 0.02's crown is a fuller solid wall with denser white, and 0.04's breaks into fingers. Files grow with the kept points (Meteor lake 37 frames at 0.02: 1.5 GB). Reference recorded again.
+
+Air field view: frames carry the air (flag 512, every second cell each way, x y z bytes of the frame's fastest; read_air, version 3 three more streams; --convert --v2 leaves it out). Display > Air field draws arrows on top of everything (render.rs air_arrows, lines_top), blue slow to white fastest, with Arrows every, Arrow length, Hide air slower than. SPLASH_AIR=1 shows them in --picture. Mist and smoke are not shown separately from it. Older bakes have no air data.
+
 Mer's smoothness test on her Intel UHD 730 (Meteor lake preset, spacing 0.03, 219k particles live, bake up to 491k water points), before the fixes below: bake playback fine (44 frames a second, uploads 1.6 ms for 4.3 MB); live had one 23 s frame right after Start (first use of the compute pipelines), then 28 ms frames, and got through only 0.3 s of sim time in 10 s.
 
 Done since (merged to main):

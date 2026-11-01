@@ -443,6 +443,30 @@ fn nb_volume() {
     }
 }
 
+/// By hand (--ignored): how spacing changes Meteor lake's whitewater and mist: live points of each kind, and the mist's total amount.
+#[test]
+#[ignore]
+fn res_ww() {
+    let _turn = one_at_a_time();
+    let gpu = Gpu::new().unwrap();
+    for spc in [0.04f32, 0.03, 0.02] {
+        let sc = built_in("Meteor lake");
+        let d = desc(&sc, spc);
+        let mut s = Session::new(&gpu, &d, &|_| {}, None).unwrap();
+        s.seed(&gpu);
+        let mut line = String::new();
+        let mut done = 0;
+        for f in [18u32, 36, 72] {
+            frames(&gpu, &mut s, f - done); done = f;
+            let mut k = [0usize; 4];
+            if let Some((n, p, v)) = s.sim.read_spray(&gpu) { for i in 0..n { if p[i * 4 + 3] > 0.0 { k[((v[i * 4 + 3] + 0.5) as usize).min(3)] += 1; } } }
+            let fog = s.sim.read_fog(&gpu).map_or(0.0, |(_, h, b)| b.iter().map(|&x| { let v = x as f64 / 255.0; v * v }).sum::<f64>() * (h as f64).powi(3));
+            line += &format!(" f{f} spray {} mist {} foam {} bubbles {} fog {fog:.3};", k[0], k[1], k[2], k[3]);
+        }
+        eprintln!("rw {spc} air {:?}:{line}", s.sim.air_dims.map(|a| a.h));
+    }
+}
+
 /// By hand (--ignored): how spacing changes the Meteor lake splash, in real sizes: the volume of water above the still surface and how high it
 /// reaches. RES_BAND=m keeps the narrow band the same depth in metres at every spacing (else the same number of cells).
 #[test]

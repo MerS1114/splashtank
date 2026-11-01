@@ -40,9 +40,11 @@ Not wanted yet: a built-in render and water pushing objects.
 Measured on Meteor lake (accuracy.rs res_crown, --ignored). Water above the surface stays about the same from spacing 0.04 to 0.02 (0.81-0.99 at frame 18, 1.10-1.28 at frame 24, no steady trend). The top of the crown rises faster at finer spacing: 99% height 1.79 at 0.04 against 2.46 at 0.02 at frame 18, then all reach about 3.1-3.5 by frame 48. Keeping the narrow band the same depth in metres did not change that. So fine, fast sheets are the difference: a coarse grid averages them with slower water around them, and that part cannot be fully removed.
 
 1. Everything set in cells or per particle becomes the same in real sizes: narrow band depth, whitewater amount and mist by volume of water, not by particle count (the point count rises eight times from 0.04 to 0.02). Measure each first.
-2. Guided finals, as in Houdini: the fine bake follows the approved coarse bake's large motion and adds only its own detail, so the final keeps the preview's behaviour. This is the rework of the Detail pass over the whole tank (phase 8), and the real answer. Waits for Mer's yes.
+2. Guided finals, as in Houdini: the fine bake follows the approved coarse bake's large motion and adds only its own detail, so the final keeps the preview's behaviour. Mer's decision, 2026-10-31: this is the plan for the Detail pass rework (phase 8). Not now.
 
 ## Preset scenes
+
+On hold: Mer is gathering a set of images of what each preset should be. Do not remake them until those arrive; the notes below are only a starting point.
 
 Meteor lake stays the standard: a clear event, a sense of scale, a strong silhouette, whitewater and mist, and a settled ending. Each preset gets the same treatment: real scale, a camera that frames the shot, a moment worth watching in the first two seconds, tuned whitewater and mist, a short note saying what it shows off, and a bake that fits Mer's card at the default spacing. They are built and baked one at a time, and Mer judges them.
 

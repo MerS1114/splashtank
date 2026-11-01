@@ -63,6 +63,13 @@ fn ww_keep(j: u32) -> f64 { (j.wrapping_mul(7919).wrapping_add(104729)).wrapping
 
 /// The live whitewater slots for a cache frame: an even sample of at most about cap points by slot number (a point that stays alive
 /// stays in the sample), positions 16-bit across the whitewater area b. p: x y z life; v: velocity and kind (packSprayFrame).
+/// Whitewater per particle at spacing d, with spacing 0.04 as 1. Points are drawn a spacing wide, so a finer bake needs (0.04 / d)^2 as many to
+/// cover the same area, while it has (0.04 / d)^3 as many particles: without this a finer bake made 9 times the points at half the spacing and
+/// showed them at half the size through a sample of the same 200,000, so the whitewater looked different at every spacing.
+pub fn cover(d: f32) -> f32 { d / 0.04 }
+/// The most whitewater points a frame keeps.
+pub fn keep_cap(d: f32) -> usize { ((200_000.0 / (cover(d) * cover(d))) as usize).clamp(200_000, 2_000_000) }
+
 pub fn pack_spray_frame(p: &[f32], v: &[f32], n: usize, b: &Box3, cap: usize, foam_life: f32) -> (usize, Vec<u16>, Vec<u32>, usize) {
     let foam_life = if foam_life > 0.0 { foam_life } else { 3.0 };
     let alive = (0..n).filter(|&j| p[j * 4 + 3] > 0.0).count();

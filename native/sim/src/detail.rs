@@ -244,7 +244,8 @@ pub fn run(gpu: &Gpu, c: &Cache, desc: &Desc, o: &DetailOpts, out: &Path, mut pr
         let fogv = c.view(f);
         w.append(&FrameOut { q: p.q, own_box: p.own_box, ww_baked, objs: &p.objs, n: p.n, pos: &p.pos, spd: &p.spd, fm: p.fm.as_deref(),
             ww: p.ww.as_ref().map(|(n, pos, pk)| (*n, &pos[..], &pk[..])), deep: p.deep.as_ref().map(|(n, pos, s)| (*n, &pos[..], &s[..])),
-            fog: { let g = fogv.fr.fog.as_ref(); g.map(|g| (g.n, g.h, fogv.slice(&g.d))) } })
+            fog: { let g = fogv.fr.fog.as_ref(); g.map(|g| (g.n, g.h, fogv.slice(&g.d))) },
+            air: { let g = fogv.fr.air.as_ref(); g.map(|g| (g.n, g.h, g.top, fogv.slice(&g.d))) } })
             .map_err(|e| format!("Writing the cache failed: {e}"))?;
         Ok(p.n)
     };

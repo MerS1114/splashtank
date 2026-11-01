@@ -1955,6 +1955,12 @@ impl App {
             ui.checkbox(&mut self.look.whitewater, "Whitewater");
             ui.checkbox(&mut self.look.fog, "Mist and smoke").on_hover_text("The cloud kept with the bake, drawn as see-through fog. Simulation > Mist and smoke sets how it looks.");
             ui.checkbox(&mut self.look.objects, "Objects");
+            ui.checkbox(&mut self.look.air, "Air field").on_hover_text("Arrows showing where the air moves and how hard: blue is slow, white is the fastest in that frame. Kept with bakes and live water made since this was added.");
+            if self.look.air {
+                ui.add(egui::Slider::new(&mut self.look.air_every, 1..=6).text("Arrows: every")).on_hover_text("Lower shows more arrows.");
+                ui.add(egui::Slider::new(&mut self.look.air_len, 0.2..=5.0).logarithmic(true).text("Arrow length"));
+                ui.add(egui::Slider::new(&mut self.look.air_min, 0.0..=30.0).suffix(" m/s").text("Hide air slower than"));
+            }
             ui.horizontal(|ui| {
                 ui.label("Colour by").on_hover_text("Speed: blue to cyan to white as the water speeds up, churned water white. Type: one colour per kind of point: water blue, churned water pale blue, foam white, spray orange, mist lilac, bubbles green, deep water (narrow band) dark blue.");
                 ui.selectable_value(&mut self.look.by_type, false, "Speed");

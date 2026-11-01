@@ -24,11 +24,11 @@ fn write_sample_v(path: &std::path::Path, reserve: usize, meta_extra: usize, v2:
     let dpos: Vec<u8> = (1u32 | 2 << 11 | 3 << 21).to_le_bytes().to_vec();
     let dsf: Vec<u8> = 12u16.to_le_bytes().to_vec();
     w.append(&FrameOut { q: Some(q), own_box: Some(own), ww_baked: false, objs: &[1.0, 2.0, 3.0, 0.1, 0.2, 0.3], n: 3, pos: &pos, spd: &sf, fm: None,
-        ww: Some((1, &(4u32 | 4 << 11 | 4 << 21).to_le_bytes(), &[0x8000_1234])), deep: Some((1, &dpos, &dsf)), fog: Some(([2, 1, 2], 0.5, &[1, 2, 3, 4])) }).unwrap();
+        ww: Some((1, &(4u32 | 4 << 11 | 4 << 21).to_le_bytes(), &[0x8000_1234])), deep: Some((1, &dpos, &dsf)), fog: Some(([2, 1, 2], 0.5, &[1, 2, 3, 4])), air: None }).unwrap();
     // 16-bit: two points with levels
     let p16: Vec<u8> = [0u16, 0, 0, 65535, 32768, 65535].iter().flat_map(|v| v.to_le_bytes()).collect();
     w.append(&FrameOut { q: None, own_box: None, ww_baked: true, objs: &[4.0, 5.0, 6.0, 0.0, 0.0, 0.0], n: 2, pos: &p16, spd: &[10, 20], fm: Some(&[0, 255]),
-        ww: Some((1, &[1, 0, 2, 0, 3, 0], &[0x8000_0001])), deep: None, fog: None }).unwrap();
+        ww: Some((1, &[1, 0, 2, 0, 3, 0], &[0x8000_0001])), deep: None, fog: None, air: None }).unwrap();
     let mut fin = meta.clone();
     fin["diag"] = json!("x".repeat(meta_extra));
     w.finish(&fin).unwrap();
@@ -117,7 +117,7 @@ fn packed_exact() {
         let (wp, wk): (Vec<u32>, Vec<u32>) = ww.into_iter().unzip();
         let (dp, ds): (Vec<u32>, Vec<u16>) = deep.into_iter().unzip();
         w.append(&FrameOut { q: Some(q), own_box: own, ww_baked: false, objs: &[], n: pos.len() as u32, pos: bytemuck::cast_slice(&pos), spd: bytemuck::cast_slice(&sf), fm: None,
-            ww: Some((wp.len() as u32, bytemuck::cast_slice(&wp), &wk)), deep: Some((dp.len() as u32, bytemuck::cast_slice(&dp), bytemuck::cast_slice(&ds))), fog: (f % 2 == 0).then_some(([3, 1, 1], 0.5, &[f as u8, 7, 9][..])) }).unwrap();
+            ww: Some((wp.len() as u32, bytemuck::cast_slice(&wp), &wk)), deep: Some((dp.len() as u32, bytemuck::cast_slice(&dp), bytemuck::cast_slice(&ds))), fog: (f % 2 == 0).then_some(([3, 1, 1], 0.5, &[f as u8, 7, 9][..])), air: (f % 3 == 0).then_some(([2, 1, 1], 0.25, 2.0, &[f as u8, 1, 2, 3, 4, 5][..])) }).unwrap();
     };
     for f in 0..30 { put(&mut w, f); }
     let end = w.flush_point().unwrap();
@@ -138,6 +138,7 @@ fn packed_exact() {
         let mut want = ww; got.sort(); want.sort();
         assert_eq!(got, want, "whitewater of frame {f}");
         if f % 2 == 0 { let g = v.fr.fog.as_ref().unwrap(); assert_eq!(v.slice(&g.d), &[f as u8, 7, 9]); assert_eq!(g.n, [3, 1, 1]); } else { assert!(v.fr.fog.is_none()); }
+        if f % 3 == 0 { let g = v.fr.air.as_ref().unwrap(); assert_eq!(v.slice(&g.d), &[f as u8, 1, 2, 3, 4, 5]); assert_eq!((g.n, g.top), ([2, 1, 1], 2.0)); } else { assert!(v.fr.air.is_none()); }
         let d = v.fr.deep.as_ref().unwrap();
         let mut got: Vec<(u32, u16)> = v.slice(&d.pos).chunks_exact(4).zip(v.slice(&d.spd).chunks_exact(2)).map(|(a, b)| (u32::from_le_bytes(a.try_into().unwrap()), u16::from_le_bytes(b.try_into().unwrap()))).collect();
         let mut want = deep; got.sort(); want.sort();

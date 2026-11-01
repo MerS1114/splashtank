@@ -105,7 +105,11 @@ impl<'d> Session<'d> {
         sim.opt.vol_hold = nb_band.is_some() && desc.ocean.is_none() && desc.events.is_empty() && !desc.objs.iter().any(|o| o.emitter) && !(desc.tall && sim.tall_t0 > 0);
         let acc = desc.accurate;
         if acc { sim.opt.sep_iters = 16; }
-        if desc.spr.is_some() && desc.spray_cap > 0 { sim.set_spray_cap(gpu, desc.spray_cap); }
+        if desc.spr.is_some() && desc.spray_cap > 0 {
+            // room for the same cover at a finer spacing
+            let k = (1.0 / crate::ww::cover(desc.d).powi(2)).clamp(1.0, 6.0);
+            sim.set_spray_cap(gpu, (desc.spray_cap as f32 * k) as u32);
+        }
         if desc.nb_look { sim.set_deep_look(gpu, true); }
         let mut ev = desc.events.clone();
         ev.sort_by(|a, b| a.t.total_cmp(&b.t));

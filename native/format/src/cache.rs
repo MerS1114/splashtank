@@ -24,6 +24,8 @@ pub const FLAG_WW_BAKED: u32 = 16;
 pub const FLAG_OWN_BOX: u32 = 32;
 /// The mist and smoke volume follows the deep water (native only; version 2 files for the page leave it out).
 pub const FLAG_FOG: u32 = 256;
+/// The air field follows the volume (native only; version 2 files for the page leave it out).
+pub const FLAG_AIR: u32 = 512;
 
 /// Speed byte meaning "gone" (a dead particle slot kept so slots line up between frames).
 pub const GONE: u8 = 255;
@@ -67,6 +69,10 @@ pub struct WwPoints {
 #[derive(Clone, Debug)]
 pub struct FogIndex { pub n: [u32; 3], pub h: f32, pub d: Range<usize> }
 
+/// A frame's air: cells, cell size, the fastest speed (scene units a second), x y z as bytes (-127 to 127 of the fastest).
+#[derive(Clone, Debug)]
+pub struct AirIndex { pub n: [u32; 3], pub h: f32, pub top: f32, pub d: Range<usize> }
+
 #[derive(Clone, Debug)]
 pub struct FrameIndex {
     pub flags: u32,
@@ -80,6 +86,7 @@ pub struct FrameIndex {
     pub ww: Option<WwPoints>,
     pub deep: Option<Points>,
     pub fog: Option<FogIndex>,
+    pub air: Option<AirIndex>,
     /// version 3: the frame's stored streams; its other ranges are empty until Cache::view unpacks it
     pub packed: Option<Range<usize>>,
 }
@@ -343,7 +350,8 @@ fn frame_v2(r: &mut Rd, nobj: usize, q0: Option<[u8; 3]>) -> Option<FrameIndex> 
             Some(p)
         } else { None };
         let fog = read_fog(r, fl)?;
-        return Some(FrameIndex { flags: fl, q: Some(q?), own_box, objs, water: Points { n, pos, spd, fm: None }, ww, deep, fog, packed: None });
+        let air = read_air(r, fl)?;
+        return Some(FrameIndex { flags: fl, q: Some(q?), own_box, objs, water: Points { n, pos, spd, fm: None }, ww, deep, fog, air, packed: None });
     }
     let objs = r.take(nobj * 24)?;
     let pos = r.take(nu * 6)?;
@@ -363,7 +371,16 @@ fn frame_v2(r: &mut Rd, nobj: usize, q0: Option<[u8; 3]>) -> Option<FrameIndex> 
         Some(p)
     } else { None };
     let fog = read_fog(r, fl)?;
-    Some(FrameIndex { flags: fl, q: None, own_box: None, objs, water: Points { n, pos, spd, fm }, ww, deep, fog, packed: None })
+    let air = read_air(r, fl)?;
+    Some(FrameIndex { flags: fl, q: None, own_box: None, objs, water: Points { n, pos, spd, fm }, ww, deep, fog, air, packed: None })
+}
+fn read_air(r: &mut Rd, fl: u32) -> Option<Option<AirIndex>> {
+    if fl & FLAG_AIR == 0 { return Some(None); }
+    let (n, h, top) = ([r.u32()?, r.u32()?, r.u32()?], r.f32()?, r.f32()?);
+    let k = n[0] as usize * n[1] as usize * n[2] as usize * 3;
+    let d = r.take(k)?;
+    r.take(pad4(k))?;
+    Some(Some(AirIndex { n, h, top, d }))
 }
 /// Some(None) when the frame has no volume; None when the file ends inside it.
 fn read_fog(r: &mut Rd, fl: u32) -> Option<Option<FogIndex>> {
@@ -391,7 +408,7 @@ fn index_v1(b: &[u8]) -> io::Result<(CacheInfo, Vec<FrameIndex>, bool)> {
         let Some(n) = r.u32() else { truncated = true; break; };
         let nu = n as usize;
         let (Some(objs), Some(pos), Some(spd)) = (r.take(nobj * 16), r.take(nu * 6), r.take(nu)) else { truncated = true; break; };
-        frames.push(FrameIndex { flags: 0x8000_0000, q: None, own_box: None, objs, water: Points { n, pos, spd, fm: None }, ww: None, deep: None, fog: None, packed: None });
+        frames.push(FrameIndex { flags: 0x8000_0000, q: None, own_box: None, objs, water: Points { n, pos, spd, fm: None }, ww: None, deep: None, fog: None, air: None, packed: None });
     }
     // splash.cpp's tank: 3 x 2.6 x 3 centred on x and z
     let info = CacheInfo { version: 1, meta: Value::Null, d, fps: fps as f32, ids, b: Box3 { x0: -1.5, x1: 1.5, y0: 0.0, y1: 2.6, z0: -1.5, z1: 1.5 },
@@ -428,6 +445,8 @@ pub struct FrameOut<'a> {
     pub deep: Option<(u32, &'a [u8], &'a [u8])>,
     /// the mist and smoke volume: cells, cell size, density bytes
     pub fog: Option<([u32; 3], f32, &'a [u8])>,
+    /// the air field: cells, cell size, fastest speed, x y z bytes
+    pub air: Option<([u32; 3], f32, f32, &'a [u8])>,
 }
 
 /// Streams a cache to disk frame by frame. The JSON block gets reserved room (padded with spaces, which JSON allows) so the
@@ -594,7 +613,7 @@ pub(crate) fn frame_bytes(w: &mut Vec<u8>, f: &FrameOut) -> io::Result<()> {
     let objs: Vec<u8> = f.objs.iter().flat_map(|v| v.to_le_bytes()).collect();
     if f.q.is_some() {
         assert_eq!(f.pos.len(), n * 4); assert_eq!(f.spd.len(), n * 2);
-        let flags = FLAG_COMPACT | fl(ww.is_some(), FLAG_WW) | fl(deep.is_some(), FLAG_DEEP) | fl(f.ww_baked, FLAG_WW_BAKED) | fl(f.own_box.is_some(), FLAG_OWN_BOX) | fl(f.fog.is_some(), FLAG_FOG);
+        let flags = FLAG_COMPACT | fl(ww.is_some(), FLAG_WW) | fl(deep.is_some(), FLAG_DEEP) | fl(f.ww_baked, FLAG_WW_BAKED) | fl(f.own_box.is_some(), FLAG_OWN_BOX) | fl(f.fog.is_some(), FLAG_FOG) | fl(f.air.is_some(), FLAG_AIR);
         w.write_all(&f.n.to_le_bytes())?; w.write_all(&flags.to_le_bytes())?;
         if let Some(b) = f.own_box {
             for v in [b.x0, b.y0, b.z0, b.x1, b.y1, b.z1] { w.write_all(&v.to_le_bytes())?; }
@@ -611,7 +630,7 @@ pub(crate) fn frame_bytes(w: &mut Vec<u8>, f: &FrameOut) -> io::Result<()> {
         }
     } else {
         assert_eq!(f.pos.len(), n * 6); assert_eq!(f.spd.len(), n);
-        let flags = fl(f.fm.is_some(), FLAG_LEVELS) | fl(ww.is_some(), FLAG_WW) | fl(deep.is_some(), FLAG_DEEP) | fl(f.ww_baked, FLAG_WW_BAKED) | fl(f.fog.is_some(), FLAG_FOG);
+        let flags = fl(f.fm.is_some(), FLAG_LEVELS) | fl(ww.is_some(), FLAG_WW) | fl(deep.is_some(), FLAG_DEEP) | fl(f.ww_baked, FLAG_WW_BAKED) | fl(f.fog.is_some(), FLAG_FOG) | fl(f.air.is_some(), FLAG_AIR);
         w.write_all(&f.n.to_le_bytes())?; w.write_all(&flags.to_le_bytes())?;
         w.write_all(&objs)?; w.write_all(f.pos)?; w.write_all(f.spd)?;
         let mut bytes = n * 7;
@@ -629,6 +648,10 @@ pub(crate) fn frame_bytes(w: &mut Vec<u8>, f: &FrameOut) -> io::Result<()> {
         for v in n { w.write_all(&v.to_le_bytes())?; }
         w.write_all(&h.to_le_bytes())?; w.write_all(d)?; w.write_all(&zero[..pad4(d.len())])?;
     }
+    if let Some((n, h, top, d)) = f.air {
+        for v in n { w.write_all(&v.to_le_bytes())?; }
+        w.write_all(&h.to_le_bytes())?; w.write_all(&top.to_le_bytes())?; w.write_all(d)?; w.write_all(&zero[..pad4(d.len())])?;
+    }
     Ok(())
 }
 
@@ -644,7 +667,8 @@ pub fn convert(c: &Cache, out: &Path, v2: bool, mut progress: impl FnMut(usize, 
         w.append(&FrameOut { q: fr.q, own_box: fr.own_box, ww_baked: fr.flags & FLAG_WW_BAKED != 0, objs: &objs, n: fr.water.n, pos: v.slice(&fr.water.pos), spd: v.slice(&fr.water.spd),
             fm: fr.water.fm.as_ref().map(|r| v.slice(r)), ww: fr.ww.as_ref().map(|s| (s.n, v.slice(&s.pos), &pk.as_ref().unwrap()[..])),
             deep: fr.deep.as_ref().map(|d| (d.n, v.slice(&d.pos), v.slice(&d.spd))),
-            fog: fr.fog.as_ref().filter(|_| !v2).map(|g| (g.n, g.h, v.slice(&g.d))) })?;
+            fog: fr.fog.as_ref().filter(|_| !v2).map(|g| (g.n, g.h, v.slice(&g.d))),
+            air: fr.air.as_ref().filter(|_| !v2).map(|g| (g.n, g.h, g.top, v.slice(&g.d))) })?;
         progress(f, c.frames.len());
     }
     w.finish(&c.info.meta)

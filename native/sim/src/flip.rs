@@ -818,7 +818,8 @@ impl FlipSim {
         u[bb] = self.lcap; u[bb + 1] = self.t[0]; u[bb + 2] = self.t[1]; u[bb + 3] = self.t[2]; u[bb + 4] = self.scap;
         let sp = if self.spray_cap > 0 { o.spr } else { None };
         self.set_f(bb + 5, o.tear);
-        self.set_f(bb + 6, sp.map_or(0.0, |s| s.rate)); self.set_f(bb + 7, sp.map_or(1.0, |s| s.min.max(0.05))); self.set_f(bb + 8, sp.map_or(1.0, |s| s.life));
+        // (a particle stands for less water at a finer spacing; see ww::cover)
+        self.set_f(bb + 6, sp.map_or(0.0, |s| s.rate * crate::ww::cover(self.l.d))); self.set_f(bb + 7, sp.map_or(1.0, |s| s.min.max(0.05))); self.set_f(bb + 8, sp.map_or(1.0, |s| s.life));
         self.set_f(bb + 9, sp.map_or(0.0, |s| s.mist)); self.set_f(bb + 10, sp.map_or(1.0, |s| s.drag)); self.set_f(bb + 11, sp.map_or(4.0, |s| s.mdrag));
         self.set_f(bb + 12, o.vs);
         let ndisp = if stride <= 1 { n } else { n.div_ceil(stride) };
@@ -865,7 +866,7 @@ impl FlipSim {
         self.set_f(442, airo.map_or(0.0, |a| a.speed)); self.set_f(443, if self.air_real { airo.map_or(0.0, |a| a.swirl) } else { 0.0 });
         self.set_f(444, self.air_real as u32 as f32); self.set_f(445, self.air_feel as u32 as f32); self.set_f(446, o.drag); self.set_f(447, self.air_iters as f32);
         self.fog_on = airo.is_some_and(|a| a.fog) && ad.is_some();
-        self.set_f(448, self.fog_on as u32 as f32); self.set_f(449, airo.map_or(0.0, |a| a.fog_add)); self.set_f(450, airo.map_or(0.0, |a| a.fog_fade));
+        self.set_f(448, self.fog_on as u32 as f32); self.set_f(449, airo.map_or(0.0, |a| a.fog_add / crate::ww::cover(self.l.d))); self.set_f(450, airo.map_or(0.0, |a| a.fog_fade));
         self.pu[451] = cols[..nc].iter().take(32).enumerate().fold(0u32, |m, (k, c)| m | (c.smoke as u32) << k);
         self.set_f(452, airo.map_or(0.0, |a| a.lift)); self.set_f(453, airo.map_or(0.0, |a| a.heat_fade)); self.set_f(454, airo.map_or(0.0, |a| a.smoke));
         let aw = |f: fn(&Air) -> f32, d: f32| airo.as_ref().map_or(d, f);
@@ -1221,6 +1222,21 @@ impl FlipSim {
         let raw = Self::read_into(gpu, &self.buf[&51], 0, cells * 8, &mut self.fog_stage, None);
         let v: &[f32] = bytemuck::cast_slice(&raw);
         Some((a.n.map(|x| x * 2), a.h * 0.5, v.chunks_exact(2).map(|c| (c[0].clamp(0.0, 1.0).sqrt() * 255.0).round() as u8).collect()))
+    }
+
+    /// The air field as a frame keeps it, every second cell each way: cells, cell size, the fastest speed, and x y z as bytes (-127 to 127 of the fastest).
+    pub fn read_air(&mut self, gpu: &Gpu) -> Option<([u32; 3], f32, f32, Vec<u8>)> {
+        if !self.air_on_step { return None; }
+        let a = self.air_dims?;
+        let raw = Self::read_into(gpu, &self.buf[&32], 0, a.cells as u64 * 16, &mut self.fog_stage, None);
+        let v: &[[f32; 4]] = bytemuck::cast_slice(&raw);
+        let n = a.n.map(|x| x.div_ceil(2));
+        let mut top = 1e-6f32;
+        let at = |i: u32, j: u32, k: u32| v[(i * 2 + a.n[0] * (j * 2 + a.n[1] * k * 2)) as usize];
+        for k in 0..n[2] { for j in 0..n[1] { for i in 0..n[0] { let c = at(i, j, k); top = top.max(c[0].abs()).max(c[1].abs()).max(c[2].abs()); } } }
+        let mut b = Vec::with_capacity((n[0] * n[1] * n[2] * 3) as usize);
+        for k in 0..n[2] { for j in 0..n[1] { for i in 0..n[0] { let c = at(i, j, k); for q in 0..3 { b.push((c[q] / top * 127.0).round() as i8 as u8); } } } }
+        Some((n, a.h * 2.0, top, b))
     }
 
     /// The deep water points of the last step (narrow band look; x y z, 4096 + speed), the empty ones dropped (readDeep).

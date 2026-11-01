@@ -204,7 +204,7 @@ pub fn desc_from_scene(scene: &Value, o: &BakeOpts) -> Result<Desc, String> {
         fog_from: [num(&sv, "fogFromMist", 1.0) as f32, num(&sv, "fogFromSpray", 0.0) as f32, num(&sv, "fogFromFoam", 0.0) as f32],
         fog_at: [num(&sv, "fogLow", 0.0) as f32, num(&sv, "fogHigh", 1.0) as f32] });
     let drip = (spr_on && flag(&sv, "dripOn", true)).then(|| Drip { rate: num(&sv, "dripRate", 2.0) as f32, dry: num(&sv, "dripDry", 3.0) as f32 });
-    let spray_cap = if spr_on { num(&sv, "sprCap", 600000.0) as u32 } else { 0 };
+    let spray_cap = if spr_on { num(&sv, "sprCap", 600000.0) as u32 } else { 0 };   // (Session raises it for the spacing)
     let nb_look = flag(&sv, "nbLook", false) && nb_active;
     let wv = sv.get("wind").cloned().unwrap_or(Value::Null);
     let (ws, waz) = (num(&wv, "speed", 0.0) as f32, (num(&wv, "az", 0.0) as f32).to_radians());

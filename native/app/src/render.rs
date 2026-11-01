@@ -134,9 +134,14 @@ pub struct Look {
     pub scene_objs: bool,
     /// draw the mist and smoke volume (how it looks is in the scene's settings, with the rest of it)
     pub fog: bool,
+    /// draw the air field as arrows: every how many stored cells, how long, and how fast air must be to show (m/s)
+    pub air: bool,
+    pub air_every: u32,
+    pub air_len: f32,
+    pub air_min: f32,
 }
 impl Default for Look {
-    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None, scene_objs: false, by_type: false, time: 0.0, bg: 0, fog: true } }
+    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None, scene_objs: false, by_type: false, time: 0.0, bg: 0, fog: true, air: false, air_every: 2, air_len: 1.0, air_min: 0.5 } }
 }
 
 #[repr(C)]
@@ -174,6 +179,8 @@ pub struct Renderer {
     fog_smp: wgpu::Sampler,
     tris: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
+    /// lines over everything (the air field's arrows)
+    lines_top: wgpu::RenderPipeline,
     cams: Vec<CamSlot>,
     /// the multisampled colour and depth the view is drawn into, resolved into the caller's target
     msaa: Option<([u32; 2], wgpu::TextureView, wgpu::TextureView)>,
@@ -273,7 +280,8 @@ impl Renderer {
         });
         let tris = geo(wgpu::PrimitiveTopology::TriangleList, &opaque, depth(true, less));
         let lines = geo(wgpu::PrimitiveTopology::LineList, &blended, depth(false, less));
-        Renderer { bg, water, deep, ww, fog, fog_bgl, fog_u, fog_buf, fog_smp, tris, lines, cams, msaa: None, layer_bgl, empty, dummy, frames: HashMap::new(), lru: VecDeque::new(), gen: u64::MAX,
+        let lines_top = geo(wgpu::PrimitiveTopology::LineList, &blended, depth(false, wgpu::CompareFunction::Always));
+        Renderer { bg, water, deep, ww, fog, fog_bgl, fog_u, fog_buf, fog_smp, lines_top, tris, lines, cams, msaa: None, layer_bgl, empty, dummy, frames: HashMap::new(), lru: VecDeque::new(), gen: u64::MAX,
             kept_bytes: 0, budget: 2 << 30, uploads: 0 }
     }
 
@@ -372,6 +380,9 @@ impl Renderer {
         for (i, s) in self.cams.iter().enumerate() { let mut u = base; u.d[1] = k[i] as f32; queue.write_buffer(&s.buf, 0, bytemuck::bytes_of(&u)); }
 
         let (tris, lines) = geometry(doc, a, b, w, look);
+        let mut arrows = Vec::new();
+        if let (true, Some(c)) = (look.air, &doc.cache) { if a < c.frames.len() { air_arrows(&mut arrows, c, a, look); } }
+        let ab = (!arrows.is_empty()).then(|| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("air"), contents: bytemuck::cast_slice(&arrows), usage: wgpu::BufferUsages::VERTEX }));
         let tb = (!tris.is_empty()).then(|| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("tris"), contents: bytemuck::cast_slice(&tris), usage: wgpu::BufferUsages::VERTEX }));
         let lb = (!lines.is_empty()).then(|| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("lines"), contents: bytemuck::cast_slice(&lines), usage: wgpu::BufferUsages::VERTEX }));
 
@@ -471,6 +482,10 @@ impl Renderer {
                 pass.draw(0..6, 0..fog_layers);
             }
         }
+        if let Some(bf) = &ab {
+            pass.set_bind_group(0, &self.cams[3].bg, &[]);
+            pass.set_pipeline(&self.lines_top); pass.set_vertex_buffer(0, bf.slice(..)); pass.draw(0..arrows.len() as u32, 0..1);
+        }
     }
 }
 
@@ -483,6 +498,36 @@ pub fn euler(rx: f32, ry: f32, rz: f32) -> Mat3 {
     Mat3::from_cols(Vec3::new(cz * cy, sz * cy, -sy),
                     Vec3::new(cz * sy * sx - sz * cx, sz * sy * sx + cz * cx, cy * sx),
                     Vec3::new(cz * sy * cx + sz * sx, sz * sy * cx - cz * sx, cy * cx))
+}
+
+/// The frame's air field as arrows: blue for slow air through cyan to white for the fastest, each as long as the air moves in a fraction of a
+/// second, so a glance shows where the air goes and how hard.
+fn air_arrows(out: &mut Vec<Vert>, c: &Cache, f: usize, look: &Look) {
+    let v = c.view(f);
+    let Some(g) = v.fr.air.as_ref() else { return; };
+    let d = v.slice(&g.d);
+    let (b, o, sc) = (c.info.b, c.info.org, c.info.scale.max(1e-6));
+    let b0 = Vec3::new(b.x0 + o[0], b.y0 + o[1], b.z0 + o[2]);
+    let step = look.air_every.max(1) as usize;
+    let (nx, ny, nz) = (g.n[0] as usize, g.n[1] as usize, g.n[2] as usize);
+    let k = g.top / 127.0;
+    // the fastest air's arrow reaches about to the next arrow
+    let shown = 0.9 * look.air_len * g.h * step as f32 / g.top.max(1e-6);
+    for kk in (0..nz).step_by(step) { for j in (0..ny).step_by(step) { for i in (0..nx).step_by(step) {
+        let a = (i + nx * (j + ny * kk)) * 3;
+        let w = Vec3::new(d[a] as i8 as f32, d[a + 1] as i8 as f32, d[a + 2] as i8 as f32) * k;
+        let s = w.length();
+        if s * sc < look.air_min { continue; }
+        let p = b0 + Vec3::new(i as f32 + 0.25, j as f32 + 0.25, kk as f32 + 0.25) * g.h;
+        let u = (s / g.top.max(1e-6)).sqrt().min(1.0);
+        let col = [(2.0 * u - 1.0).clamp(0.0, 1.0), (0.3 + 1.4 * u).min(1.0), 1.0, 0.95];
+        let e = p + w * shown;
+        let dir = (e - p).normalize_or_zero();
+        let side = dir.cross(if dir.y.abs() < 0.9 { Vec3::Y } else { Vec3::X }).normalize_or_zero() * (e - p).length() * 0.2;
+        for (x, y) in [(p, e), (e, e - dir * (e - p).length() * 0.3 + side), (e, e - dir * (e - p).length() * 0.3 - side)] {
+            out.push(Vert { p: x.into(), n: [0.0; 3], c: col }); out.push(Vert { p: y.into(), n: [0.0; 3], c: col });
+        }
+    } } }
 }
 
 /// Triangles (colliders) and lines (tank box, floor grid, whitewater area, ocean level, water volumes as wireframes) in scene
