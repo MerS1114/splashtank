@@ -107,6 +107,29 @@ pub fn surface(pts: &[[f32; 3]], tank: &splash_format::Box3, d: f32) -> (Vec<[f3
     (verts, quads)
 }
 
+/// The surface of frame f as lit triangles in scene coordinates, for the viewport (smooth normals, water blue).
+pub fn surface_tris(c: &Cache, f: usize) -> Vec<crate::render::Vert> {
+    let v = c.view(f);
+    let (b, fr) = (v.bytes(), &v.fr);
+    let bx = c.frame_box(f);
+    let mut pts: Vec<[f32; 3]> = (0..fr.water.n as usize).filter_map(|i| { let (p, s, _) = decode_point(b, &fr.water, fr.q, &bx, i); (s != 255).then_some(p) }).collect();
+    if let Some(dp) = fr.deep.as_ref() { for i in 0..dp.n as usize { let (p, s, _) = decode_point(b, dp, fr.q, &bx, i); if s != 255 { pts.push(p); } } }
+    let (vs, qs) = surface(&pts, &c.info.b, c.info.d);
+    let mut nrm = vec![[0f32; 3]; vs.len()];
+    let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    for q in &qs {
+        let (a, bb, cc) = (vs[q[0] as usize], vs[q[1] as usize], vs[q[2] as usize]);
+        let (u, w) = (sub(bb, a), sub(cc, a));
+        let n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+        for k in q { for x in 0..3 { nrm[*k as usize][x] += n[x]; } }
+    }
+    // (the shader takes a normal under 0.1 long for none at all: these are far smaller before this)
+    for n in nrm.iter_mut() { let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-20); for x in n.iter_mut() { *x /= l; } }
+    let o = c.info.org;
+    let vert = |k: u32| crate::render::Vert { p: [vs[k as usize][0] + o[0], vs[k as usize][1] + o[1], vs[k as usize][2] + o[2]], n: nrm[k as usize], c: [0.18, 0.45, 0.85, 0.99] };
+    qs.iter().flat_map(|q| [q[0], q[1], q[2], q[0], q[2], q[3]].map(vert)).collect()
+}
+
 fn ply_head(w: &mut impl Write, n: usize, props: &[&str], faces: usize) -> std::io::Result<()> {
     write!(w, "ply\nformat binary_little_endian 1.0\ncomment SplashTank export, metres\nelement vertex {n}\n")?;
     for p in props { writeln!(w, "property {p}")?; }

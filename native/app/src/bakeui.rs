@@ -258,6 +258,18 @@ impl BakeUi {
         self.queue.push((format!("{stem}, spacing {}, {} s", self.bake_sp, self.seconds), Task { kind, inp: None, scene: scene.clone(), o: self.opts(), out: dir.join(format!("{name}.splc")) }));
         Ok(())
     }
+    /// A quick look: the same bake at twice the spacing (an eighth of the particles), into the bake folder.
+    pub fn start_preview(&self, scene: Option<&serde_json::Value>) -> Option<Action> {
+        let scene = scene?.clone();
+        match self.auto_out(" preview") {
+            Ok(out) => {
+                let mut o = self.opts();
+                o.detail = Some(self.spacing / (self.bake_sp * 2.0).max(1e-4));
+                Some(Action::Start(format!("Quick preview {}", out.file_name().unwrap_or_default().to_string_lossy()), Task { kind: Kind::Bake { water_only: self.water_only, checkpoint_secs: 0.0 }, inp: None, scene, o, out }))
+            }
+            Err(e) => Some(Action::Fail(e)),
+        }
+    }
     /// Bake whitewater for the bake at c, into the bake folder.
     pub fn start_whitewater(&self, c: Option<PathBuf>, scene: Option<&serde_json::Value>) -> Option<Action> {
         let c = c.filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("splc")))?;
@@ -292,6 +304,8 @@ impl BakeUi {
         self.settings_of(v);
     }
     pub fn set_seconds(&mut self, s: f32) { self.seconds = s; }
+    /// The scene's bake settings changed in the window (Quick setup): the panel takes them.
+    pub fn source_scene_settings(&mut self, v: &serde_json::Value) { self.settings_of(v); }
     /// the live spacing (the live sim runs at it, as the page's live view)
     pub fn spacing(&self) -> f32 { self.spacing }
     pub fn set_spacing(&mut self, v: f32) { self.spacing = v; }
@@ -429,6 +443,9 @@ impl BakeUi {
             ui.label(egui::RichText::new(est).small().color(if warned { egui::Color32::from_rgb(0xe9, 0x8a, 0x3a) } else { ui.visuals().text_color() })).on_hover_text("The water a narrow band bake starts with is counted exactly; it can grow after impacts (Max points Auto allows for that). Sizes on disk are typical: fast, broken-up water takes more.");
             if ui.add_sized([120.0, 26.0], egui::Button::new(egui::RichText::new("Bake").strong())).on_hover_text("Bake now. The bake is temporary (in the bake folder) until File > Save bake keeps it: a new bake replaces it, and leaving it (another scene, closing) deletes it after asking.").clicked() {
                 act = self.start_bake(Some(scene));
+            }
+            if ui.button("Quick preview").on_hover_text("The same bake at twice the spacing: an eighth of the particles, so it is much quicker, to judge timing and the big motion. Whitewater and splashes look coarser.").clicked() {
+                act = self.start_preview(Some(scene));
             }
             if ui.button("Add to queue").on_hover_text("Keep this scene and these settings as they are now, to bake later. Queued bakes run one after another, and each is kept in the Queued bakes folder inside the bake folder. Good for overnight: change the scene or the settings and add another.").clicked() {
                 if let Err(e) = self.queue_bake(scene) { act = Some(Action::Fail(e)); }

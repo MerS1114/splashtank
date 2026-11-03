@@ -146,9 +146,11 @@ pub struct Look {
     pub cut_tilt: f32,
     pub cut_n: u32,
     pub cut_wash: bool,
+    /// the water's surface as a mesh for the frame shown, when one has been made for it
+    pub surface: bool,
 }
 impl Default for Look {
-    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None, scene_objs: false, by_type: false, time: 0.0, bg: 0, fog: true, air: 0, air_every: 4, air_len: 1.0, air_min: 0.5, air_red: 30.0, cut_pos: 0.5, cut_turn: 0.0, cut_tilt: 0.0, cut_n: 140, cut_wash: true } }
+    fn default() -> Look { Look { size: 0.85, vmax: 5.0, foam: 0.8, detail: 0, spr_detail: 4, streak: 0.02, skip_buried: true, blend: true, water: true, deep: true, whitewater: true, objects: true, region: None, scene_objs: false, by_type: false, time: 0.0, bg: 0, fog: true, air: 0, air_every: 4, air_len: 1.0, air_min: 0.5, air_red: 30.0, cut_pos: 0.5, cut_turn: 0.0, cut_tilt: 0.0, cut_n: 140, cut_wash: true, surface: false } }
 }
 
 #[repr(C)]
@@ -161,7 +163,7 @@ struct LayerU { b0: [f32; 4], e: [f32; 4], q: [u32; 4], n: [u32; 4] }
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vert { p: [f32; 3], n: [f32; 3], c: [f32; 4] }
+pub struct Vert { pub p: [f32; 3], pub n: [f32; 3], pub c: [f32; 4] }
 
 struct GpuLayer { n: u32, bg: wgpu::BindGroup }
 struct GpuFogT { n: [u32; 3], h: f32, bg: wgpu::BindGroup }
@@ -188,6 +190,8 @@ pub struct Renderer {
     lines: wgpu::RenderPipeline,
     /// flat triangles over everything (the air field)
     tris_top: wgpu::RenderPipeline,
+    /// the surface made for one frame: (cache, frame), its triangles
+    surf: Option<((u64, usize), wgpu::Buffer, u32)>,
     cams: Vec<CamSlot>,
     /// the multisampled colour and depth the view is drawn into, resolved into the caller's target
     msaa: Option<([u32; 2], wgpu::TextureView, wgpu::TextureView)>,
@@ -288,7 +292,7 @@ impl Renderer {
         let tris = geo(wgpu::PrimitiveTopology::TriangleList, &opaque, depth(true, less));
         let lines = geo(wgpu::PrimitiveTopology::LineList, &blended, depth(false, less));
         let tris_top = geo(wgpu::PrimitiveTopology::TriangleList, &blended, depth(false, wgpu::CompareFunction::Always));
-        Renderer { bg, water, deep, ww, fog, fog_bgl, fog_u, fog_buf, fog_smp, tris_top, tris, lines, cams, msaa: None, layer_bgl, empty, dummy, frames: HashMap::new(), lru: VecDeque::new(), gen: u64::MAX,
+        Renderer { bg, water, deep, ww, fog, fog_bgl, fog_u, fog_buf, fog_smp, tris_top, surf: None, tris, lines, cams, msaa: None, layer_bgl, empty, dummy, frames: HashMap::new(), lru: VecDeque::new(), gen: u64::MAX,
             kept_bytes: 0, budget: 2 << 30, uploads: 0 }
     }
 
@@ -301,6 +305,11 @@ impl Renderer {
         self.kept_bytes -= freed;
     }
     pub fn kept_frames(&self) -> usize { self.frames.len() }
+    /// The surface mesh for frame f of the cache shown (triangles in scene coordinates).
+    pub fn set_surface(&mut self, device: &wgpu::Device, gen: u64, f: usize, tris: &[Vert]) {
+        self.surf = (!tris.is_empty()).then(|| ((gen, f), device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("surface"), contents: bytemuck::cast_slice(tris), usage: wgpu::BufferUsages::VERTEX }), tris.len() as u32));
+    }
+    pub fn has_surface(&self, gen: u64, f: usize) -> bool { self.surf.as_ref().is_some_and(|s| s.0 == (gen, f)) }
 
     fn layer(&self, device: &wgpu::Device, c: &View, p: &Points, q: Option<[u8; 3]>, bx: Box3, ww_codes: Option<&std::ops::Range<usize>>) -> (GpuLayer, u64) {
         let buf = |label: &str, r: &std::ops::Range<usize>| device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -414,6 +423,7 @@ impl Renderer {
         pass.set_pipeline(&self.bg);
         pass.draw(0..3, 0..1);
         if let Some(bf) = &tb { pass.set_pipeline(&self.tris); pass.set_vertex_buffer(0, bf.slice(..)); pass.draw(0..tris.len() as u32, 0..1); }
+        if let Some((_, bf, n)) = self.surf.as_ref().filter(|s| look.surface && s.0 == (doc.gen, a)) { pass.set_pipeline(&self.tris); pass.set_vertex_buffer(0, bf.slice(..)); pass.draw(0..*n, 0..1); }
         let fog_on = look.fog && c.is_some();
         let (mut fog_layers, mut fog_w) = (0u32, 0.0);
         if fog_on {

@@ -293,7 +293,17 @@ struct App {
     autobake: Option<PathBuf>,
     autosaved: Instant,
     ctx_attention: bool,
+    /// the versions of the scene shown in the Bake tab (read again when asked), and their pictures
+    vers: Option<(PathBuf, Vec<crate::versions::Ver>)>,
+    thumbs: std::collections::HashMap<PathBuf, egui::TextureHandle>,
+    /// a second bake shown beside the first, from the same camera
+    cmp: Option<Cmp>,
+    dev: wgpu::Device,
+    /// the surface being made for a frame on a thread: (cache, frame) and the result
+    surf_rx: Option<((u64, usize), mpsc::Receiver<Vec<render::Vert>>)>,
 }
+
+struct Cmp { doc: Doc, r: Renderer, target: Option<Target>, name: String }
 
 /// What went wrong in a bake, in plain words with the first frame it happened and what to do (from its per-frame measurements).
 pub fn bake_warnings(m: &Value, scale: f32) -> Vec<String> {
@@ -360,7 +370,7 @@ impl App {
             t: 0.0, look: Look::default(),
             msg: "Open a bake cache (.splc) or a scene file (.json), or drop one on the window.".into(),
             gpu: crate::gpu::describe(&rs.adapter, &rs.device), last: Instant::now(), frame_ms: 0.0, perf: false, bench: Arc::new(std::sync::Mutex::new(None)), bench_at: 2.5, bench_steps: 60, slow_ms: 0.0, readahead: tx,
-            path: None, bake: BakeUi::default(), worker: Worker::new(ctx.clone()), seen: 0, was_busy: false, autobake: None, autosaved: Instant::now(), ctx_attention: false,
+            path: None, bake: BakeUi::default(), worker: Worker::new(ctx.clone()), seen: 0, was_busy: false, autobake: None, autosaved: Instant::now(), ctx_attention: false, vers: None, thumbs: std::collections::HashMap::new(), cmp: None, surf_rx: None, dev: rs.device.clone(),
         }
     }
 
@@ -1309,6 +1319,72 @@ impl App {
         } else { forget_autosave(); }
         said
     }
+    /// The Bake tab's versions: keep the bake shown as a version, and the versions kept so far with a picture, a note, what differs from
+    /// the scene now, and Open, Compare (beside the bake shown) and Delete.
+    fn versions_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(scene) = self.doc.scene.as_ref().map(|s| s.json.clone()) else { return; };
+        let name = self.scene_path.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Unsaved scene".into());
+        let dir = crate::versions::dir(&self.bake.folder, &name);
+        if self.vers.as_ref().is_none_or(|v| v.0 != dir) { self.vers = Some((dir.clone(), crate::versions::list(&dir))); }
+        ui.separator();
+        ui.heading("Versions");
+        ui.label(egui::RichText::new(format!("Bakes of {name} kept side by side, to compare while tuning. In {}.", dir.display())).small().color(egui::Color32::from_gray(0x98)));
+        let shown = self.path.clone().filter(|p| self.bake_cache().is_some() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("splc")));
+        ui.horizontal(|ui| {
+            if ui.add_enabled(shown.is_some() && !self.worker.busy(), egui::Button::new("Keep this bake as a version")).on_hover_text("A copy of the bake shown, with its settings, a picture and a note").clicked() {
+                match crate::versions::keep(shown.as_deref().unwrap(), &dir) { Ok(p) => { self.msg = format!("Kept as {}", p.display()); self.vers = None; } Err(e) => self.msg = e }
+            }
+            if ui.small_button("Refresh").on_hover_text("Read the versions again (pictures appear a few seconds after keeping)").clicked() { self.vers = None; self.thumbs.clear(); }
+        });
+        let mut act: Option<(usize, u8)> = None;
+        let Some((_, list)) = self.vers.as_mut() else { return; };
+        for (k, v) in list.iter_mut().enumerate().rev() {
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    if !self.thumbs.contains_key(&v.thumb) {
+                        if let Some(img) = std::fs::File::open(&v.thumb).ok().and_then(|f| { let mut d = png::Decoder::new(std::io::BufReader::new(f)).read_info().ok()?; let mut buf = vec![0; d.output_buffer_size()?]; let info = d.next_frame(&mut buf).ok()?; Some((info, buf)) }) {
+                            let (info, buf) = img;
+                            let rgba: Vec<u8> = if info.color_type == png::ColorType::Rgb { buf.chunks_exact(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect() } else { buf[..info.buffer_size()].to_vec() };
+                            let ci = egui::ColorImage::from_rgba_unmultiplied([info.width as usize, info.height as usize], &rgba);
+                            self.thumbs.insert(v.thumb.clone(), ui.ctx().load_texture(v.thumb.display().to_string(), ci, Default::default()));
+                        }
+                    }
+                    if let Some(t) = self.thumbs.get(&v.thumb) { ui.image((t.id(), egui::vec2(160.0, 90.0))); } else { ui.add_sized([160.0, 90.0], egui::Label::new("picture coming")); }
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new(&v.name).strong());
+                        ui.label(egui::RichText::new(format!("{} frames, spacing {}", v.frames, v.spacing)).small());
+                        let r = ui.add(egui::TextEdit::singleline(&mut v.note).hint_text("a note: what you tried").desired_width(200.0));
+                        if r.lost_focus() { crate::versions::set_note(v); }
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Open").clicked() { act = Some((k, 0)); }
+                            if ui.small_button("Compare").on_hover_text("Show it beside the bake shown, from the same camera").clicked() { act = Some((k, 1)); }
+                            if ui.small_button("Delete").clicked() { act = Some((k, 2)); }
+                        });
+                    });
+                });
+                let d = crate::edit::differences(&v.scene, &scene);
+                egui::CollapsingHeader::new(format!("{} setting{} differ from the scene now", d.len(), if d.len() == 1 { "" } else { "s" })).id_salt(("verdiff", k)).show(ui, |ui| {
+                    for x in &d { ui.label(egui::RichText::new(x).small()); }
+                });
+            });
+        }
+        let Some((k, what)) = act else { return; };
+        let p = list[k].path.clone();
+        match what {
+            0 => { if self.may_discard() { self.open(&p); } }
+            1 => {
+                let mut doc = Doc::default();
+                match crate::open_into(&mut doc, &p) {
+                    Ok(_) => { doc.gen = u64::MAX - 1; self.cmp = Some(Cmp { doc, r: Renderer::new(&self.dev), target: None, name: list[k].name.clone() }); }
+                    Err(e) => self.msg = e,
+                }
+            }
+            _ => {
+                let yes = rfd::MessageDialog::new().set_title("SplashTank").set_description(format!("Delete {}?", list[k].name)).set_buttons(rfd::MessageButtons::YesNo).show() == rfd::MessageDialogResult::Yes;
+                if yes { crate::versions::delete(&list[k]); self.vers = None; }
+            }
+        }
+    }
     /// Everything not selected becomes the selection.
     fn invert_selection(&mut self) {
         self.sel_set = (0..self.objs().len()).filter(|k| !self.sel_set.contains(k)).collect();
@@ -1380,6 +1456,14 @@ impl App {
 
     fn ensure_target(&mut self, rs: &egui_wgpu::RenderState, size: [u32; 2]) {
         if self.target.as_ref().map(|t| t.size == size).unwrap_or(false) { return; }
+        let old = self.target.take();
+        self.target = Some(make_target(rs, size, old));
+    }
+}
+
+/// A picture the viewport draws into and egui shows; the old one's texture is let go.
+fn make_target(rs: &egui_wgpu::RenderState, size: [u32; 2], old: Option<Target>) -> Target {
+    {
         let ext = wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 };
         let color = rs.device.create_texture(&wgpu::TextureDescriptor { label: Some("view"), size: ext, mip_level_count: 1, sample_count: 1,
             dimension: wgpu::TextureDimension::D2, format: render::COLOR, usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
@@ -1388,10 +1472,13 @@ impl App {
         // through an sRGB view they were decoded as sRGB and came out far too dark
         let shown = color.create_view(&wgpu::TextureViewDescriptor { format: Some(wgpu::TextureFormat::Rgba8Unorm), ..Default::default() });
         let mut er = rs.renderer.write();
-        if let Some(old) = self.target.take() { er.free_texture(&old.id); }
+        if let Some(old) = old { er.free_texture(&old.id); }
         let id = er.register_native_texture(&rs.device, &shown, wgpu::FilterMode::Linear);
-        self.target = Some(Target { size, color, id });
+        Target { size, color, id }
     }
+}
+
+impl App {
 
     /// The tools at the viewport's top left (the page's tool shelf: which gizmo handles show) and, with a bake open, Scene / Bake.
     fn viewport_bar(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
@@ -1831,6 +1918,7 @@ impl App {
                 let shown = self.path.clone().filter(|p| self.bake_cache().is_some() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("splc")));
                 let scene = self.doc.scene.as_ref().map(|s| &s.json);
                 if let Some(a) = self.bake.panel(ui, &self.worker, scene, self.scene_rev, shown.as_deref()) { self.act(a); }
+                self.versions_ui(ui);
                 if std::mem::take(&mut self.bake.bake_edited) {
                     // kept in the scene (detail for the web page); nothing to simulate again
                     let (b, l) = (self.bake.bake_spacing(), self.bake.spacing());
@@ -1840,6 +1928,7 @@ impl App {
             }
             if matches!(tab, Tab::Sim | Tab::Scene | Tab::Object) {
                 if tab == Tab::Scene {
+                    if let Some(s) = self.doc.scene.as_mut() { if crate::edit::quick_setup(ui, &mut s.json) { crate::edit::take_sim_change(); self.edited(); self.bake.source_scene_settings(&self.doc.scene.as_ref().unwrap().json); self.msg = "Quick setup applied. Every setting stays editable.".into(); } }
                     ui.horizontal(|ui| {
                         if ui.add_enabled(self.doc.scene.is_some(), egui::Button::new("Save scene (Ctrl+S)")).on_hover_text("Saves objects, keyframes, the tank and solver settings. Bakes are not included.").clicked() { self.save_scene(false); }
                         if ui.button("Load scene").on_hover_text("Open a scene saved earlier").clicked() && self.may_discard() {
@@ -1993,6 +2082,7 @@ impl App {
                     ui.checkbox(&mut self.look.whitewater, "Whitewater");
                     ui.checkbox(&mut self.look.fog, "Mist and smoke").on_hover_text("The cloud kept with the bake, drawn as see-through fog. Simulation > Mist and smoke sets how it looks.");
                     ui.checkbox(&mut self.look.objects, "Objects");
+                    ui.checkbox(&mut self.look.surface, "Surface (paused)").on_hover_text("When paused on a bake frame, the water's surface as a mesh (as File > Export for Blender makes it) instead of points. Made in a second or so for each frame.");
                 });
             });
             egui::CollapsingHeader::new("Water and whitewater").default_open(true).show(ui, |ui| {
@@ -2225,7 +2315,9 @@ impl eframe::App for App {
         kf.show(ui, |ui| self.timeline(ui));
         egui::Panel::right("side").default_size(430.0).min_size(360.0).show(ui, |ui| self.side(ui));
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
-            let avail = ui.available_size();
+            let full = ui.available_size();
+            // comparing: two pictures side by side from the same camera
+            let avail = if self.cmp.is_some() { egui::vec2(full.x / 2.0 - 2.0, full.y) } else { full };
             let ppp = ui.ctx().pixels_per_point();
             let size = [((avail.x * ppp) as u32).max(16), ((avail.y * ppp) as u32).max(16)];
             self.ensure_target(&rs, size);
@@ -2246,9 +2338,41 @@ impl eframe::App for App {
             let mut lk = self.look;
             lk.time = self.st as f32;
             if self.pb == 2 || (self.pb == 1 && self.splay && self.frame_ms > 30.0) { lk.detail = 0; lk.spr_detail = lk.spr_detail.min(1); }
+            // the surface for a paused frame: made on a thread, the points hidden while it shows
+            if lk.surface && !self.splay {
+                if let Some(c) = self.doc.cache.clone().filter(|c| f < c.frames.len()) {
+                    let key = (self.doc.gen, f);
+                    if let Some((k, rx)) = &self.surf_rx { if let Ok(t) = rx.try_recv() { let k = *k; self.r.set_surface(&rs.device, k.0, k.1, &t); self.surf_rx = None; } }
+                    if !self.r.has_surface(key.0, key.1) && self.surf_rx.as_ref().is_none_or(|s| s.0 != key) {
+                        let (tx, rx) = mpsc::channel();
+                        let ctx = ui.ctx().clone();
+                        std::thread::spawn(move || { let _ = tx.send(crate::export::surface_tris(&c, f)); ctx.request_repaint(); });
+                        self.surf_rx = Some((key, rx));
+                    }
+                    if self.r.has_surface(key.0, key.1) { lk.water = false; lk.deep = false; }
+                }
+            }
             self.r.draw(&rs.device, &rs.queue, &mut enc, &t.color.create_view(&Default::default()), size, &self.cam, &self.doc, f, fb, w, &lk);
+            if let Some(cm) = self.cmp.as_mut() {
+                if cm.target.as_ref().is_none_or(|x| x.size != size) { let old = cm.target.take(); cm.target = Some(make_target(&rs, size, old)); }
+                let m = cm.doc.cache.as_ref().map_or(0, |c| c.frames.len());
+                let g = (self.t.floor() as usize).min(m.saturating_sub(1));
+                let gb = if m > 1 && self.t.fract() > 0.0 { (g + 1).min(m - 1) } else { g };
+                cm.r.draw(&rs.device, &rs.queue, &mut enc, &cm.target.as_ref().unwrap().color.create_view(&Default::default()), size, &self.cam, &cm.doc, g, gb, w, &lk);
+            }
             rs.queue.submit([enc.finish()]);
-            let resp = ui.add(egui::Image::new(egui::load::SizedTexture::new(t.id, avail)).sense(egui::Sense::click_and_drag()));
+            let left = egui::Rect::from_min_size(ui.max_rect().min, avail);
+            let resp = ui.put(left, egui::Image::new(egui::load::SizedTexture::new(t.id, avail)).sense(egui::Sense::click_and_drag()));
+            let mut close_cmp = false;
+            if let Some(cm) = &self.cmp {
+                let right = egui::Rect::from_min_size(left.right_top() + egui::vec2(4.0, 0.0), avail);
+                ui.put(right, egui::Image::new(egui::load::SizedTexture::new(cm.target.as_ref().unwrap().id, avail)));
+                let tag = |ui: &mut egui::Ui, r: egui::Rect, s: &str| { ui.painter().text(r.left_bottom() + egui::vec2(10.0, -10.0), egui::Align2::LEFT_BOTTOM, s, egui::FontId::proportional(15.0), egui::Color32::WHITE); };
+                tag(ui, left, "Shown");
+                tag(ui, right, &cm.name);
+                close_cmp = ui.put(egui::Rect::from_min_size(right.right_top() + egui::vec2(-150.0, 8.0), egui::vec2(140.0, 24.0)), egui::Button::new("Close compare")).clicked();
+            }
+            if close_cmp { self.cmp = None; }
             let rect = resp.rect;
             let editing = self.editing();
             let m = ui.input(|i| i.pointer.latest_pos()).unwrap_or(rect.center());

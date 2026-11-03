@@ -201,6 +201,59 @@ fn looks(ui: &mut egui::Ui, j: &mut Value) -> bool {
     true
 }
 
+/// The settings that differ between two scenes, as "name: a to b" (the Simulation tab's names).
+pub fn differences(a: &Value, b: &Value) -> Vec<String> {
+    let fmt = |v: Option<&Value>, d: &Value| { let v = v.unwrap_or(d); v.as_f64().map(|x| format!("{}", (x * 1000.0).round() / 1000.0)).unwrap_or_else(|| v.to_string()) };
+    spec()["rows"].as_array().unwrap().iter().filter_map(|r| {
+        let p = path_of(r);
+        let (x, y) = (get(a, &p), get(b, &p));
+        let same = match (x.unwrap_or(&r["def"]).as_f64(), y.unwrap_or(&r["def"]).as_f64()) { (Some(u), Some(w)) => (u - w).abs() <= 1e-9 * w.abs().max(1.0), _ => x.unwrap_or(&r["def"]) == y.unwrap_or(&r["def"]) };
+        (!same).then(|| format!("{}: {} to {}", r["label"].as_str().unwrap_or(""), fmt(x, &r["def"]), fmt(y, &r["def"])))
+    }).collect()
+}
+
+/// Quick setup: a kind of shot, a size and a quality fill in the settings that decide them; everything stays editable afterwards.
+pub fn quick_setup(ui: &mut egui::Ui, j: &mut Value) -> bool {
+    let id = ui.make_persistent_id("quick setup");
+    let (mut kind, mut size, mut q): (u8, u8, u8) = ui.data(|d| d.get_temp(id).unwrap_or((0, 1, 1)));
+    let mut go = false;
+    egui::CollapsingHeader::new("Quick setup").default_open(false).show(ui, |ui| {
+        ui.label(egui::RichText::new("Pick the kind of shot, its size and the quality; the settings that decide them are filled in. Everything stays editable.").small().color(egui::Color32::from_gray(0x98)));
+        egui::Grid::new("quickgrid").num_columns(2).show(ui, |ui| {
+            ui.label("Shot");
+            ui.horizontal_wrapped(|ui| { for (v, n, t) in [(0u8, "Impact", "Something hits the water: crowns, spray and mist."), (1, "Flowing", "Rivers, falls and pours: steady flow, foam and spray."),
+                (2, "Waves", "Seas and surf: waves, breaking crests, foam."), (3, "Calm", "Gentle water: little whitewater.")] { ui.selectable_value(&mut kind, v, n).on_hover_text(t); } });
+            ui.end_row();
+            ui.label("Size");
+            ui.horizontal(|ui| { for (v, n, t) in [(0u8, "Small", "The tank is 2 m across: a sink or a pond's edge."), (1, "Medium", "20 m: a pool, a river or a ship's side."), (2, "Large", "200 m: a lake, a dam or the sea.")] { ui.selectable_value(&mut size, v, n).on_hover_text(t); } });
+            ui.end_row();
+            ui.label("Quality");
+            ui.horizontal(|ui| { for (v, n, t) in [(0u8, "Draft", "Fast bakes to judge timing."), (1, "Good", "Detailed enough to judge the look."), (2, "Final", "The finished shot. Long bakes.")] { ui.selectable_value(&mut q, v, n).on_hover_text(t); } });
+            ui.end_row();
+        });
+        go = ui.button("Apply").on_hover_text("Fill in the settings for this shot").clicked();
+    });
+    ui.data_mut(|d| d.insert_temp(id, (kind, size, q)));
+    if !go { return false; }
+    let n = |p: &[&str], d: f64| get(j, p).and_then(Value::as_f64).unwrap_or(d);
+    let l = n(&["box", "size", "w"], 3.0).max(n(&["box", "size", "h"], 2.6)).max(n(&["box", "size", "d"], 3.0));
+    set(j, &["solver", "scale"], json!([2.0, 20.0, 200.0][size as usize] / l));
+    // live water stays light; the bake gets the quality's cells across the tank
+    let live = l / 60.0;
+    let bake = l / [60.0, 110.0, 180.0][q as usize];
+    set(j, &["solver", "spacing"], json!(live));
+    set(j, &["bake", "spacing"], json!(bake));
+    set(j, &["bake", "detail"], json!(live / bake));
+    let look = ["impact", "waves", "waves", "calm"][kind as usize];
+    let lk = &spec()["looks"];
+    if let Some(vals) = lk["values"][look].as_object() { for (k, v) in vals { set(j, &["solver", k], v.clone()); } }
+    set(j, &["solver", "nbOn"], json!(kind == 2 || size == 2));
+    set(j, &["solver", "fogAmount"], json!([1.5, 1.0, 1.0, 0.4][kind as usize]));
+    if q == 2 { set(j, &["bake", "accuracy"], json!("accurate")); }
+    SIM_CHANGED.with(|c| c.set(true));
+    true
+}
+
 /// The Simulation tab: every setting a scene file keeps, grouped as on the page.
 /// find: the search box's text (F3 on the page): only the settings whose name or tooltip has it, in one list.
 pub fn settings(ui: &mut egui::Ui, j: &mut Value, find: &mut String) -> bool {

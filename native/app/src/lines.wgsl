@@ -37,6 +37,12 @@ fn vs(v: VIn) -> VOut {
 fn fs(i: VOut) -> @location(0) vec4<f32> {
   if (dot(i.n, i.n) < 0.01) { return i.c; }
   let n = normalize(i.n);
+  // the water surface preview (alpha 0.99 marks it): darker water, lit from the sun, brighter towards the sky and on its edges
+  if (i.c.a > 0.985 && i.c.a < 0.995) {
+    let l = abs(dot(n, normalize(vec3<f32>(2.0, 5.0, 3.0))));
+    let sky = 0.5 + 0.5 * abs(n.y);
+    return vec4<f32>(i.c.rgb * (0.25 + 0.75 * l) * sky + vec3<f32>(0.9, 0.95, 1.0) * pow(l, 24.0) * 0.6, 1.0);
+  }
   // the page's objects: Lambert, ambient 0.7 and a sun of 0.75 from (2, 5, 3), both sides lit
   let sh = 0.7 + 0.75 * abs(dot(n, normalize(vec3<f32>(2.0, 5.0, 3.0))));
   return vec4<f32>(min(i.c.rgb * sh, vec3<f32>(1.0)), i.c.a);

@@ -32,6 +32,7 @@ mod editmode;
 mod tf;
 mod gpu;
 mod export;
+mod versions;
 mod gui;
 mod render;
 
