@@ -130,6 +130,15 @@ for (const r of out.rows) if (r.key === 'nbOn') r.label = 'Enabled';
     tip: 'Water sliding over the tank floor loses speed as the square of it, as over a real floor. It brings a dam break\'s front within 10% of the measured one. 0 is a perfectly slippery floor. The web page ignores this.' });
 }
 for (const r of out.rows) if (r.key === 'apicFlip') r.def = 0.9;   // waves lost 3.6% of their height a period at the page's 0.8, 1.5% at 0.9, and the crown stayed
+// a short note at the top of groups the page left without one
+{
+  const notes = { res: 'How fine the water is. Finer is more detailed and much slower: half the spacing is about eight times the points.',
+    phys: 'How the water itself behaves: gravity, how lively splashes stay, the size of the scene and how the water meets walls.',
+    air: 'Wind and gusts acting on the water\'s surface and the whitewater.',
+    white: 'How churned water is coloured white, and how thin sheets tear into drops.',
+    speedups: 'Ways the solver saves time. They keep the water the same or very nearly; leave them on unless something looks wrong.' };
+  for (const g of out.groups) if (!g.tip && notes[g.id]) g.tip = notes[g.id];
+}
 // the Simulation tab's Simple view: the settings most shots change
 {
   const basic = new Set(['g', 'scale', 'apicFlip', 'wind.speed', 'gust', 'foamSens', 'sprOn', 'sprAmt', 'wwFoamLife', 'wwTrail', 'airOn', 'fogOn', 'fogAmount', 'fogLife', 'fogDensity', 'fogOpacity', 'fogColor',

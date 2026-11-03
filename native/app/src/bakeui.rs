@@ -101,7 +101,7 @@ impl Worker {
     pub fn busy(&self) -> bool { self.job.lock().unwrap().busy }
 }
 
-fn hms(s: f32) -> String {
+pub fn hms(s: f32) -> String {
     let s = s.round() as u32;
     if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else if s >= 60 { format!("{}:{:02}", s / 60, s % 60) } else { format!("{s} s") }
 }
@@ -156,6 +156,13 @@ pub fn set_setting(k: &str, val: serde_json::Value) {
     v[k] = val;
     let _ = std::fs::create_dir_all(p.parent().unwrap());
     let _ = std::fs::write(&p, serde_json::to_vec_pretty(&v).unwrap_or_default());
+}
+
+/// Seconds of baking a million particles takes for one frame on this computer, learnt from the last finished bake (settings.json bakeRate).
+pub fn learn_rate(m: &serde_json::Value) {
+    let (Some(secs), Some(dg)) = (m["seconds"].as_f64(), m["diag"].as_array()) else { return; };
+    let pts: f64 = dg.iter().filter_map(|d| d["n"].as_f64()).sum::<f64>() / 1e6;
+    if pts > 0.5 && secs > 5.0 && m["cancelled"] != true { set_setting("bakeRate", serde_json::json!(secs / pts)); }
 }
 
 /// Free bytes on the drive holding p, and whether it is a fixed drive (not removable or a network share).
@@ -332,8 +339,24 @@ impl BakeUi {
                 let max_n = if d.max_n_set { d.max_n as u64 } else if d.nb.is_some() || d.ocean.is_some() { (d.max_n as u64).max(start * 5 / 2) } else { (d.max_n as u64).max(4_000_000).max(start * 13 / 10) };
                 let mem = splash_sim::bake::estimate_bytes(max_n, d.apic, d.cell_ratio, d.spray_cap as u64, d.sort);
                 let per = start as f64 * 1.3 + if d.spray_cap > 0 { splash_sim::ww::keep_cap(d.d) as f64 * 3.0 } else { 0.0 };
-                format!("About {:.2} M points to start (Max points {:.1} M), about {:.1} GB of video memory, about {:.0} MB a frame, {:.1} GB for {} frames.",
-                    start as f64 / 1e6, max_n as f64 / 1e6, mem as f64 / 1e9, per / 1048576.0, per * (d.frames + 1) as f64 / 1073741824.0, d.frames + 1)
+                let mut s = format!("About {:.2} M points to start (Max points {:.1} M), about {:.1} GB of video memory, about {:.0} MB a frame, {:.1} GB for {} frames.",
+                    start as f64 / 1e6, max_n as f64 / 1e6, mem as f64 / 1e9, per / 1048576.0, per * (d.frames + 1) as f64 / 1073741824.0, d.frames + 1);
+                // time, going by the last bake on this computer (splashes grow the water, so it is a rough guide)
+                if let Some(rate) = setting("bakeRate").and_then(|v| v.as_f64()) {
+                    s += &format!(" Roughly {} to bake, going by your last bake.", hms((rate * start as f64 / 1e6 * (d.frames + 1) as f64) as f32));
+                }
+                // the scene check: what would spoil the bake, before it starts
+                let mut warn = Vec::new();
+                if let Some(free) = splash_sim::bake::free_vram_mb() { if mem as f64 / 1048576.0 > free as f64 { warn.push(format!("It needs more video memory than is free ({:.1} GB): use a coarser Bake spacing or a smaller tank.", free as f64 / 1024.0)); } }
+                if start == 0 && d.ocean.is_none() && !d.objs.iter().any(|o| o.emitter) && d.events.is_empty() { warn.push("There is no water: add a Water box or ball, a Source, or Scene > Fill tank.".into()); }
+                let (lo, sz) = (|k: &str| scene.pointer(&format!("/box/min/{k}")).and_then(|v| v.as_f64()).unwrap_or(0.0), |k: &str| scene.pointer(&format!("/box/size/{k}")).and_then(|v| v.as_f64()).unwrap_or(1.0));
+                for o in scene["objs"].as_array().into_iter().flatten() {
+                    let p = [o["x"].as_f64().unwrap_or(0.0), o["y"].as_f64().unwrap_or(0.0), o["z"].as_f64().unwrap_or(0.0)];
+                    let out = (0..3).any(|k| { let (a, w) = (lo(["x", "y", "z"][k]), sz(["w", "h", "d"][k])); p[k] < a || p[k] > a + w });
+                    if out && o["keys"].as_array().is_none_or(|k| k.is_empty()) { warn.push(format!("{} sits outside the tank, so it does nothing.", o["name"].as_str().unwrap_or("An object"))); }
+                }
+                for w in warn { s += &format!("\nWarning: {w}"); }
+                s
             }
         }
     }
@@ -402,7 +425,8 @@ impl BakeUi {
                 ui.end_row();
             });
             let est = self.estimate(scene, rev, ui.ctx());
-            ui.label(egui::RichText::new(est).small()).on_hover_text("The water a narrow band bake starts with is counted exactly; it can grow after impacts (Max points Auto allows for that). Sizes on disk are typical: fast, broken-up water takes more.");
+            let warned = est.contains("\nWarning:");
+            ui.label(egui::RichText::new(est).small().color(if warned { egui::Color32::from_rgb(0xe9, 0x8a, 0x3a) } else { ui.visuals().text_color() })).on_hover_text("The water a narrow band bake starts with is counted exactly; it can grow after impacts (Max points Auto allows for that). Sizes on disk are typical: fast, broken-up water takes more.");
             if ui.add_sized([120.0, 26.0], egui::Button::new(egui::RichText::new("Bake").strong())).on_hover_text("Bake now. The bake is temporary (in the bake folder) until File > Save bake keeps it: a new bake replaces it, and leaving it (another scene, closing) deletes it after asking.").clicked() {
                 act = self.start_bake(Some(scene));
             }

@@ -295,6 +295,30 @@ struct App {
     ctx_attention: bool,
 }
 
+/// What went wrong in a bake, in plain words with the first frame it happened and what to do (from its per-frame measurements).
+pub fn bake_warnings(m: &Value, scale: f32) -> Vec<String> {
+    let Some(dg) = m["diag"].as_array().filter(|d| !d.is_empty()) else { return Vec::new(); };
+    let sc = scale as f64;
+    let mut out = Vec::new();
+    let first = |p: &dyn Fn(&Value) -> bool| dg.iter().find(|d| p(d)).and_then(|d| d["f"].as_u64());
+    let count = |p: &dyn Fn(&Value) -> bool| dg.iter().filter(|d| p(d)).count();
+    let vmax = m.pointer("/desc/vmaxW").and_then(Value::as_f64).unwrap_or(f64::MAX) * sc;
+    let at_v = |d: &Value| d["fastestParticle"].as_f64().is_some_and(|v| v * sc >= 0.99 * vmax);
+    if let Some(f) = first(&at_v) { out.push(format!("Water hit the speed limit ({vmax:.0} m/s) in {} frames, first frame {f}: raise Max water speed (Simulation > Substeps and speed limits) if it looks held back.", count(&at_v))); }
+    let max_sub = m.pointer("/desc/maxSub").and_then(Value::as_u64).unwrap_or(u64::MAX);
+    let at_s = |d: &Value| d["sub"].as_u64().is_some_and(|s| s >= max_sub);
+    if let Some(f) = first(&at_s) { out.push(format!("The substep limit ({max_sub}) was reached in {} frames, first frame {f}: fast water may tunnel or jump; raise Max substeps.", count(&at_s))); }
+    let cap = m["maxN"].as_u64().or_else(|| dg[0]["pointCap"].as_u64()).unwrap_or(u64::MAX) as f64;
+    let full = |d: &Value| d["alive"].as_f64().is_some_and(|a| a >= 0.97 * cap);
+    if let Some(f) = first(&full) { out.push(format!("Out of particles from frame {f} ({:.1} M): water could not be added where it was needed; raise Max points in the Bake tab.", cap / 1e6)); }
+    let uns = |d: &Value| d["unsolved"].as_f64().is_some_and(|u| u > 0.01);
+    if let Some(f) = first(&uns) { out.push(format!("The pressure was left more than 1% unsolved in {} frames, first frame {f}: the water may squeeze; tick Accurate in the Bake tab.", count(&uns))); }
+    let bad = |d: &Value| d["nonFinite"].as_u64().is_some_and(|n| n > 0);
+    if let Some(f) = first(&bad) { out.push(format!("Some particles became invalid from frame {f} and were dropped: something moved impossibly fast; check objects' keys for jumps.")); }
+    if m["cancelled"] == true { out.push("The bake was stopped before its end.".into()); }
+    out
+}
+
 /// Where the scene is kept every minute while it has unsaved changes. Gone after a save or a normal close, so finding it at start-up means a crash.
 fn autosave_path() -> Option<PathBuf> { std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("SplashTank").join("autosave.json")) }
 fn forget_autosave() { if let Some(p) = autosave_path() { let _ = std::fs::remove_file(p); } }
@@ -609,6 +633,7 @@ impl App {
             self.bake.check_resume(&out);
             let _ = ok;
             if let Some(old) = self.replaced.take().filter(|_| out.exists()) { self.drop_temp(&old); }
+            if let Ok(c) = Cache::open(&out) { crate::bakeui::learn_rate(&c.info.meta); }
             // a flash on the taskbar when the window is not in front
             if out.exists() { self.ctx_attention = true; }
             if out.exists() {
@@ -1442,10 +1467,21 @@ impl App {
             format!("drawn {:.1} ms a frame ({:.0} a second), slowest lately {:.0} ms", self.frame_ms, 1000.0 / self.frame_ms.max(0.1), self.slow_ms),
             format!("frames on the GPU {} ({} MB), uploads {}", self.r.kept_frames(), self.r.kept_bytes >> 20, self.r.uploads),
         ];
-        if let Some(c) = &self.doc.cache { lines.push(format!("{} frames, {} water points this frame", c.frames.len(), c.frames.get(self.t as usize).map_or(0, |f| f.water.n))); }
+        if let Some(c) = &self.doc.cache {
+            let f = (self.t as usize).min(c.frames.len().saturating_sub(1));
+            let dg = c.info.meta["diag"].get(f);
+            lines.push(format!("frame {f} of {}: {} water, {} whitewater{}", c.frames.len(), c.frames.get(f).map_or(0, |x| x.water.n), c.frames.get(f).and_then(|x| x.ww.as_ref()).map_or(0, |w| w.n),
+                dg.and_then(|d| d["sub"].as_u64()).map(|s| format!(", {s} substeps")).unwrap_or_default()));
+            if let Some(mb) = c.info.meta["diag"].get(0).and_then(|d| d["gpuMB"].as_u64()) { lines.push(format!("solver memory {:.1} GB", mb as f64 / 1024.0)); }
+            for w in bake_warnings(&c.info.meta, c.info.scale).iter().take(3) { lines.push(format!("! {w}")); }
+        }
         for (w, name) in [(&self.live_w, "live water"), (&self.worker, "bake")] {
             let j = w.job.lock().unwrap();
-            if let (true, Some(p)) = (j.busy, j.prog) { lines.push(format!("{name}: frame {}/{}, {:.0} ms a frame, {} substeps, {} points", p.f, p.frames, p.frame_ms, p.sub, p.n)); }
+            if let (true, Some(p)) = (j.busy, j.prog) {
+                // time left from the frames so far
+                let left = if p.f > 0 { p.elapsed / p.f as f32 * (p.frames.saturating_sub(p.f)) as f32 } else { 0.0 };
+                lines.push(format!("{name}: frame {}/{}, {:.0} ms a frame, {} substeps, {:.2} M points, {} left", p.f, p.frames, p.frame_ms, p.sub, p.n as f64 / 1e6, crate::bakeui::hms(left)));
+            }
         }
         let txt = lines.join("\n");
         let pos = rect.left_top() + egui::vec2(12.0, 44.0);
@@ -1512,7 +1548,7 @@ impl App {
                 ui.separator();
                 if ui.button(if self.kf_open { "Hide key tracks" } else { "Show key tracks" }).clicked() { self.kf_open = !self.kf_open; ui.close(); }
                 if ui.button(if self.handles { "Hide tank arrows" } else { "Show tank arrows" }).clicked() { self.handles = !self.handles; ui.close(); }
-                if ui.button(format!("Performance overlay  P{}", if self.perf { "  (on)" } else { "" })).clicked() { self.perf = !self.perf; ui.close(); }
+                if ui.button(format!("Heads-up display     P{}", if self.perf { "  (on)" } else { "" })).clicked() { self.perf = !self.perf; ui.close(); }
             });
             ui.menu_button("Help", |ui| {
                 if ui.button("Hotkeys").clicked() { self.tab = Tab::Help; ui.close(); }
@@ -1749,6 +1785,9 @@ impl App {
                 ui.label(egui::RichText::new(what).small().color(gray));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let n = self.doc.cache.as_ref().map_or(0, |c| bake_warnings(&c.info.meta, c.info.scale).len());
+                if n > 0 && ui.add(egui::Label::new(egui::RichText::new(format!("{n} warning{} in this bake", if n > 1 { "s" } else { "" })).small().color(egui::Color32::from_rgb(0xe9, 0x6a, 0x3a))).sense(egui::Sense::click()))
+                    .on_hover_text("Click for what went wrong and what to do (Performance tab, Bake report)").clicked() { self.tab = Tab::Perf; }
                 if self.dirty { ui.label(egui::RichText::new("unsaved scene").small().color(egui::Color32::from_rgb(0xe9, 0xa4, 0x3a))); }
                 ui.add(egui::Label::new(egui::RichText::new(&self.msg).small().color(gray)).truncate());
             });
@@ -1904,7 +1943,9 @@ impl App {
                     let at_v = dg.iter().filter(|d| d["fastestParticle"].as_f64().is_some_and(|v| v * sc >= 0.99 * vmax)).count();
                     let most = dg.iter().filter_map(|d| d["alive"].as_u64()).max().unwrap_or(0);
                     let unsolved = dg.iter().filter_map(|d| d["unsolved"].as_f64()).fold(0.0, f64::max);
-                    egui::CollapsingHeader::new("Bake report").default_open(false).show(ui, |ui| {
+                    let warns = bake_warnings(m, i.scale);
+                    egui::CollapsingHeader::new(if warns.is_empty() { "Bake report".to_string() } else { format!("Bake report: {} warning{}", warns.len(), if warns.len() > 1 { "s" } else { "" }) }).default_open(!warns.is_empty()).show(ui, |ui| {
+                        for w in &warns { ui.colored_label(egui::Color32::from_rgb(0xe9, 0x8a, 0x3a), w); }
                         ui.label(format!("Baked in {:.0} s", m["seconds"].as_f64().unwrap_or(0.0)));
                         ui.label(format!("Fastest water {fastest:.1} m/s (limit {vmax:.0}); frames at the speed limit {at_v}, at the substep limit ({max_sub}) {at_sub}"));
                         ui.label(format!("Most particles {most}{}", m["maxN"].as_u64().map(|n| format!(" of Max points {n}")).unwrap_or_default()));
@@ -1944,17 +1985,29 @@ impl App {
     /// The Display tab: how the water is drawn.
     fn display_tab(&mut self, ui: &mut egui::Ui) {
             ui.heading("Display");
+            ui.label(egui::RichText::new("How things are drawn. Nothing here changes the water or needs a new bake.").small().color(egui::Color32::from_gray(0x98)));
+            egui::CollapsingHeader::new("Shown").default_open(true).show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.checkbox(&mut self.look.water, "Water");
+                    ui.checkbox(&mut self.look.deep, "Deep water");
+                    ui.checkbox(&mut self.look.whitewater, "Whitewater");
+                    ui.checkbox(&mut self.look.fog, "Mist and smoke").on_hover_text("The cloud kept with the bake, drawn as see-through fog. Simulation > Mist and smoke sets how it looks.");
+                    ui.checkbox(&mut self.look.objects, "Objects");
+                });
+            });
+            egui::CollapsingHeader::new("Water and whitewater").default_open(true).show(ui, |ui| {
             ui.add(egui::Slider::new(&mut self.look.size, 0.2..=2.0).text("Point size")).on_hover_text("Point size as a share of the particle spacing (the page's default 0.85).");
             ui.add(egui::Slider::new(&mut self.look.vmax, 1.0..=12.0).step_by(0.5).text("White at, m/s")).on_hover_text("The speed that is coloured white. Slower water runs from blue to cyan.");
             ui.add(egui::Slider::new(&mut self.look.foam, 0.0..=1.0).step_by(0.05).text("White water")).on_hover_text("How strongly churned water is drawn white.");
             ui.add(egui::Slider::new(&mut self.look.detail, 0..=15).text("Water detail")).on_hover_text("Look-only extra points drawn around each water point.");
             ui.add(egui::Slider::new(&mut self.look.spr_detail, 0..=15).text("Whitewater detail")).on_hover_text("Look-only extra points drawn around each whitewater point: spray streaks, mist clouds, foam patches.");
-            ui.checkbox(&mut self.look.blend, "Blend between frames").on_hover_text("While playing, the water moves smoothly from one baked frame to the next, as on the page.");
-            ui.checkbox(&mut self.look.water, "Water");
-            ui.checkbox(&mut self.look.deep, "Deep water");
-            ui.checkbox(&mut self.look.whitewater, "Whitewater");
-            ui.checkbox(&mut self.look.fog, "Mist and smoke").on_hover_text("The cloud kept with the bake, drawn as see-through fog. Simulation > Mist and smoke sets how it looks.");
-            ui.checkbox(&mut self.look.objects, "Objects");
+            ui.horizontal(|ui| {
+                ui.label("Colour by").on_hover_text("Speed: blue to cyan to white as the water speeds up, churned water white. Type: one colour per kind of point: water blue, churned water pale blue, foam white, spray orange, mist lilac, bubbles green, deep water (narrow band) dark blue.");
+                ui.selectable_value(&mut self.look.by_type, false, "Speed");
+                ui.selectable_value(&mut self.look.by_type, true, "Type");
+            });
+            });
+            egui::CollapsingHeader::new("Air field").default_open(self.look.air > 0).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Air field").on_hover_text("Where the air moves and how hard, from small green arrows through yellow to long red ones. Follows playback. Needs a bake or live water made since this was added.");
                 ui.selectable_value(&mut self.look.air, 0, "Off");
@@ -1980,11 +2033,9 @@ impl App {
                 ui.add(egui::Slider::new(&mut self.look.cut_n, 30..=200).text("Detail")).on_hover_text("How fine the slice is drawn. Arrows are every second step of this.");
                 ui.checkbox(&mut self.look.cut_wash, "Colour wash").on_hover_text("Colour the whole slice by air speed, behind the arrows.");
             }
-            ui.horizontal(|ui| {
-                ui.label("Colour by").on_hover_text("Speed: blue to cyan to white as the water speeds up, churned water white. Type: one colour per kind of point: water blue, churned water pale blue, foam white, spray orange, mist lilac, bubbles green, deep water (narrow band) dark blue.");
-                ui.selectable_value(&mut self.look.by_type, false, "Speed");
-                ui.selectable_value(&mut self.look.by_type, true, "Type");
             });
+            egui::CollapsingHeader::new("Playback").default_open(true).show(ui, |ui| {
+            ui.checkbox(&mut self.look.blend, "Blend between frames").on_hover_text("While playing, the water moves smoothly from one baked frame to the next, as on the page.");
             ui.horizontal(|ui| {
                 ui.label("Bake playback").on_hover_text("Full: every look-only extra point. Smooth: drops them while playback cannot keep up. Fast: never draws them (each point once).");
                 for (v, n) in [(0u8, "Full"), (1, "Smooth"), (2, "Fast")] { ui.selectable_value(&mut self.pb, v, n); }
@@ -1996,6 +2047,8 @@ impl App {
                     self.dirty = true;
                 }
             }
+            });
+            egui::CollapsingHeader::new("Window").default_open(true).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Interface size").on_hover_text("Everything in the window larger or smaller. Remembered.");
                 let mut z = ui.ctx().zoom_factor();
@@ -2007,6 +2060,7 @@ impl App {
                 for (v, n) in [(0u8, "Grey"), (1, "Light"), (2, "Black")] { ui.selectable_value(&mut self.look.bg, v, n); }
             });
             ui.checkbox(&mut self.look.skip_buried, "Skip buried water").on_hover_text("Water three cells inside the water cannot be seen; drawing 1 in 16 of it is faster. Same as the page's setting.");
+            });
     }
 }
 
@@ -2284,5 +2338,22 @@ impl eframe::App for App {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod warn_tests {
+    /// A bake that hit the speed limit at frame 3, ran out of particles at frame 5 and was stopped says so, with those frames; a clean one says nothing.
+    #[test]
+    fn bake_warnings_name_the_frames() {
+        let d = |f: u64, v: f64, alive: u64| serde_json::json!({ "f": f, "fastestParticle": v, "sub": 2, "alive": alive, "n": alive });
+        let m = serde_json::json!({ "maxN": 1000, "cancelled": true, "desc": { "vmaxW": 10.0, "maxSub": 16 },
+            "diag": [d(0, 1.0, 500), d(3, 10.0, 600), d(4, 10.0, 700), d(5, 2.0, 990)] });
+        let w = super::bake_warnings(&m, 1.0);
+        assert_eq!(w.len(), 3, "{w:?}");
+        assert!(w[0].contains("2 frames, first frame 3"), "{}", w[0]);
+        assert!(w[1].contains("from frame 5"), "{}", w[1]);
+        let clean = serde_json::json!({ "maxN": 1000, "desc": { "vmaxW": 10.0, "maxSub": 16 }, "diag": [d(0, 1.0, 500)] });
+        assert!(super::bake_warnings(&clean, 1.0).is_empty());
     }
 }

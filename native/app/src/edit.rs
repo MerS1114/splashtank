@@ -44,7 +44,8 @@ fn reset_menu(resp: &egui::Response, j: &mut Value, path: &[&str], def: &Value) 
 // Pinned settings: their paths, kept in settings.json
 thread_local! {
     static PINS: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
-    static SHOW_ALL: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    /// 0 Simple, 1 All, 2 Changed
+    static SHOW: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
 }
 fn with_pins<T>(f: impl FnOnce(&mut Vec<String>) -> T) -> T {
     PINS.with(|p| {
@@ -129,29 +130,48 @@ fn row_inner(ui: &mut egui::Ui, j: &mut Value, r: &Value) -> bool {
     ch | reset_menu(&resp, j, &path, &r["def"])
 }
 
+/// The row differs from its default.
+fn changed_row(j: &Value, r: &Value) -> bool { get(j, &path_of(r)).is_some_and(|v| { match (v.as_f64(), r["def"].as_f64()) { (Some(a), Some(b)) => (a - b).abs() > 1e-9 * b.abs().max(1.0), _ => *v != r["def"] } }) }
+/// The row shows in this view (0 Simple, 1 All, 2 Changed).
+fn shown(j: &Value, r: &Value, mode: u8) -> bool { match mode { 1 => true, 2 => changed_row(j, r), _ => r["basic"].as_bool() == Some(true) } }
 /// The group has a row to show, itself or in a group inside it.
-fn group_shows(gi: usize, all: bool) -> bool {
+fn group_shows(j: &Value, gi: usize, mode: u8) -> bool {
     let sp = spec();
-    sp["rows"].as_array().unwrap().iter().any(|r| r["group"].as_u64() == Some(gi as u64) && (all || r["basic"].as_bool() == Some(true)))
-        || sp["groups"].as_array().unwrap().iter().enumerate().any(|(k, s)| s["parent"].as_u64() == Some(gi as u64) && group_shows(k, all))
+    sp["rows"].as_array().unwrap().iter().any(|r| r["group"].as_u64() == Some(gi as u64) && shown(j, r, mode))
+        || sp["groups"].as_array().unwrap().iter().enumerate().any(|(k, s)| s["parent"].as_u64() == Some(gi as u64) && group_shows(j, k, mode))
+}
+/// Every row of a group and the groups inside it back to the default.
+fn reset_group(j: &mut Value, gi: usize) {
+    let sp = spec();
+    for r in sp["rows"].as_array().unwrap().iter().filter(|r| r["group"].as_u64() == Some(gi as u64)) { set(j, &path_of(r), r["def"].clone()); }
+    for (k, _) in sp["groups"].as_array().unwrap().iter().enumerate().filter(|(_, s)| s["parent"].as_u64() == Some(gi as u64)) { reset_group(j, k); }
 }
 
 fn group(ui: &mut egui::Ui, j: &mut Value, gi: usize) -> bool {
     let sp = spec();
     let g = &sp["groups"][gi];
-    let all = SHOW_ALL.with(|c| c.get()).unwrap_or(false);
-    let rows: Vec<&Value> = sp["rows"].as_array().unwrap().iter().filter(|r| r["group"].as_u64() == Some(gi as u64) && (all || r["basic"].as_bool() == Some(true))).collect();
-    let subs: Vec<usize> = sp["groups"].as_array().unwrap().iter().enumerate().filter(|(k, s)| s["parent"].as_u64() == Some(gi as u64) && group_shows(*k, all)).map(|(k, _)| k).collect();
+    let mode = SHOW.with(|c| c.get()).unwrap_or(0);
+    let rows: Vec<&Value> = sp["rows"].as_array().unwrap().iter().filter(|r| r["group"].as_u64() == Some(gi as u64) && shown(j, r, mode)).collect();
+    let subs: Vec<usize> = sp["groups"].as_array().unwrap().iter().enumerate().filter(|(k, s)| s["parent"].as_u64() == Some(gi as u64) && group_shows(j, *k, mode)).map(|(k, _)| k).collect();
     if rows.is_empty() && subs.is_empty() { return false; }
     let mut changed = false;
     let h = egui::CollapsingHeader::new(g["title"].as_str().unwrap_or("")).id_salt(("simgroup", gi)).default_open(g["open"].as_bool().unwrap_or(false)).show(ui, |ui| {
+        // what the group is for, in a line under its name
+        if let Some(t) = g["tip"].as_str().filter(|t| !t.is_empty()) {
+            let short = t.split(". ").next().unwrap_or(t).trim_end_matches('.');
+            ui.label(egui::RichText::new(format!("{short}.")).small().color(egui::Color32::from_gray(0x98)));
+        }
         if g["id"] == "spray" { changed |= looks(ui, j); }
         egui::Grid::new(("simrows", gi)).num_columns(2).spacing([8.0, 3.0]).show(ui, |ui| {
             for r in &rows { changed |= row(ui, j, r); ui.end_row(); }
         });
         for s in &subs { changed |= group(ui, j, *s); }
     });
-    if let Some(t) = g["tip"].as_str().filter(|t| !t.is_empty()) { h.header_response.on_hover_text(t); }
+    let mut reset = false;
+    let hr = h.header_response;
+    let hr = if let Some(t) = g["tip"].as_str().filter(|t| !t.is_empty()) { hr.on_hover_text(t) } else { hr };
+    hr.context_menu(|ui| { if ui.button("Reset this group").on_hover_text("Every setting in it back to its default").clicked() { reset = true; ui.close(); } });
+    if reset { reset_group(j, gi); changed = true; SIM_CHANGED.with(|c| c.set(true)); }
     changed
 }
 
@@ -191,15 +211,17 @@ pub fn settings(ui: &mut egui::Ui, j: &mut Value, find: &mut String) -> bool {
         ui.add(egui::TextEdit::singleline(find).hint_text("a setting's name").desired_width(200.0));
         if !find.is_empty() && ui.small_button("x").clicked() { find.clear(); }
     });
-    let mut all = SHOW_ALL.with(|c| c.get()).unwrap_or_else(|| crate::bakeui::setting("settingsAll").and_then(|v| v.as_bool()).unwrap_or(false));
-    let before = all;
+    let mut mode = SHOW.with(|c| c.get()).unwrap_or_else(|| crate::bakeui::setting("settingsView").and_then(|v| v.as_u64()).unwrap_or(0) as u8);
+    let before = mode;
+    let n_changed = sp["rows"].as_array().unwrap().iter().filter(|r| changed_row(j, r)).count();
     ui.horizontal(|ui| {
-        ui.selectable_value(&mut all, false, "Simple").on_hover_text("The settings most shots change.");
-        ui.selectable_value(&mut all, true, "All").on_hover_text("Every setting.");
+        ui.selectable_value(&mut mode, 0, "Simple").on_hover_text("The settings most shots change.");
+        ui.selectable_value(&mut mode, 1, "All").on_hover_text("Every setting.");
+        ui.selectable_value(&mut mode, 2, format!("Changed ({n_changed})")).on_hover_text("Only the settings that differ from their defaults: what makes this scene its own.");
     });
-    if all != before { crate::bakeui::set_setting("settingsAll", json!(all)); }
-    SHOW_ALL.with(|c| c.set(Some(all)));
-    ui.label(egui::RichText::new("Right-click a setting to reset or pin it. \u{2022} changes only the picture; the rest simulate again.").small().color(egui::Color32::from_gray(0x90)));
+    if mode != before { crate::bakeui::set_setting("settingsView", json!(mode)); }
+    SHOW.with(|c| c.set(Some(mode)));
+    ui.label(egui::RichText::new("Right-click a setting to reset or pin it, a group's name to reset the group. \u{2022} changes only the picture; the rest simulate again.").small().color(egui::Color32::from_gray(0x90)));
     let pins: Vec<&Value> = sp["rows"].as_array().unwrap().iter().filter(|r| pinned(&path_of(r).join("."))).collect();
     if !pins.is_empty() {
         egui::CollapsingHeader::new("Pinned").default_open(true).show(ui, |ui| {

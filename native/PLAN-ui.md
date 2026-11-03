@@ -44,7 +44,7 @@ Measured on Meteor lake (accuracy.rs res_crown, --ignored). Water above the surf
 
 ## Preset scenes
 
-On hold: Mer is gathering a set of images of what each preset should be. Do not remake them until those arrive; the notes below are only a starting point.
+Mer's images arrived 2026-10-31 and her answers 2026-11-03: the goal is the viewport style (the motion and shapes of the references, drawn as SplashTank draws), the new scenes replace the old ones, they aim for the best result even with long bakes, Claude makes the models, and meshes can be imported. The order: mesh import and model making first, then rapids, wide waterfall, explosion, rocky cove, beach, whale, boat wake, tall falls. After the interface plan is finished. The notes below were the first ideas.
 
 Meteor lake stays the standard: a clear event, a sense of scale, a strong silhouette, whitewater and mist, and a settled ending. Each preset gets the same treatment: real scale, a camera that frames the shot, a moment worth watching in the first two seconds, tuned whitewater and mist, a short note saying what it shows off, and a bake that fits Mer's card at the default spacing. They are built and baked one at a time, and Mer judges them.
 

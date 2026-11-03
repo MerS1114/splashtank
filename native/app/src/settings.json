@@ -6,28 +6,28 @@
    "title": "Resolution",
    "parent": null,
    "open": true,
-   "tip": ""
+   "tip": "How fine the water is. Finer is more detailed and much slower: half the spacing is about eight times the points."
   },
   {
    "id": "phys",
    "title": "Physics",
    "parent": null,
    "open": true,
-   "tip": ""
+   "tip": "How the water itself behaves: gravity, how lively splashes stay, the size of the scene and how the water meets walls."
   },
   {
    "id": "air",
    "title": "Air and wind",
    "parent": null,
    "open": false,
-   "tip": ""
+   "tip": "Wind and gusts acting on the water's surface and the whitewater."
   },
   {
    "id": "white",
    "title": "White water and tearing",
    "parent": null,
    "open": false,
-   "tip": ""
+   "tip": "How churned water is coloured white, and how thin sheets tear into drops."
   },
   {
    "id": "spray",
@@ -139,7 +139,7 @@
    "title": "Speed-ups",
    "parent": null,
    "open": false,
-   "tip": ""
+   "tip": "Ways the solver saves time. They keep the water the same or very nearly; leave them on unless something looks wrong."
   }
  ],
  "rows": [
